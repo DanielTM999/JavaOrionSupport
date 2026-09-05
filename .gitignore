@@ -1,0 +1,79 @@
+# Build Java, Maven e Gradle
+target/
+build/
+out/
+bin/
+.gradle/
+*.class
+dependency-reduced-pom.xml
+
+# Preserva o Maven Wrapper quando ele estiver dentro de um diretorio ignorado
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# Orion IDE
+.orion/
+*.orion
+*.oidx
+
+# IntelliJ IDEA e Android Studio
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Eclipse, STS e Red Hat Java
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.apt_generated_tests/
+.springBeans
+.sts4-cache/
+
+# Visual Studio Code, Cursor e Windsurf
+.vscode/
+*.code-workspace
+.cursor/
+.windsurf/
+
+# Apache NetBeans
+nbproject/private/
+nbbuild/
+dist/
+nbdist/
+.nb-gradle/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# JetBrains Fleet, Zed e outros editores
+.fleet/
+.zed/
+*.swp
+*.swo
+*~
+
+# Kotlin e ferramentas locais
+.kotlin/
+.metals/
+.bloop/
+.scala-build/
+
+# Logs, relatorios locais e dumps da JVM
+*.log
+hs_err_pid*
+replay_pid*
+
+# Arquivos do sistema operacional
+.DS_Store
+Thumbs.db
+Desktop.ini

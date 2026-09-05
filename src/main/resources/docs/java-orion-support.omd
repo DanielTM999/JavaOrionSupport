@@ -1,0 +1,158 @@
+# Java / Spring Orion Support
+
+Suporte ao desenvolvimento **Java** na Orion IDE, com atenção especial a **Spring**.
+A coleção integra IntelliSense pelo **Eclipse JDT Language Server**, build com Maven, Gradle ou
+`javac`, gerenciamento de JDKs, gerenciador de dependências ligado ao Maven Central, e um painel
+Spring que mostra beans, endpoints e o estado da aplicação em execução.
+
+> **Sem configuração manual.** Ao abrir um projeto Java, o plugin descobre o build system, resolve
+> a JDK declarada (baixando-a se preciso) e sobe o IntelliSense sozinho.
+
+| | |
+|---|---|
+| **Coleção** | `java-orion-support` |
+| **Versão** | 1.0.0 |
+| **Linguagens** | Java · properties · YAML · Gradle DSL |
+| **IDE mínima** | 1.0.0 |
+| **Licença** | MIT |
+| **Plugins** | Java / Spring IDE Adapter · Java / Spring Project Wizard |
+| **Build systems** | Maven · Gradle (Groovy e Kotlin DSL) · `javac` puro |
+| **Language server** | Eclipse JDT LS |
+
+---
+
+## Como funciona
+
+1. **Crie** um projeto pelo wizard — inclusive Spring Boot, gerado pelo Spring Initializr — ou abra
+   uma pasta Java existente.
+2. A **JDK** é resolvida a partir do `pom.xml`, do `build.gradle`, do `.sdkmanrc` ou da escolha que
+   você fixou; se não estiver instalada, o plugin baixa uma do Adoptium.
+3. O **Eclipse JDT LS** é provisionado e importa o projeto, junto com os bundles de depuração e de
+   Spring.
+4. **Edite** com completar, hover, navegação, refactor e diagnósticos.
+5. **Compile e execute** com um clique; a saída sai ao vivo, com cores.
+6. Em projeto Spring, o **painel Spring** mostra os beans, as rotas e — com a aplicação no ar — o
+   que de fato subiu.
+
+---
+
+## Editor
+
+- Realce dedicado para **Java** (com *text blocks*, anotações e javadoc distinguidos), **properties**,
+  **YAML**, **Gradle** em Groovy e Kotlin DSL.
+- *Code folding* de blocos `{ }`, comentários e javadoc.
+- **28 snippets** de Java e de Spring (`psvm`, `fori`, `@service`, `@restcontroller`, `@entity`,
+  `@springboottest`…) que respondem instantaneamente, mesmo antes do language server ficar pronto.
+- IntelliSense completo pelo jdtls: completar com auto-import, hover, assinatura de método, ir para
+  definição e implementação, localizar usos, renomear, quick fixes, formatar, inlay hints, semantic
+  tokens, hierarquia de chamadas e símbolos do documento.
+- Diagnósticos vindos de três fontes ao mesmo tempo: o language server, o compilador do último build
+  e as verificações próprias de Spring.
+
+---
+
+## Spring
+
+O suporte a Spring não depende do language server estar pronto: o plugin mantém um **índice próprio**,
+construído em milissegundos ao abrir o projeto e atualizado a cada gravação.
+
+### Painel Spring
+
+- **Beans** — árvore por estereótipo, com o que cada bean injeta e quem injeta ele. Duplo-clique
+  navega para a declaração.
+- **Endpoints** — tabela de rotas (`método`, `caminho`, `controlador`, `método Java`) montada
+  juntando o `@RequestMapping` da classe com o de cada handler. Rotas sem variável de caminho podem
+  ser abertas direto no navegador embutido.
+- **Ao vivo** — com a aplicação rodando, consulta o Actuator e mostra os **beans que realmente
+  subiram**, as **propriedades efetivas com a origem de cada uma** e os **mappings ativos**. É onde
+  se descobre que um `@ConditionalOnProperty` não passou ou que uma variável de ambiente
+  sobrescreveu o `application.yml`.
+
+### No editor
+
+- **Code lens** com a contagem de injeções sobre cada bean.
+- **Diagnósticos que o compilador não dá**:
+  - bean ambíguo sem `@Qualifier` nem `@Primary` — a aplicação não subiria;
+  - dependência circular entre construtores — falha no *startup*, ao contrário do ciclo por campo,
+    que o Spring resolve com proxy e por isso não é reportado;
+  - `@Transactional` em método privado, protegido ou final, que o proxy nunca intercepta;
+  - injeção por campo, como dica.
+- **`application.properties` e `application.yml`**: completar, hover com descrição/tipo/padrão e
+  aviso de propriedade desconhecida ou descontinuada. O catálogo é lido dos
+  `spring-configuration-metadata.json` dos jars do classpath, com um conjunto embutido das chaves mais
+  comuns enquanto o classpath não é resolvido.
+
+---
+
+## Build e execução
+
+- **Maven**, **Gradle** e **`javac` puro** atrás da mesma interface; o wrapper do projeto (`mvnw`,
+  `gradlew`) tem sempre precedência sobre qualquer instalação da máquina.
+- Erros de compilação viram diagnósticos clicáveis, entendendo os formatos do `javac`, do Maven e do
+  Gradle — inclusive com as cores ANSI que o Gradle emite.
+- Execução sob **PTY**: saída ao vivo, cores e `System.in` funcionando.
+- Sete tipos de configuração de execução: **Aplicação**, **Spring Boot**, **JAR**, **Maven**,
+  **Gradle**, **Testes** e **Remote JVM**. Maven aparece só em projetos Maven e Gradle só em
+  projetos Gradle.
+- Campos comuns a todos: módulo, JDK (a do projeto ou qualquer instalação detectada), argumentos,
+  opções da JVM, diretório de trabalho e variáveis de ambiente no formato `NOME=valor`. Caminhos
+  relativos são resolvidos contra o módulo, nunca contra o diretório da IDE.
+- **Build antes de executar** vem ligado em Aplicação e Spring Boot e desligado para JAR externo;
+  Maven, Gradle e Testes já passam pelo build tool no próprio lançamento.
+- **JAR**: executa `java [opções] -jar arquivo.jar [argumentos]` e sugere os artefatos encontrados
+  em `target` e `build/libs`.
+- **Maven/Gradle**: reaproveitam o wrapper, os objetivos/tasks descobertos e o provisionamento já
+  existentes. O Debug fica desabilitado porque depurar o processo do build tool não depura a
+  aplicação produzida — para isso existe o Remote JVM.
+- **Remote JVM**: modo *Attach* (a Orion conecta em uma JVM com `server=y`) e modo *Listen* (a Orion
+  escuta e a JVM com `server=n` conecta, através de um relay JDWP local). Desconectar nunca encerra
+  a JVM remota. O JDWP não tem autenticação nem criptografia e não deve ser exposto à internet.
+- Um projeto recém-aberto já vem com a configuração de execução pronta, apontada para a classe
+  `@SpringBootApplication` ou para o único `main` encontrado.
+- O nome da configuração pertence ao Workbench: renomear para algo como "Minha API Local" é
+  permanente, e o plugin nunca sobrescreve esse nome.
+
+---
+
+## JDKs e dependências
+
+### JDK Manager
+
+Lista as JDKs de `JAVA_HOME`, do `PATH`, das pastas de instalação do sistema, do SDKMAN, do `~/.jdks`
+e as que o próprio plugin baixou. Permite **baixar** uma JDK do Adoptium (8, 11, 17, 21, 25),
+**fixar** qual o projeto usa e **remover** as gerenciadas. Trocar a JDK reinicia o language server.
+
+O jdtls roda numa JDK 21+ mesmo quando o projeto compila em 8: o nível de linguagem vai nas opções de
+inicialização, e não na JVM do servidor.
+
+### Gerenciador de dependências
+
+Busca no Maven Central por nome ou por `grupo:artefato`, mostra as versões publicadas e escreve a
+dependência no `pom.xml` ou no `build.gradle(.kts)` — **preservando a formatação e os comentários do
+arquivo**, porque a escrita é textual e cirúrgica, não uma reserialização. Também remove e atualiza
+para a versão estável mais recente, ignorando snapshots e release candidates.
+
+---
+
+## Criando projetos
+
+| Template | O que gera |
+|---|---|
+| **Spring Boot (Maven)** | Projeto gerado pelo Spring Initializr, com busca de starters |
+| **Spring Boot (Gradle)** | Idem, em Kotlin DSL |
+| Aplicação Maven | `pom.xml`, classe principal, teste JUnit 5 |
+| Biblioteca Maven | Idem, sem classe principal |
+| Aplicação Gradle | `build.gradle.kts` com toolchain e `application` |
+| Multi-módulo Maven | Pom agregador e módulos filhos |
+| Java simples | Pasta com fontes, sem build system |
+
+Todo projeto gerado já compila, já roda e já é reconhecido pelo próprio plugin.
+
+---
+
+## Preferências
+
+Modo do IntelliSense (automático, sempre, ou só snippets) · memória do language server · formatar e
+organizar imports ao salvar · JDK padrão · layout da árvore · build offline · pular testes ao
+executar · parar em todas as exceções · ligar/desligar o suporte a Spring, o code lens e a consulta
+ao Actuator · URL da aplicação.
