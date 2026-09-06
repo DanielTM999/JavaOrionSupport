@@ -36,7 +36,8 @@ public final class RunJdkResolver {
             JdkInstallation project = projectJdk == null ? null : projectJdk.get();
             if (project == null) {
                 throw new IllegalStateException(text("error.noProjectJdk",
-                        "Nenhuma JDK encontrada. Instale uma pelo JDK Manager."));
+                        "Nenhuma JDK encontrada. Baixe uma ou aponte uma instalacao existente"
+                                + " na aba JDKs."));
             }
             return project;
         }

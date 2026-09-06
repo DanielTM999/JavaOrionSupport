@@ -465,23 +465,44 @@ public final class JavaProjectConventions {
 
     public static final String ORION_SETTINGS_DIR = ".orion";
     public static final String ORION_JAVA_PROPERTIES = "java.properties";
-    public static final String KEY_JDK_VERSION = "jdk.version";
 
     private static final Pattern GRADLE_JAVA_VERSION = Pattern.compile(
             "(?:sourceCompatibility|targetCompatibility|JavaLanguageVersion\\.of|JavaVersion\\.VERSION_)"
                     + "\\s*(?:=|\\(|)\\s*[\"']?(?:1[._])?(\\d{1,2})");
     private static final Pattern SDKMANRC_JAVA = Pattern.compile("java\\s*=\\s*(\\d{1,2})");
 
-    public static Integer detectJdkVersion(Path root, JavaProjectKind kind) {
-        Integer pinned = readPinnedJdkVersion(root);
-        if (pinned != null) {
-            return pinned;
+    private static final List<String> MAVEN_JDK_PROPERTIES = List.of(
+            "maven.compiler.release", "maven.compiler.source", "maven.compiler.target",
+            "java.version");
+
+    private static final Pattern POM_PROPERTY_REFERENCE = Pattern.compile("\\$\\{([^}]+)}");
+
+    private static final int MAX_PROPERTY_DEPTH = 5;
+
+    private static String resolvePomProperty(MavenPom pom, String value) {
+        String current = value == null ? "" : value.trim();
+        for (int depth = 0; depth < MAX_PROPERTY_DEPTH; depth++) {
+            Matcher reference = POM_PROPERTY_REFERENCE.matcher(current);
+            if (!reference.matches()) {
+                return current;
+            }
+            String resolved = pom.property(reference.group(1).trim());
+            if (resolved == null || resolved.isBlank()) {
+                return "";
+            }
+            current = resolved.trim();
         }
+        return current;
+    }
+
+    public static Integer detectJdkVersion(Path root, JavaProjectKind kind) {
         if (kind.isMaven()) {
-            Integer major = parseMajor(MavenPom.parse(root.resolve(POM_FILE)).firstProperty(
-                    "maven.compiler.release", "maven.compiler.source", "java.version"));
-            if (major != null) {
-                return major;
+            MavenPom pom = MavenPom.parse(root.resolve(POM_FILE));
+            for (String key : MAVEN_JDK_PROPERTIES) {
+                Integer major = parseMajor(resolvePomProperty(pom, pom.property(key)));
+                if (major != null) {
+                    return major;
+                }
             }
         }
         if (kind.isGradle()) {
@@ -492,20 +513,6 @@ public final class JavaProjectConventions {
         }
         Matcher sdkman = SDKMANRC_JAVA.matcher(readOrEmpty(root.resolve(".sdkmanrc")));
         return sdkman.find() ? parseMajor(sdkman.group(1)) : null;
-    }
-
-    public static Integer readPinnedJdkVersion(Path root) {
-        Path file = root.resolve(ORION_SETTINGS_DIR).resolve(ORION_JAVA_PROPERTIES);
-        if (!Files.isRegularFile(file)) {
-            return null;
-        }
-        java.util.Properties props = new java.util.Properties();
-        try (var in = Files.newInputStream(file)) {
-            props.load(in);
-        } catch (IOException e) {
-            return null;
-        }
-        return parseMajor(props.getProperty(KEY_JDK_VERSION, ""));
     }
 
     public static Path findWrapper(Path root, JavaProjectKind kind) {

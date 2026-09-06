@@ -1,6 +1,7 @@
 package dtm.ide.lsp;
 
 import dtm.ide.sdk.JdkInstallation;
+import dtm.ide.settings.JdtBuildMode;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -12,7 +13,8 @@ final class JdtLsSettings {
     private JdtLsSettings() {
     }
 
-    static Map<String, Object> build(JdkInstallation runtime, List<JdkInstallation> available) {
+    static Map<String, Object> build(JdkInstallation runtime, List<JdkInstallation> available,
+                                     JdtBuildMode buildMode) {
         Map<String, Object> java = new LinkedHashMap<>();
 
         if (runtime != null) {
@@ -60,7 +62,8 @@ final class JdtLsSettings {
                 Map.of("starThreshold", 99, "staticStarThreshold", 99)));
         java.put("contentProvider", Map.of("preferred", "fernflower"));
         java.put("jdt", Map.of("ls", Map.of("lombokSupport", Map.of("enabled", true))));
-        java.put("autobuild", Map.of("enabled", true));
+        java.put("autobuild", Map.of("enabled",
+                buildMode != null && buildMode.isAutobuild()));
         java.put("maxConcurrentBuilds", Math.max(1, Runtime.getRuntime().availableProcessors() / 2));
         java.put("errors", Map.of("incompleteClasspath", Map.of("severity", "warning")));
 

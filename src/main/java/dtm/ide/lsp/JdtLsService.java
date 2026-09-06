@@ -158,6 +158,8 @@ public class JdtLsService {
     };
     private volatile StatusListener workspaceBuildProgress;
     private volatile String maxHeap = "2G";
+    private volatile dtm.ide.settings.JdtBuildMode buildMode =
+            dtm.ide.settings.JdtBuildMode.PROJECT_BUILD;
     private volatile Path lombokAgentJar;
     private volatile boolean springSupport;
     private volatile boolean debugBundleLoaded;
@@ -281,6 +283,10 @@ public class JdtLsService {
 
     public void setMaxHeap(String value) {
         this.maxHeap = value == null || value.isBlank() ? "2G" : value.trim();
+    }
+
+    public void setBuildMode(dtm.ide.settings.JdtBuildMode value) {
+        this.buildMode = value == null ? dtm.ide.settings.JdtBuildMode.PROJECT_BUILD : value;
     }
 
     public void setSpringSupport(boolean enabled) {
@@ -667,7 +673,7 @@ public class JdtLsService {
                 "name", root.getFileName() == null ? "workspace" : root.getFileName().toString())));
         params.put("capabilities", LspClientCapabilities.build(TOKEN_TYPES, TOKEN_MODIFIERS));
         JdkInstallation configuredJdk = preferredProjectJdk == null ? runtime : preferredProjectJdk;
-        effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available());
+        effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode);
         params.put("initializationOptions", initializationOptions(effectiveSettings));
 
         JsonNode result = rpc.request("initialize", params)

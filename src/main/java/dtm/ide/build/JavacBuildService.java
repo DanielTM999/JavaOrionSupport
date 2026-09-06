@@ -87,6 +87,10 @@ public final class JavacBuildService implements BuildSystem {
             command.add(module.outputDir().toString());
             command.add("-encoding");
             command.add("UTF-8");
+            releaseArgument(jdk, request.extraArguments()).ifPresent(release -> {
+                command.add("--release");
+                command.add(release);
+            });
             command.addAll(request.extraArguments());
 
             if (sources.size() > ARGUMENT_FILE_THRESHOLD) {
@@ -168,6 +172,26 @@ public final class JavacBuildService implements BuildSystem {
         int exitCode = runner.run(command, module.root(), Map.of(), line -> emit(output, line));
         return new BuildResult(exitCode, compileResult.diagnostics(),
                 Duration.between(start, Instant.now()), String.join(" ", command));
+    }
+
+    private static final int MIN_RELEASE = 7;
+
+    private Optional<String> releaseArgument(JdkInstallation jdk, List<String> extraArguments) {
+        for (String argument : extraArguments) {
+            if (argument.equals("--release") || argument.startsWith("--release=")
+                    || argument.equals("-source") || argument.equals("-target")) {
+                return Optional.empty();
+            }
+        }
+        Optional<Integer> requested = descriptor == null ? Optional.empty() : descriptor.jdkMajor();
+        if (requested.isEmpty()) {
+            return Optional.empty();
+        }
+        int major = requested.get();
+        if (major < MIN_RELEASE || major > jdk.major()) {
+            return Optional.empty();
+        }
+        return Optional.of(String.valueOf(major));
     }
 
     private static List<Path> collectSources(JavaModule module, boolean includeTests) {

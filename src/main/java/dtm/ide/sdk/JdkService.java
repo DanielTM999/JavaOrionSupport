@@ -1,7 +1,6 @@
 package dtm.ide.sdk;
 
 import dtm.ide.api.extension.Resource;
-import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.request_actions.http.download.core.DownloadObserver;
 import lombok.extern.slf4j.Slf4j;
@@ -31,6 +30,7 @@ public class JdkService {
 
     private static final String SDK_DIR = "sdk";
     private static final String JDK_DIR = "jdk";
+    private static final String SELECTIONS_FILE = "project-jdks.properties";
 
     private final Resource resource;
     private final SdkDownloader downloader;
@@ -93,6 +93,157 @@ public class JdkService {
             }
         }
         return find(defaultMajor).or(this::newest);
+    }
+
+    public enum JdkOutcome {
+        FOUND,
+        INSTALLED,
+        FALLBACK,
+        UNRESOLVED
+    }
+
+    public record JdkResolution(JdkInstallation installation, JdkOutcome outcome,
+                                int requestedMajor, String failure) {
+
+        public boolean resolved() {
+            return installation != null;
+        }
+    }
+
+    public JdkResolution provisionForProject(JavaProjectDescriptor descriptor,
+                                             int defaultMajor,
+                                             DownloadProgressListener progressListener) {
+        int required = descriptor == null
+                ? defaultMajor
+                : descriptor.jdkMajor().orElse(defaultMajor);
+
+        JdkInstallation pinned = pinnedHome(descriptor);
+        if (pinned != null) {
+            return new JdkResolution(pinned,
+                    pinned.major() == required ? JdkOutcome.FOUND : JdkOutcome.FALLBACK,
+                    required, null);
+        }
+
+        Optional<JdkInstallation> exact = find(required);
+        if (exact.isPresent()) {
+            return new JdkResolution(exact.get(), JdkOutcome.FOUND, required, null);
+        }
+
+        String failure = null;
+        int downloadable = downloadableMajorFor(required);
+        if (downloadable > 0) {
+            try {
+                JdkInstallation installed = ensure(downloadable, progressListener);
+                JdkOutcome outcome = installed.major() == required
+                        ? JdkOutcome.INSTALLED
+                        : JdkOutcome.FALLBACK;
+                return new JdkResolution(installed, outcome, required, null);
+            } catch (Exception e) {
+                failure = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                log.warn("Falha ao instalar a JDK {} para o projeto: {}", downloadable, failure);
+            }
+        }
+
+        Optional<JdkInstallation> fallback = resolveForProject(descriptor, defaultMajor);
+        if (fallback.isPresent()) {
+            return new JdkResolution(fallback.get(), JdkOutcome.FALLBACK, required, failure);
+        }
+        return new JdkResolution(null, JdkOutcome.UNRESOLVED, required, failure);
+    }
+
+    public int downloadableMajorFor(int required) {
+        if (DOWNLOADABLE_MAJORS.contains(required)) {
+            return required;
+        }
+        return DOWNLOADABLE_MAJORS.stream()
+                .filter(major -> major >= required)
+                .min(Comparator.naturalOrder())
+                .orElse(-1);
+    }
+
+    public Optional<JdkInstallation> inspectExisting(Path home) {
+        if (home == null) {
+            return Optional.empty();
+        }
+        try {
+            return JdkDetector.inspect(home.toAbsolutePath().normalize(),
+                            JdkInstallation.JdkOrigin.SYSTEM)
+                    .filter(JdkInstallation::isUsable);
+        } catch (Exception e) {
+            log.debug("Falha ao inspecionar a JDK em {}: {}", home, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    private JdkInstallation pinnedHome(JavaProjectDescriptor descriptor) {
+        if (descriptor == null) {
+            return null;
+        }
+        Path home = readSelectedHome(descriptor.root());
+        return home == null ? null : inspectExisting(home).orElse(null);
+    }
+
+    public Path readSelectedHome(Path projectRoot) {
+        if (projectRoot == null) {
+            return null;
+        }
+        String value = selections().getProperty(selectionKey(projectRoot), "").trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+        try {
+            return Path.of(value).toAbsolutePath().normalize();
+        } catch (java.nio.file.InvalidPathException e) {
+            return null;
+        }
+    }
+
+    public void selectHomeForProject(Path projectRoot, Path jdkHome) {
+        if (projectRoot == null) {
+            return;
+        }
+        Path file = selectionsFile();
+        if (file == null) {
+            return;
+        }
+        try {
+            Properties props = selections();
+            if (jdkHome == null) {
+                props.remove(selectionKey(projectRoot));
+            } else {
+                props.setProperty(selectionKey(projectRoot),
+                        jdkHome.toAbsolutePath().normalize().toString());
+            }
+            Files.createDirectories(file.getParent());
+            try (var out = Files.newOutputStream(file)) {
+                props.store(out, "JavaOrionSupport");
+            }
+        } catch (Exception e) {
+            log.debug("Falha ao gravar a JDK escolhida para {}: {}", projectRoot, e.getMessage());
+        }
+    }
+
+    private Properties selections() {
+        Properties props = new Properties();
+        Path file = selectionsFile();
+        if (file == null || !Files.isRegularFile(file)) {
+            return props;
+        }
+        try (var in = Files.newInputStream(file)) {
+            props.load(in);
+        } catch (Exception e) {
+            log.debug("Falha ao ler {}: {}", file, e.getMessage());
+        }
+        return props;
+    }
+
+    private Path selectionsFile() {
+        Path root = sdkRoot();
+        return root == null ? null : root.resolve(SELECTIONS_FILE);
+    }
+
+    private static String selectionKey(Path projectRoot) {
+        return projectRoot.toAbsolutePath().normalize().toString();
     }
 
     public Optional<JdkInstallation> languageServerJdk() {
@@ -160,33 +311,6 @@ public class JdkService {
         SdkDownloader.deleteRecursively(installDir);
         refresh();
         return true;
-    }
-
-    public void pinForProject(Path projectRoot, Integer major) {
-        if (projectRoot == null) {
-            return;
-        }
-        Path file = projectRoot.resolve(JavaProjectConventions.ORION_SETTINGS_DIR)
-                .resolve(JavaProjectConventions.ORION_JAVA_PROPERTIES);
-        try {
-            Properties props = new Properties();
-            if (Files.isRegularFile(file)) {
-                try (var in = Files.newInputStream(file)) {
-                    props.load(in);
-                }
-            }
-            if (major == null) {
-                props.remove(JavaProjectConventions.KEY_JDK_VERSION);
-            } else {
-                props.setProperty(JavaProjectConventions.KEY_JDK_VERSION, String.valueOf(major));
-            }
-            Files.createDirectories(file.getParent());
-            try (var out = Files.newOutputStream(file)) {
-                props.store(out, "JavaOrionSupport");
-            }
-        } catch (Exception e) {
-            log.debug("Falha ao fixar a JDK do projeto {}: {}", projectRoot, e.getMessage());
-        }
     }
 
     public Path managedRoot() {

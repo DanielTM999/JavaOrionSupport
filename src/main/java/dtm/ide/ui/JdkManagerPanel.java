@@ -11,7 +11,9 @@ import dtm.stools.i18n.I18n;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
+import javax.swing.JFileChooser;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
@@ -19,6 +21,7 @@ import javax.swing.SwingUtilities;
 import javax.swing.table.AbstractTableModel;
 import java.awt.BorderLayout;
 import java.awt.FlowLayout;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
@@ -42,6 +45,10 @@ public final class JdkManagerPanel extends JPanel {
         void useForProject(JdkInstallation installation);
 
         boolean remove(JdkInstallation installation);
+
+        void addExisting(Path home, Consumer<String> onDone);
+
+        Integer requiredMajor();
     }
 
     private final Host host;
@@ -56,6 +63,9 @@ public final class JdkManagerPanel extends JPanel {
             JavaIcons.error(JavaIcons.SMALL));
     private final JButton refreshButton = new JButton(text("action.refresh", "Atualizar"),
             JavaIcons.sync(JavaIcons.SMALL));
+    private final JButton addExistingButton = new JButton(
+            text("action.addExisting", "Adicionar JDK do disco..."),
+            JavaIcons.create(JavaIcons.SMALL));
     private final BadgeLabel status = new BadgeLabel(" ", BadgeLabel.Tone.NEUTRAL)
             .setStyle(BadgeLabel.Style.SOFT).setShowDot(true).setSize(BadgeLabel.Size.SM);
 
@@ -67,7 +77,7 @@ public final class JdkManagerPanel extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(pad, pad, pad, pad));
 
         JdkService.DOWNLOADABLE_MAJORS.forEach(versions::addItem);
-        versions.setSelectedItem(JdkService.DEFAULT_MAJOR);
+        versions.setSelectedItem(preferredVersion());
 
         configureTable();
         JScrollPane scroll = UiSupport.plainScroll(new JScrollPane(table));
@@ -86,6 +96,7 @@ public final class JdkManagerPanel extends JPanel {
         add(footer, BorderLayout.SOUTH);
 
         downloadButton.addActionListener(event -> downloadSelectedVersion());
+        addExistingButton.addActionListener(event -> addExistingFromDisk());
         useButton.addActionListener(event -> useSelected());
         removeButton.addActionListener(event -> removeSelected());
         refreshButton.addActionListener(event -> {
@@ -112,9 +123,62 @@ public final class JdkManagerPanel extends JPanel {
         JLabel label = new JLabel(text("label.version", "Versao:"));
         label.setFont(UiTokens.fontSmall());
         label.setForeground(UiTokens.muted());
-        bar.addItem(label).addItem(versions).addItem(downloadButton).addSpacer()
+        bar.addItem(label).addItem(versions).addItem(downloadButton).addItem(addExistingButton)
+                .addSpacer()
                 .addItem(useButton).addItem(removeButton).addItem(refreshButton);
         return bar;
+    }
+
+    private Integer preferredVersion() {
+        Integer required = host.requiredMajor();
+        return required != null && JdkService.DOWNLOADABLE_MAJORS.contains(required)
+                ? required
+                : JdkService.DEFAULT_MAJOR;
+    }
+
+    public void promptForMissingJdk(Integer major, String failure) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> promptForMissingJdk(major, failure));
+            return;
+        }
+        if (major != null && JdkService.DOWNLOADABLE_MAJORS.contains(major)) {
+            versions.setSelectedItem(major);
+        }
+        status.setTone(BadgeLabel.Tone.WARNING);
+        status.setText(failure == null
+                ? text("status.missing", "Nenhuma JDK compativel foi encontrada.")
+                : failure);
+        String detail = major == null
+                ? text("prompt.missingAny", "Nenhuma JDK utilizavel foi encontrada nesta maquina.")
+                : text("prompt.missing", "O projeto precisa da JDK") + " " + major
+                        + " " + text("prompt.missingTail", "e ela nao foi encontrada nesta maquina.");
+        String action = text("prompt.action",
+                "Use \"Baixar JDK\" para instalar agora ou \"Adicionar JDK do disco...\""
+                        + " para apontar uma instalacao existente.");
+        String message = failure == null
+                ? detail + "\n\n" + action
+                : detail + "\n\n" + failure + "\n\n" + action;
+        JOptionPane.showMessageDialog(this, message, text("prompt.title", "JDK necessaria"),
+                JOptionPane.WARNING_MESSAGE);
+    }
+
+    private void addExistingFromDisk() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setDialogTitle(text("chooser.title", "Selecione o diretorio da JDK"));
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        Path home = chooser.getSelectedFile().toPath();
+        status.setTone(BadgeLabel.Tone.INFO);
+        setBusy(true, text("status.inspecting", "Verificando") + " " + home + "...");
+        host.addExisting(home, error -> SwingUtilities.invokeLater(() -> {
+            setBusy(false, error == null
+                    ? text("status.added", "JDK adicionada:") + " " + home
+                    : error);
+            status.setTone(error == null ? BadgeLabel.Tone.SUCCESS : BadgeLabel.Tone.DANGER);
+            reload();
+        }));
     }
 
     private static final int IN_USE_COLUMN = 3;
@@ -126,7 +190,7 @@ public final class JdkManagerPanel extends JPanel {
             return;
         }
         JdkInstallation selected = selectedInstallation();
-        model.setRows(host.installations(), host.projectJdk());
+        model.setRows(host.installations(), host.projectJdk(), host.requiredMajor());
         if (selected != null) {
             selectByHome(selected);
         }
@@ -178,6 +242,7 @@ public final class JdkManagerPanel extends JPanel {
 
     private void setBusy(boolean busy, String message) {
         downloadButton.setEnabled(!busy);
+        addExistingButton.setEnabled(!busy);
         refreshButton.setEnabled(!busy);
         status.setText(message);
         if (busy) {
@@ -221,10 +286,12 @@ public final class JdkManagerPanel extends JPanel {
 
         private List<JdkInstallation> rows = List.of();
         private JdkInstallation inUse;
+        private Integer requiredMajor;
 
-        void setRows(List<JdkInstallation> installations, JdkInstallation inUse) {
+        void setRows(List<JdkInstallation> installations, JdkInstallation inUse, Integer requiredMajor) {
             this.rows = installations == null ? List.of() : new ArrayList<>(installations);
             this.inUse = inUse;
+            this.requiredMajor = requiredMajor;
             fireTableDataChanged();
         }
 
@@ -254,10 +321,18 @@ public final class JdkManagerPanel extends JPanel {
                 case 0 -> row.vendor().displayName();
                 case 1 -> row.fullVersion() + (row.isJdk() ? "" : "  (JRE)");
                 case 2 -> originLabel(row);
-                case 3 -> inUse != null && inUse.home().equals(row.home())
-                        ? text("inUse.yes", "Em uso") : "";
+                case 3 -> usageLabel(row);
                 default -> row.home().toString();
             };
+        }
+
+        private String usageLabel(JdkInstallation row) {
+            if (inUse != null && inUse.home().equals(row.home())) {
+                return text("inUse.yes", "Em uso");
+            }
+            return requiredMajor != null && requiredMajor == row.major()
+                    ? text("inUse.required", "Requerida pelo projeto")
+                    : "";
         }
 
         private static String originLabel(JdkInstallation installation) {

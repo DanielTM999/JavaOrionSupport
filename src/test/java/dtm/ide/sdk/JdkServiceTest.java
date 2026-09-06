@@ -19,6 +19,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdkServiceTest {
@@ -141,37 +142,35 @@ class JdkServiceTest {
     }
 
     @Test
-    void pinWritesAVersionThatTheProjectConventionsReadBack() throws IOException {
+    void thePomDictatesTheVersionAndNothingIsWrittenIntoTheProject() throws IOException {
         Files.writeString(projectRoot.resolve("pom.xml"),
-                "<project><artifactId>demo</artifactId></project>");
+                "<project><properties><maven.compiler.release>17</maven.compiler.release>"
+                        + "</properties><artifactId>demo</artifactId></project>");
 
-        service.pinForProject(projectRoot, 25);
+        service.selectHomeForProject(projectRoot, projectRoot.resolve("jdk-25"));
 
-        assertEquals(25, JavaProjectConventions.describe(projectRoot).jdkMajor().orElseThrow());
+        assertEquals(17, JavaProjectConventions.describe(projectRoot).jdkMajor().orElseThrow());
+        assertFalse(Files.exists(projectRoot.resolve(JavaProjectConventions.ORION_SETTINGS_DIR)),
+                "a escolha de JDK nao pode criar arquivos na pasta do projeto");
     }
 
     @Test
-    void pinWithNullClearsThePreviousChoice() throws IOException {
-        Files.writeString(projectRoot.resolve("pom.xml"),
-                "<project><artifactId>demo</artifactId></project>");
-        service.pinForProject(projectRoot, 25);
+    void theSelectedHomeIsStoredOutsideTheProjectAndReadBack() {
+        Path home = projectRoot.resolve("jdk-25");
 
-        service.pinForProject(projectRoot, null);
+        service.selectHomeForProject(projectRoot, home);
 
-        assertTrue(JavaProjectConventions.describe(projectRoot).jdkMajor().isEmpty());
+        assertEquals(home.toAbsolutePath().normalize(), service.readSelectedHome(projectRoot));
+        assertTrue(Files.exists(service.sdkRoot().resolve("project-jdks.properties")));
     }
 
     @Test
-    void pinPreservesUnrelatedProjectSettings() throws IOException {
-        Path settings = projectRoot.resolve(JavaProjectConventions.ORION_SETTINGS_DIR)
-                .resolve(JavaProjectConventions.ORION_JAVA_PROPERTIES);
-        Files.createDirectories(settings.getParent());
-        Files.writeString(settings, "vmOptions=-Xmx2g\n");
+    void selectingNullClearsThePreviousChoice() {
+        service.selectHomeForProject(projectRoot, projectRoot.resolve("jdk-25"));
 
-        service.pinForProject(projectRoot, 21);
+        service.selectHomeForProject(projectRoot, null);
 
-        assertTrue(Files.readString(settings).contains("vmOptions"));
-        assertTrue(Files.readString(settings).contains("jdk.version=21"));
+        assertNull(service.readSelectedHome(projectRoot));
     }
 
     private boolean hasManaged17() {

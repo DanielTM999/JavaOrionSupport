@@ -54,7 +54,6 @@ import dtm.ide.build.GradleBuildService;
 import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.build.MavenBuildService;
 import dtm.ide.build.BuildSystems;
-import dtm.ide.build.JavaDevelopmentBuildService;
 import dtm.ide.build.BuildToolModel;
 import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.deps.DependencyService;
@@ -100,6 +99,7 @@ import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.LanguageLevelEditor;
 import dtm.ide.project.ProjectLayout;
 import dtm.ide.project.JavaProjectDescriptor;
+import dtm.ide.project.JdtOutputIsolation;
 import dtm.ide.refactor.JavaSafeDeleteScanner;
 import dtm.ide.sdk.BuildToolProvisioner;
 import dtm.ide.sdk.DownloadProgressListener;
@@ -107,6 +107,7 @@ import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
 import dtm.ide.sdk.SdkDownloader;
 import dtm.ide.settings.JavaPluginSettings;
+import dtm.ide.settings.JdtBuildMode;
 import dtm.ide.settings.JavaSettingsPage;
 import dtm.ide.settings.HotReloadMode;
 import dtm.ide.test.JUnitTestDiscovery;
@@ -271,7 +272,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicLong debugHoverTicket = new AtomicLong();
     private final AtomicLong debugLineTicket = new AtomicLong();
     private final AtomicInteger lspProgress = new AtomicInteger();
-    private final AtomicBoolean developmentBuildRunning = new AtomicBoolean();
+    private final AtomicBoolean buildRunning = new AtomicBoolean();
     private final AtomicBoolean debugActive = new AtomicBoolean();
     private final Map<RunConfigurationKey, RunProcessHandle> runningProcesses =
             new ConcurrentHashMap<>();
@@ -295,6 +296,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile IdeProjectContext projectContext;
     private volatile JdkService jdkService;
     private volatile JdkInstallation projectJdk;
+    private volatile JdtBuildMode appliedBuildMode;
     private volatile JdkManagerPanel jdkManagerPanel;
     private static final String STRUCTURE_TAB_ID = "javaProjectStructure";
 
@@ -314,7 +316,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JdtLsService jdtLs;
     private volatile LombokAgentResolver lombokResolver;
     private volatile BuildSystem buildSystem;
-    private volatile JavaDevelopmentBuildService developmentBuildService;
     private volatile DependencyService dependencyService;
     private volatile DependencyManagerPanel dependencyPanel;
     private volatile JavaRunSupport runSupport;
@@ -397,7 +398,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         projectContext = null;
         projectJdk = null;
         buildSystem = null;
-        developmentBuildService = null;
         dependencyService = null;
         runSupport = null;
         runBuildProgress.set(null);
@@ -446,7 +446,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         long ticket = lifecycle.incrementAndGet();
         buildSystem = null;
-        developmentBuildService = null;
         dependencyService = null;
         lastBuildDiagnostics.clear();
         liveLspProblems.clear();
@@ -587,19 +586,38 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         background.submit(() -> {
-            Optional<JdkInstallation> resolved = ensureJdkService()
-                    .resolveForProject(current, settings().getDefaultJdkVersion());
+            JdkService.JdkResolution resolution = ensureJdkService()
+                    .provisionForProject(current, settings().getDefaultJdkVersion(), progressListener());
             if (!current(ticket, root)) {
                 return;
             }
-            projectJdk = resolved.orElse(null);
-            if (resolved.isEmpty()) {
+            projectJdk = resolution.installation();
+            if (!resolution.resolved()) {
                 hideProgress(LSP_PROGRESS_ID);
                 setStatusBarText(text("status.noJdk",
                         "Java: nenhuma JDK encontrada - instale uma pelo JDK Manager"));
+                promptForProjectJdk(ticket, root, resolution);
                 return;
             }
-            startLanguageServer(ticket, root, resolved.get());
+            if (resolution.outcome() == JdkService.JdkOutcome.FALLBACK) {
+                setStatusBarText("Java: " + resolution.installation().displayName() + " - "
+                        + text("status.jdkMismatch", "o projeto pede a JDK")
+                        + " " + resolution.requestedMajor());
+            }
+            startLanguageServer(ticket, root, resolution.installation());
+        });
+    }
+
+    private void promptForProjectJdk(long ticket, Path root, JdkService.JdkResolution resolution) {
+        SwingUtilities.invokeLater(() -> {
+            if (!current(ticket, root)) {
+                return;
+            }
+            openJdkManager();
+            JdkManagerPanel panel = jdkManagerPanel;
+            if (panel != null) {
+                panel.promptForMissingJdk(resolution.requestedMajor(), resolution.failure());
+            }
         });
     }
 
@@ -614,6 +632,14 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         JavaProjectDescriptor current = descriptor;
+        JdtBuildMode buildMode = settings().getJdtBuildMode();
+        lsp.setBuildMode(buildMode);
+        appliedBuildMode = buildMode;
+        if (buildMode.isAutobuild() && JdtOutputIsolation.ensure(current)) {
+            setStatusBarText(text("status.jdtOutputIsolated",
+                    "Java: saida do autobuild isolada em") + " "
+                    + JdtOutputIsolation.BUILD_DIRECTORY);
+        }
         lsp.setSpringSupport(current != null && current.spring() && settings().isSpringSupport());
         applyLombokAgent(lsp, current);
         String loading = text("status.startingLsp", "Java: carregando IntelliSense...");
@@ -4338,8 +4364,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private synchronized JavaHotReloadService hotReloadService() {
         if (hotReloadService == null) {
             hotReloadService = new JavaHotReloadService(() -> descriptor,
-                    this::ensureBuildSystem, () -> debugSession, () -> debugModule,
-                    this::ensureDevelopmentBuildService);
+                    this::ensureBuildSystem, () -> debugSession, () -> debugModule);
         }
         return hotReloadService;
     }
@@ -4374,7 +4399,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                 () -> descriptor,
                 this::getProjectJdk,
                 this::ensureBuildSystem,
-                this::ensureDevelopmentBuildService,
                 line -> {
                     BuildProgressTracker progress = runBuildProgress.get();
                     if (progress != null) {
@@ -4428,13 +4452,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                 return requestRunConfigurationExecution(configurationId, debug);
             }
         };
-    }
-
-    private synchronized JavaDevelopmentBuildService ensureDevelopmentBuildService() {
-        if (developmentBuildService == null) {
-            developmentBuildService = new JavaDevelopmentBuildService(() -> jdtLs);
-        }
-        return developmentBuildService;
     }
 
     private JavaModule resolveDebugModule(RunConfigurationData configuration) {
@@ -5040,7 +5057,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (root == null || build == null) {
             return;
         }
-        if (build.isRunning() || !developmentBuildRunning.compareAndSet(false, true)) {
+        if (build.isRunning() || !buildRunning.compareAndSet(false, true)) {
             setStatusBarText(text("status.buildRunning", "Java: ja existe um build em andamento"));
             return;
         }
@@ -5068,36 +5085,13 @@ public class JavaIdeAdapter extends IdeAdapter {
                 BuildProgressTracker.Update completed = progress.completed();
                 updateProgress(BUILD_PROGRESS_ID, completed.label(), completed.percent());
                 hideProgress(BUILD_PROGRESS_ID);
-                developmentBuildRunning.set(false);
+                buildRunning.set(false);
             }
         });
     }
 
     private BuildResult executeBuild(BuildSystem.BuildAction action, BuildSystem build,
                                      JavaModule module, Consumer<String> output) {
-        JavaProjectDescriptor current = descriptor;
-        boolean multiModule = current != null && current.kind().isMultiModule();
-        if (module == null && !multiModule && (action == BuildSystem.BuildAction.COMPILE
-                || action == BuildSystem.BuildAction.REBUILD)) {
-            JavaDevelopmentBuildService.Result incremental = ensureDevelopmentBuildService().build(
-                    null, action == BuildSystem.BuildAction.REBUILD,
-                    output, (message, percent) -> {
-                        if (output instanceof BuildProgressTracker tracker) {
-                            tracker.acceptProgress(message, percent);
-                        }
-                    });
-            if (incremental.successful()) {
-                return new BuildResult(0, List.of(), incremental.duration(),
-                        "JDT incremental " + action.name().toLowerCase(Locale.ROOT));
-            }
-            if (!incremental.shouldFallback()) {
-                return new BuildResult(1, List.of(new BuildDiagnostic(null, 0, 0,
-                        DiagnosticSeverity.ERROR, incremental.message(), "JDT incremental")),
-                        incremental.duration(),
-                        "JDT incremental: " + incremental.message());
-            }
-            output.accept("Fallback: usando " + build.name());
-        }
         JavaPluginSettings preferences = settings();
         BuildRequest request = BuildRequest.of(action, module)
                 .withOffline(preferences.isBuildOffline());
@@ -5433,7 +5427,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             background.submit(() -> {
                 if (jdk != null) {
-                    ensureJdkService().pinForProject(root, jdk.major());
+                    ensureJdkService().selectHomeForProject(root, jdk.home());
                     projectJdk = jdk;
                 }
                 if (level != null) {
@@ -5492,7 +5486,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void download(int major, java.util.function.Consumer<String> onDone) {
             background.submit(() -> {
                 try {
-                    ensureJdkService().install(major, progressListener());
+                    JdkInstallation installed = ensureJdkService().install(major, progressListener());
+                    adoptIfRequired(installed);
                     onDone.accept(null);
                 } catch (Exception e) {
                     log.warn("Falha ao instalar a JDK {}", major, e);
@@ -5500,6 +5495,47 @@ public class JavaIdeAdapter extends IdeAdapter {
                             + rootMessage(e));
                 }
             });
+        }
+
+        @Override
+        public void addExisting(Path home, java.util.function.Consumer<String> onDone) {
+            background.submit(() -> {
+                try {
+                    Optional<JdkInstallation> inspected = ensureJdkService().inspectExisting(home);
+                    if (inspected.isEmpty()) {
+                        onDone.accept(text("status.notAJdk",
+                                "O diretorio selecionado nao contem uma JDK utilizavel:") + " " + home);
+                        return;
+                    }
+                    JdkInstallation installation = inspected.get();
+                    ensureJdkService().refresh();
+                    useForProject(installation);
+                    onDone.accept(null);
+                } catch (Exception e) {
+                    log.warn("Falha ao adicionar a JDK {}", home, e);
+                    onDone.accept(text("status.addFailed", "Falha ao adicionar a JDK") + ": "
+                            + rootMessage(e));
+                }
+            });
+        }
+
+        @Override
+        public Integer requiredMajor() {
+            JavaProjectDescriptor current = descriptor;
+            if (current == null) {
+                return settings().getDefaultJdkVersion();
+            }
+            return current.jdkMajor().orElseGet(() -> settings().getDefaultJdkVersion());
+        }
+
+        private void adoptIfRequired(JdkInstallation installed) {
+            Integer required = requiredMajor();
+            if (installed == null || projectRoot == null) {
+                return;
+            }
+            if (projectJdk == null || (required != null && required == installed.major())) {
+                useForProject(installed);
+            }
         }
 
         @Override
@@ -5511,7 +5547,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             long ticket = lifecycle.get();
             background.submit(() -> {
                 try {
-                    ensureJdkService().pinForProject(root, installation.major());
+                    ensureJdkService().selectHomeForProject(root, installation.home());
                     JavaProjectDescriptor described = timed("describe(useForProject)",
                             () -> JavaProjectConventions.describe(root));
                     if (!current(ticket, root)) {
@@ -5589,6 +5625,23 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (root != null) {
             requestRefreshCodeLenses(root);
         }
+        applyBuildModeChange(current.getJdtBuildMode(), root);
+    }
+
+    private void applyBuildModeChange(JdtBuildMode mode, Path root) {
+        if (mode == appliedBuildMode) {
+            return;
+        }
+        appliedBuildMode = mode;
+        JdtLsService lsp = jdtLs;
+        if (root == null || lsp == null) {
+            return;
+        }
+        background.submit(() -> {
+            lsp.stop();
+            hideProgress(LSP_PROGRESS_ID);
+            resolveProjectJdk(lifecycle.incrementAndGet(), root);
+        });
     }
 
     private JavaPluginSettings settings() {

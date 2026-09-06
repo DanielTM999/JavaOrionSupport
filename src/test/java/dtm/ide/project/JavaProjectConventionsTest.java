@@ -327,7 +327,37 @@ class JavaProjectConventionsTest {
     }
 
     @Test
-    void pinnedJdkOverridesTheBuildFile() throws IOException {
+    void resolvesJdkVersionThroughPomPropertyReferences() throws IOException {
+        write(root.resolve("pom.xml"), """
+                <project>
+                  <artifactId>demo</artifactId>
+                  <properties>
+                    <java.version>25</java.version>
+                    <maven.compiler.source>${java.version}</maven.compiler.source>
+                    <maven.compiler.target>${java.version}</maven.compiler.target>
+                  </properties>
+                </project>
+                """);
+
+        assertEquals(25, JavaProjectConventions.describe(root).jdkMajor().orElseThrow());
+    }
+
+    @Test
+    void unresolvablePropertyReferenceDoesNotYieldAVersion() throws IOException {
+        write(root.resolve("pom.xml"), """
+                <project>
+                  <artifactId>demo</artifactId>
+                  <properties>
+                    <maven.compiler.source>${missing.version}</maven.compiler.source>
+                  </properties>
+                </project>
+                """);
+
+        assertTrue(JavaProjectConventions.describe(root).jdkMajor().isEmpty());
+    }
+
+    @Test
+    void theBuildFileDictatesTheJdkEvenWithAnOldPinOnDisk() throws IOException {
         write(root.resolve("pom.xml"), """
                 <project>
                   <artifactId>demo</artifactId>
@@ -336,7 +366,7 @@ class JavaProjectConventionsTest {
                 """);
         write(root.resolve(".orion/java.properties"), "jdk.version=25");
 
-        assertEquals(25, JavaProjectConventions.describe(root).jdkMajor().orElseThrow());
+        assertEquals(17, JavaProjectConventions.describe(root).jdkMajor().orElseThrow());
     }
 
     @Test

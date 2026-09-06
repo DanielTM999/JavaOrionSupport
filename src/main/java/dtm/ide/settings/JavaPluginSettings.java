@@ -30,6 +30,7 @@ public final class JavaPluginSettings {
     private static final String KEY_SPRING_LIVE = "springLive";
     private static final String KEY_SPRING_BASE_URL = "springBaseUrl";
     private static final String KEY_SAFE_DELETE = "safeDelete";
+    private static final String KEY_JDT_BUILD_MODE = "jdtBuildMode";
 
     public static final String DEFAULT_SPRING_BASE_URL = "http://localhost:8080";
     public static final String DEFAULT_LANGUAGE_SERVER_MEMORY = "2G";
@@ -52,6 +53,7 @@ public final class JavaPluginSettings {
     private boolean springLive = true;
     private String springBaseUrl = DEFAULT_SPRING_BASE_URL;
     private boolean safeDelete = true;
+    private JdtBuildMode jdtBuildMode = JdtBuildMode.PROJECT_BUILD;
 
     public JavaPluginSettings(Path settingsDirectory) {
         this.settingsFile = settingsDirectory == null ? null : settingsDirectory.resolve(FILE_NAME);
@@ -129,6 +131,14 @@ public final class JavaPluginSettings {
 
     public void setSafeDelete(boolean value) {
         this.safeDelete = value;
+    }
+
+    public JdtBuildMode getJdtBuildMode() {
+        return jdtBuildMode == null ? JdtBuildMode.PROJECT_BUILD : jdtBuildMode;
+    }
+
+    public void setJdtBuildMode(JdtBuildMode value) {
+        this.jdtBuildMode = value == null ? JdtBuildMode.PROJECT_BUILD : value;
     }
 
     public boolean isSpringSupport() {
@@ -216,6 +226,7 @@ public final class JavaPluginSettings {
         springLive = true;
         springBaseUrl = DEFAULT_SPRING_BASE_URL;
         safeDelete = true;
+        jdtBuildMode = JdtBuildMode.PROJECT_BUILD;
     }
 
     public void load() {
@@ -242,6 +253,8 @@ public final class JavaPluginSettings {
                 HotReloadMode.MANUAL.key()));
         springSupport = bool(properties, KEY_SPRING_SUPPORT, true);
         safeDelete = bool(properties, KEY_SAFE_DELETE, true);
+        jdtBuildMode = JdtBuildMode.fromKey(properties.getProperty(KEY_JDT_BUILD_MODE,
+                JdtBuildMode.PROJECT_BUILD.key()));
         lombokSupport = bool(properties, KEY_LOMBOK_SUPPORT, true);
         todoMarkers = splitMarkers(properties.getProperty(KEY_TODO_MARKERS, ""));
         buildFileCompletion = bool(properties, KEY_BUILD_FILE_COMPLETION, true);
@@ -265,6 +278,7 @@ public final class JavaPluginSettings {
         properties.setProperty(KEY_HOT_RELOAD_MODE, hotReloadMode.key());
         properties.setProperty(KEY_SPRING_SUPPORT, Boolean.toString(springSupport));
         properties.setProperty(KEY_SAFE_DELETE, Boolean.toString(safeDelete));
+        properties.setProperty(KEY_JDT_BUILD_MODE, getJdtBuildMode().key());
         properties.setProperty(KEY_LOMBOK_SUPPORT, Boolean.toString(lombokSupport));
         properties.setProperty(KEY_TODO_MARKERS, String.join(",", todoMarkers));
         properties.setProperty(KEY_BUILD_FILE_COMPLETION, Boolean.toString(buildFileCompletion));

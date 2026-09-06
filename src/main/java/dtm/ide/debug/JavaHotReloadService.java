@@ -3,7 +3,6 @@ package dtm.ide.debug;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
-import dtm.ide.build.JavaDevelopmentBuildService;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.project.JavaModule;
 
@@ -25,25 +24,15 @@ public final class JavaHotReloadService {
     private final Supplier<BuildSystem> buildSystem;
     private final Supplier<JavaDebugSession> debugSession;
     private final Supplier<JavaModule> debugModule;
-    private final Supplier<JavaDevelopmentBuildService> developmentBuild;
 
     public JavaHotReloadService(Supplier<JavaProjectDescriptor> descriptor,
                                 Supplier<BuildSystem> buildSystem,
                                 Supplier<JavaDebugSession> debugSession,
                                 Supplier<JavaModule> debugModule) {
-        this(descriptor, buildSystem, debugSession, debugModule, () -> null);
-    }
-
-    public JavaHotReloadService(Supplier<JavaProjectDescriptor> descriptor,
-                                Supplier<BuildSystem> buildSystem,
-                                Supplier<JavaDebugSession> debugSession,
-                                Supplier<JavaModule> debugModule,
-                                Supplier<JavaDevelopmentBuildService> developmentBuild) {
         this.descriptor = descriptor;
         this.buildSystem = buildSystem;
         this.debugSession = debugSession;
         this.debugModule = debugModule;
-        this.developmentBuild = developmentBuild;
     }
 
     public Result reload(Consumer<String> output) {
@@ -57,18 +46,6 @@ public final class JavaHotReloadService {
             return Result.BUILD_FAILED;
         }
         JavaModule module = debugModule.get();
-        JavaDevelopmentBuildService development = developmentBuild == null
-                ? null : developmentBuild.get();
-        if (development != null) {
-            JavaDevelopmentBuildService.Result fast = development.build(
-                    module == null ? project.rootModule() : module, false, output);
-            if (fast.successful()) {
-                return redefine(session);
-            }
-            if (!fast.shouldFallback()) {
-                return Result.BUILD_FAILED;
-            }
-        }
         BuildResult result = build.execute(BuildRequest.of(BuildSystem.BuildAction.COMPILE,
                 module == null ? project.rootModule() : module).withSkipTests(true), output);
         if (!result.successful()) {

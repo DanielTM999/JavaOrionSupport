@@ -7,7 +7,6 @@ import dtm.ide.build.BuildCommand;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
-import dtm.ide.build.JavaDevelopmentBuildService;
 import dtm.ide.run.chain.RunChainExecutor;
 import dtm.ide.run.chain.RunChainHost;
 import dtm.ide.run.chain.RunChainStep;
@@ -61,7 +60,6 @@ public class JavaRunSupport {
     private final Supplier<JavaProjectDescriptor> descriptorSupplier;
     private final Supplier<JdkInstallation> jdkSupplier;
     private final Supplier<BuildSystem> buildSupplier;
-    private final Supplier<JavaDevelopmentBuildService> developmentBuildSupplier;
     private final Consumer<String> output;
     private volatile Supplier<RunChainHost> chainHost = () -> RunChainHost.EMPTY;
     private volatile Consumer<BuildResult> buildResultListener = result -> {
@@ -71,18 +69,9 @@ public class JavaRunSupport {
                           Supplier<JdkInstallation> jdkSupplier,
                           Supplier<BuildSystem> buildSupplier,
                           Consumer<String> output) {
-        this(descriptorSupplier, jdkSupplier, buildSupplier, () -> null, output);
-    }
-
-    public JavaRunSupport(Supplier<JavaProjectDescriptor> descriptorSupplier,
-                          Supplier<JdkInstallation> jdkSupplier,
-                          Supplier<BuildSystem> buildSupplier,
-                          Supplier<JavaDevelopmentBuildService> developmentBuildSupplier,
-                          Consumer<String> output) {
         this.descriptorSupplier = descriptorSupplier;
         this.jdkSupplier = jdkSupplier;
         this.buildSupplier = buildSupplier;
-        this.developmentBuildSupplier = developmentBuildSupplier;
         this.output = output == null ? line -> {
         } : output;
     }
@@ -421,23 +410,6 @@ public class JavaRunSupport {
 
     private Optional<String> compile(RunConfigurationData configuration) {
         JavaModule module = moduleOf(configuration).orElse(null);
-        JavaDevelopmentBuildService development = developmentBuildSupplier == null
-                ? null : developmentBuildSupplier.get();
-        if (development != null) {
-            JavaDevelopmentBuildService.Result result = development.build(module, false, output);
-            if (result.successful()) {
-                buildResultListener.accept(new BuildResult(0, List.of(), result.duration(),
-                        "JDT incremental compile"));
-                return Optional.empty();
-            }
-            if (!result.shouldFallback()) {
-                buildResultListener.accept(new BuildResult(1, List.of(), result.duration(),
-                        "JDT incremental: " + result.message()));
-                return Optional.of(text("error.buildFailed",
-                        "O build falhou; a execucao foi cancelada.") + " " + result.message());
-            }
-            output.accept("Fallback: usando o build oficial do projeto");
-        }
         BuildSystem build = buildSupplier.get();
         if (build == null) {
             return Optional.empty();
@@ -467,15 +439,6 @@ public class JavaRunSupport {
     }
 
     private String classpathOf(JavaModule module, boolean test) {
-        if (!test) {
-            JavaDevelopmentBuildService development = developmentBuildSupplier == null
-                    ? null : developmentBuildSupplier.get();
-            Optional<String> incrementalClasspath = development == null
-                    ? Optional.empty() : development.runtimeClasspath(module);
-            if (incrementalClasspath.isPresent() && !incrementalClasspath.get().isBlank()) {
-                return incrementalClasspath.get();
-            }
-        }
         BuildSystem build = buildSupplier.get();
         Optional<String> classpath = build == null
                 ? Optional.empty()

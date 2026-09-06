@@ -202,7 +202,23 @@ public final class JdkDetector {
             return home;
         }
         Path macHome = home.resolve("Contents").resolve("Home");
-        return hasJavaExecutable(macHome) ? macHome : null;
+        if (hasJavaExecutable(macHome)) {
+            return macHome;
+        }
+        return nestedHome(home);
+    }
+
+    private static Path nestedHome(Path home) {
+        for (Path child : childrenOf(home)) {
+            if (hasJavaExecutable(child)) {
+                return child;
+            }
+            Path macChild = child.resolve("Contents").resolve("Home");
+            if (hasJavaExecutable(macChild)) {
+                return macChild;
+            }
+        }
+        return null;
     }
 
     private static boolean hasJavaExecutable(Path home) {

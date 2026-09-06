@@ -39,6 +39,8 @@ public final class JavaSettingsPage implements PluginSettingsPage {
             new JComboBox<>(JDK_OPTIONS.toArray(Integer[]::new));
     private final JComboBox<HotReloadMode> hotReloadMode =
             new JComboBox<>(HotReloadMode.values());
+    private final JComboBox<JdtBuildMode> jdtBuildMode =
+            new JComboBox<>(JdtBuildMode.values());
 
     private final JCheckBox formatOnSave =
             new JCheckBox(text("field.formatOnSave", "Formatar ao salvar"));
@@ -98,6 +100,7 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         settings.setBuildOffline(buildOffline.isSelected());
         settings.setSkipTestsOnRun(skipTestsOnRun.isSelected());
         settings.setHotReloadMode((HotReloadMode) hotReloadMode.getSelectedItem());
+        settings.setJdtBuildMode((JdtBuildMode) jdtBuildMode.getSelectedItem());
 
         settings.setLombokSupport(lombokSupport.isSelected());
         settings.setBuildFileCompletion(buildFileCompletion.isSelected());
@@ -140,7 +143,8 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         content.add(section(text("section.buildRun", "Build e execucao"),
                 buildOffline,
                 skipTestsOnRun,
-                labeled(text("field.hotReload", "Hot reload:"), hotReloadMode)));
+                labeled(text("field.hotReload", "Hot reload:"), hotReloadMode),
+                labeled(text("field.jdtBuildMode", "Erros do projeto:"), jdtBuildMode)));
 
         content.add(section(text("section.spring", "Spring"),
                 springSupport,
@@ -203,6 +207,7 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         buildOffline.setSelected(settings.isBuildOffline());
         skipTestsOnRun.setSelected(settings.isSkipTestsOnRun());
         hotReloadMode.setSelectedItem(settings.getHotReloadMode());
+        jdtBuildMode.setSelectedItem(settings.getJdtBuildMode());
 
         springSupport.setSelected(settings.isSpringSupport());
         springCodeLens.setSelected(settings.isSpringCodeLens());
