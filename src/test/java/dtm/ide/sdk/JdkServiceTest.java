@@ -173,6 +173,41 @@ class JdkServiceTest {
         assertNull(service.readSelectedHome(projectRoot));
     }
 
+    @Test
+    void prefersTheJdkTheEnvironmentAlreadyUsesWhenTheMajorMatches() {
+        JdkService jdks = withInstalled(
+                installation(25, "25.0.4.1", JdkInstallation.JdkOrigin.MANAGED),
+                installation(25, "25.0.3", JdkInstallation.JdkOrigin.JAVA_HOME));
+
+        JdkInstallation chosen = jdks.resolveForProject(descriptor(25)).orElseThrow();
+
+        assertEquals("25.0.3", chosen.fullVersion());
+    }
+
+    @Test
+    void honoursTheExactVersionDeclaredByTheProject() throws IOException {
+        Files.writeString(projectRoot.resolve(".java-version"), "temurin-25.0.4.1\n");
+        JdkService jdks = withInstalled(
+                installation(25, "25.0.4.1", JdkInstallation.JdkOrigin.MANAGED),
+                installation(25, "25.0.3", JdkInstallation.JdkOrigin.JAVA_HOME));
+
+        JdkInstallation chosen = jdks.resolveForProject(descriptor(25)).orElseThrow();
+
+        assertEquals("25.0.4.1", chosen.fullVersion());
+    }
+
+    @Test
+    void ignoresADeclaredVersionThatIsNotInstalled() throws IOException {
+        Files.writeString(projectRoot.resolve(".java-version"), "25.0.9\n");
+        JdkService jdks = withInstalled(
+                installation(25, "25.0.4.1", JdkInstallation.JdkOrigin.MANAGED),
+                installation(25, "25.0.3", JdkInstallation.JdkOrigin.JAVA_HOME));
+
+        JdkInstallation chosen = jdks.resolveForProject(descriptor(25)).orElseThrow();
+
+        assertEquals("25.0.3", chosen.fullVersion());
+    }
+
     private boolean hasManaged17() {
         return service.available().stream()
                 .anyMatch(installation -> installation.isManaged() && installation.major() == 17);
@@ -197,6 +232,17 @@ class JdkServiceTest {
         }
         return new JdkInstallation(home, JdkVendor.TEMURIN, major, major + ".0.1",
                 JdkInstallation.JdkOrigin.SYSTEM);
+    }
+
+    private JdkInstallation installation(int major, String fullVersion,
+                                         JdkInstallation.JdkOrigin origin) {
+        Path home = resourceRoot.resolve("installed").resolve("jdk-" + fullVersion + "-" + origin);
+        try {
+            JdkDetectorTest.fakeJdk(home, "JAVA_VERSION=\"" + fullVersion + "\"\n");
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
+        return new JdkInstallation(home, JdkVendor.TEMURIN, major, fullVersion, origin);
     }
 
     private JavaProjectDescriptor descriptor(Integer jdkMajor) {

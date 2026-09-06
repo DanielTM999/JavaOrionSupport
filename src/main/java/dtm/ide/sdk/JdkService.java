@@ -60,8 +60,45 @@ public class JdkService {
         return available().stream()
                 .filter(installation -> installation.major() == major)
                 .filter(JdkInstallation::isUsable)
-                .max(Comparator.comparing(JdkInstallation::isJdk)
-                        .thenComparing(JdkInstallation::fullVersion));
+                .max(preference());
+    }
+
+    public Optional<JdkInstallation> findExact(String version) {
+        String requested = ProjectJdkPreference.normalize(version);
+        if (requested == null || requested.isBlank()) {
+            return Optional.empty();
+        }
+        return available().stream()
+                .filter(JdkInstallation::isUsable)
+                .filter(installation -> ProjectJdkPreference.matches(installation.fullVersion(), requested))
+                .max(preference());
+    }
+
+    private static Comparator<JdkInstallation> preference() {
+        return Comparator.comparing(JdkInstallation::isJdk)
+                .thenComparing(JdkService::followsEnvironment)
+                .thenComparing(JdkInstallation::fullVersion);
+    }
+
+    private static boolean followsEnvironment(JdkInstallation installation) {
+        return installation.origin() == JdkInstallation.JdkOrigin.JAVA_HOME
+                || installation.origin() == JdkInstallation.JdkOrigin.PATH;
+    }
+
+    private Optional<JdkInstallation> declaredByProject(JavaProjectDescriptor descriptor) {
+        if (descriptor == null) {
+            return Optional.empty();
+        }
+        Optional<String> declared = ProjectJdkPreference.exactVersion(descriptor.root());
+        if (declared.isEmpty()) {
+            return Optional.empty();
+        }
+        Optional<JdkInstallation> match = findExact(declared.get());
+        if (match.isEmpty()) {
+            log.info("O projeto declara a JDK {}, que nao esta instalada; seguindo pela versao maior.",
+                    declared.get());
+        }
+        return match;
     }
 
     public Optional<JdkInstallation> newest() {
@@ -76,6 +113,10 @@ public class JdkService {
 
     public Optional<JdkInstallation> resolveForProject(JavaProjectDescriptor descriptor,
                                                        int defaultMajor) {
+        Optional<JdkInstallation> declared = declaredByProject(descriptor);
+        if (declared.isPresent()) {
+            return declared;
+        }
         Optional<Integer> requested = descriptor == null ? Optional.empty() : descriptor.jdkMajor();
         if (requested.isPresent()) {
             Optional<JdkInstallation> exact = find(requested.get());
@@ -121,6 +162,14 @@ public class JdkService {
         if (pinned != null) {
             return new JdkResolution(pinned,
                     pinned.major() == required ? JdkOutcome.FOUND : JdkOutcome.FALLBACK,
+                    required, null);
+        }
+
+        Optional<JdkInstallation> declared = declaredByProject(descriptor);
+        if (declared.isPresent()) {
+            JdkInstallation installation = declared.get();
+            return new JdkResolution(installation,
+                    installation.major() == required ? JdkOutcome.FOUND : JdkOutcome.FALLBACK,
                     required, null);
         }
 
