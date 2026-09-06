@@ -33,7 +33,7 @@ public final class JavaIcons {
     }
 
     public static Icon gradle(int size) {
-        return plain("/imgs/grandle.png", size);
+        return tinted("/imgs/grandle.png", size);
     }
 
     public static Icon java(int size) {
