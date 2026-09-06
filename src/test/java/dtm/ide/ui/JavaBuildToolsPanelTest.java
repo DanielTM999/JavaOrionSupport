@@ -2,11 +2,14 @@ package dtm.ide.ui;
 
 import dtm.ide.build.BuildToolModel;
 import dtm.stools.component.inputfields.textfield.MaskedTextField;
+import dtm.stools.component.tree.TreePopupContext;
 import dtm.stools.component.tree.TreeView;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import javax.swing.JButton;
+import javax.swing.JMenuItem;
+import javax.swing.JPopupMenu;
 import javax.swing.SwingUtilities;
 import javax.swing.tree.TreeNode;
 import java.awt.Component;
@@ -186,6 +189,86 @@ class JavaBuildToolsPanelTest {
         });
 
         assertEquals(List.of("clean", "compile", "install"), executed.get());
+    }
+
+    @Test
+    void theContextMenuRunsTheWholeSelectionJustLikeThePlayButton() throws Exception {
+        AtomicReference<String> executed = new AtomicReference<>();
+        BuildToolModel model = modelWithCommands("demo", "clean", "compile", "install");
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(recordingHost(model, executed)));
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 5);
+
+        onEdtRun(() -> {
+            List<dtm.stools.component.tree.TreeNode<BuildToolModel.Node>> goals = goalNodes(tree);
+            tree.selectNodes(goals);
+            clickExecute(tree, goals.get(1));
+        });
+
+        await(() -> executed.get() != null);
+        assertEquals("executeGoals:clean compile install", executed.get());
+    }
+
+    @Test
+    void theContextMenuMovesTheSelectionToTheNodeUnderTheCursor() throws Exception {
+        AtomicReference<String> executed = new AtomicReference<>();
+        BuildToolModel model = modelWithCommands("demo", "clean", "compile", "install");
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(recordingHost(model, executed)));
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 5);
+
+        onEdtRun(() -> {
+            List<dtm.stools.component.tree.TreeNode<BuildToolModel.Node>> goals = goalNodes(tree);
+            tree.selectNodes(List.of(goals.getFirst()));
+            clickExecute(tree, goals.get(2));
+        });
+
+        await(() -> executed.get() != null);
+        assertEquals("execute:install", executed.get());
+    }
+
+    private static List<dtm.stools.component.tree.TreeNode<BuildToolModel.Node>> goalNodes(
+            TreeView<BuildToolModel.Node> tree) {
+        return tree.getRootNode().getChildrenList().getFirst()
+                .getChildrenList().getFirst().getChildrenList();
+    }
+
+    private static void clickExecute(TreeView<BuildToolModel.Node> tree,
+                                     dtm.stools.component.tree.TreeNode<BuildToolModel.Node> target) {
+        JPopupMenu popup = tree.getPopupMenuProvider()
+                .apply(new TreePopupContext<>(tree, target, List.of(target), null));
+        assertTrue(popup != null, "o menu de contexto deveria existir para um alvo executavel");
+        for (Component component : popup.getComponents()) {
+            if (component instanceof JMenuItem item && "Executar".equals(item.getText())) {
+                item.doClick();
+                return;
+            }
+        }
+        throw new AssertionError("o menu de contexto deveria ter o item Executar");
+    }
+
+    private static JavaBuildToolsPanel.Host recordingHost(BuildToolModel model,
+                                                          AtomicReference<String> executed) {
+        return new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+                executed.set("execute:" + String.join(" ", command.command()));
+            }
+
+            @Override
+            public void executeGoals(BuildToolModel.Node context, List<String> goals) {
+                executed.set("executeGoals:" + String.join(" ", goals));
+            }
+
+            @Override
+            public void cancel() {
+            }
+        };
     }
 
     @Test

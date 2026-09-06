@@ -301,7 +301,10 @@ public final class JavaBuildToolsPanel extends JPanel {
         });
         tree.onTreeEvent(EventTreeView.NODE_DOUBLE_CLICK, event -> executeSelected());
         tree.onTreeEvent(EventTreeView.NODE_CHECK, event -> onProfileToggled(event.getNode()));
-        tree.setPopupMenuProvider(context -> contextMenu(context.node()));
+        tree.setPopupMenuProvider(context -> {
+            focusPopupTarget(context.node());
+            return contextMenu(context.node());
+        });
     }
 
     private void rebuild() {
@@ -529,6 +532,17 @@ public final class JavaBuildToolsPanel extends JPanel {
                 : null;
     }
 
+    private void focusPopupTarget(TreeNode<BuildToolModel.Node> node) {
+        if (node == null) {
+            return;
+        }
+        List<TreeNode<BuildToolModel.Node>> selected = tree.getSelectedNodes();
+        if (selected != null && selected.contains(node)) {
+            return;
+        }
+        tree.selectNodes(List.of(node));
+    }
+
     private JPopupMenu contextMenu(TreeNode<BuildToolModel.Node> node) {
         BuildToolModel.Node value = node == null ? null : node.getData();
         ActionMenu menu = ActionMenu.of(new JMenu());
@@ -536,7 +550,7 @@ public final class JavaBuildToolsPanel extends JPanel {
 
         if (value != null && value.executable()) {
             menu.item(text("menu.execute", "Executar"), JavaIcons.run(JavaIcons.SMALL),
-                    event -> host.executeGoals(value, value.command()));
+                    event -> executeSelected());
             any = true;
         }
         if (value != null && value.kind() == BuildToolModel.Kind.RUN_CONFIG) {
