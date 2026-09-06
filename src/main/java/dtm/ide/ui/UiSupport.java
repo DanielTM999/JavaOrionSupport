@@ -1,6 +1,7 @@
 package dtm.ide.ui;
 
 import dtm.stools.component.feedback.badge.BadgeLabel;
+import dtm.stools.component.tree.TreeNode;
 import dtm.stools.configs.UiTokens;
 
 import javax.swing.AbstractButton;
@@ -37,6 +38,12 @@ public final class UiSupport {
     private static final String NO_FOCUS_RING = "focusWidth: 0; innerFocusWidth: 0";
 
     private UiSupport() {
+    }
+
+    static <T> TreeNode<T> treeNode(T data, String id) {
+        TreeNode<T> node = new TreeNode<>(data);
+        node.setId(id);
+        return node;
     }
 
     static void thinScrollbars(JScrollPane pane) {

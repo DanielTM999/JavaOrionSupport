@@ -121,7 +121,7 @@ public final class JavaSafeDeleteScanner {
         }
     }
 
-    static String maskNonCode(String text) {
+    public static String maskNonCode(String text) {
         if (text == null || text.isEmpty()) {
             return "";
         }

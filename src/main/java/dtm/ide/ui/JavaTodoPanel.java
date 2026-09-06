@@ -195,15 +195,15 @@ public final class JavaTodoPanel extends JPanel {
         }
 
         java.util.Set<String> expansion = tree.snapshotExpansion();
-        TreeNode<Object> root = new TreeNode<>(null, "root");
+        TreeNode<Object> root = UiSupport.treeNode(null, "root");
         grouped.forEach((file, fileItems) -> {
-            TreeNode<Object> fileNode = new TreeNode<>(file, "file|" + file);
+            TreeNode<Object> fileNode = UiSupport.treeNode(file, "file|" + file);
             fileNode.setLabel(displayPath(file) + "  (" + fileItems.size() + ")");
             fileNode.setIcon(JavaIcons.java(JavaIcons.SMALL));
             fileNode.setTooltip(file.toString());
             for (TodoItem item : fileItems) {
                 TreeNode<Object> itemNode =
-                        new TreeNode<>(item, "item|" + file + "|" + item.line());
+                        UiSupport.treeNode(item, "item|" + file + "|" + item.line());
                 itemNode.setLabel(label(item));
                 itemNode.setIcon(JavaIcons.todo(JavaIcons.SMALL));
                 itemNode.setTooltip(item.display());

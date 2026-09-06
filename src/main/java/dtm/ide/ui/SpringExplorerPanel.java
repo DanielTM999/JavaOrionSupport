@@ -426,19 +426,19 @@ public final class SpringExplorerPanel extends JPanel {
 
     private void rebuildBeans() {
         Set<String> expansion = beansTree.snapshotExpansion();
-        TreeNode<Object> root = new TreeNode<>(null, "spring-beans-root");
+        TreeNode<Object> root = UiSupport.treeNode(null, "spring-beans-root");
         Map<SpringStereotype, List<SpringBean>> groups =
                 SpringExplorerModel.beansByStereotype(snapshot.beans(), filter.getText());
         int visible = 0;
         for (Map.Entry<SpringStereotype, List<SpringBean>> entry : groups.entrySet()) {
             SpringStereotype stereotype = entry.getKey();
-            TreeNode<Object> group = new TreeNode<>(new BeanGroup(stereotype),
+            TreeNode<Object> group = UiSupport.treeNode(new BeanGroup(stereotype),
                     "stereotype|" + stereotype.name());
             group.setLabel(stereotype.displayName() + "   " + entry.getValue().size());
             group.setIcon(JavaIcons.spring(JavaIcons.SMALL));
             group.setForeground(UiTokens.muted());
             for (SpringBean bean : entry.getValue()) {
-                TreeNode<Object> node = new TreeNode<>(new BeanNode(bean),
+                TreeNode<Object> node = UiSupport.treeNode(new BeanNode(bean),
                         "bean|" + bean.type() + "|" + bean.name());
                 node.setLabel(bean.simpleName() + "   " + bean.name());
                 node.setIcon(JavaIcons.java(JavaIcons.SMALL));
@@ -465,18 +465,18 @@ public final class SpringExplorerPanel extends JPanel {
 
     private void rebuildEndpoints() {
         Set<String> expansion = endpointTree.snapshotExpansion();
-        TreeNode<Object> root = new TreeNode<>(null, "spring-endpoints-root");
+        TreeNode<Object> root = UiSupport.treeNode(null, "spring-endpoints-root");
         List<SpringExplorerModel.ControllerEndpoints> groups =
                 SpringExplorerModel.endpointsByController(snapshot.endpoints(), filter.getText());
         int visible = 0;
         for (SpringExplorerModel.ControllerEndpoints controller : groups) {
-            TreeNode<Object> group = new TreeNode<>(new ControllerNode(controller),
+            TreeNode<Object> group = UiSupport.treeNode(new ControllerNode(controller),
                     "controller|" + controller.handlerType());
             group.setLabel(controller.displayName() + "   " + controller.endpoints().size());
             group.setIcon(JavaIcons.spring(JavaIcons.SMALL));
             group.setTooltip(controller.handlerType());
             for (SpringEndpoint endpoint : controller.endpoints()) {
-                TreeNode<Object> node = new TreeNode<>(new EndpointNode(endpoint),
+                TreeNode<Object> node = UiSupport.treeNode(new EndpointNode(endpoint),
                         "endpoint|" + endpoint.handlerType() + "|" + endpoint.handlerName()
                                 + "|" + endpoint.method() + "|" + endpoint.path());
                 node.setLabel(endpoint.method() + "   " + endpoint.path()
@@ -672,16 +672,16 @@ public final class SpringExplorerPanel extends JPanel {
         List<SpringExplorerModel.MappingGroup> groups =
                 SpringExplorerModel.mappingsByController(liveData.mappings(), filter.getText(),
                         text("live.framework", "Framework / Outros"));
-        TreeNode<Object> root = new TreeNode<>(null, "live-mappings-root");
+        TreeNode<Object> root = UiSupport.treeNode(null, "live-mappings-root");
         int visible = 0;
         for (SpringExplorerModel.MappingGroup mappingGroup : groups) {
-            TreeNode<Object> group = new TreeNode<>(new MappingGroupNode(mappingGroup),
+            TreeNode<Object> group = UiSupport.treeNode(new MappingGroupNode(mappingGroup),
                     "live-controller|" + mappingGroup.key());
             group.setLabel(mappingGroup.displayName() + "   " + mappingGroup.mappings().size());
             group.setIcon(JavaIcons.spring(JavaIcons.SMALL));
             group.setTooltip(mappingGroup.key());
             for (SpringActuatorClient.LiveMapping mapping : mappingGroup.mappings()) {
-                TreeNode<Object> node = new TreeNode<>(new MappingNode(mapping),
+                TreeNode<Object> node = UiSupport.treeNode(new MappingNode(mapping),
                         "mapping|" + mapping.method() + "|" + mapping.path() + "|"
                                 + mapping.handler());
                 node.setLabel((mapping.method().isBlank() ? "ANY" : mapping.method())

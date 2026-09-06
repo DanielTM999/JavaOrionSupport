@@ -1,29 +1,21 @@
 package dtm.ide.editor;
 
 import dtm.ide.api.project.editor.IdeCompletionContext;
-import dtm.ide.project.JavaModule;
-import dtm.ide.project.JavaProjectConventions;
-import dtm.ide.project.JavaProjectDescriptor;
+import dtm.ide.index.JavaLexicalIndex;
+import dtm.stools.component.panels.editor.code.api.SymbolKind;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 
-import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class JavaFastCompletionProvider {
 
-    private static final int MAX_FILES = 20_000;
     private static final int MAX_ITEMS = 100;
     private static final Pattern TYPE = Pattern.compile(
             "\\b(class|interface|record|enum)\\s+([A-Za-z_$][\\w$]*)");
@@ -74,13 +66,11 @@ public final class JavaFastCompletionProvider {
             Map.entry("Arrays", List.of("asList", "copyOf", "copyOfRange", "equals", "deepEquals",
                     "fill", "sort", "stream", "toString")));
 
-    private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "java-fast-index");
-        thread.setDaemon(true);
-        return thread;
-    });
-    private final AtomicReference<List<Symbol>> projectSymbols = new AtomicReference<>(List.of());
-    private final AtomicLong generation = new AtomicLong();
+    private final JavaLexicalIndex projectIndex;
+
+    public JavaFastCompletionProvider(JavaLexicalIndex projectIndex) {
+        this.projectIndex = projectIndex;
+    }
 
     private record Symbol(String name, AutoCompleteItem.Kind kind, String detail) {
         AutoCompleteItem item() {
@@ -88,31 +78,15 @@ public final class JavaFastCompletionProvider {
         }
     }
 
-    public void rebuild(JavaProjectDescriptor descriptor) {
-        long ticket = generation.incrementAndGet();
-        if (descriptor == null) {
-            projectSymbols.set(List.of());
-            return;
-        }
-        executor.submit(() -> {
-            List<Symbol> scanned = scan(descriptor);
-            if (generation.get() == ticket) {
-                projectSymbols.set(scanned);
-            }
-        });
-    }
-
-    public void refreshFile(Path file, String source) {
-        if (!JavaProjectConventions.isJava(file)) return;
-        List<Symbol> parsed = symbolsOf(source, file == null ? "" : file.toString());
-        Map<String, Symbol> merged = unique(projectSymbols.get());
-        parsed.forEach(symbol -> merged.put(key(symbol), symbol));
-        projectSymbols.set(List.copyOf(merged.values()));
-    }
-
-    public void clear() {
-        generation.incrementAndGet();
-        projectSymbols.set(List.of());
+    private static AutoCompleteItem.Kind kindOf(SymbolKind kind) {
+        return switch (kind) {
+            case INTERFACE -> AutoCompleteItem.Kind.INTERFACE;
+            case ENUM -> AutoCompleteItem.Kind.ENUM;
+            case CLASS, STRUCT -> AutoCompleteItem.Kind.CLASS;
+            case METHOD, CONSTRUCTOR, FUNCTION -> AutoCompleteItem.Kind.METHOD;
+            case FIELD, PROPERTY -> AutoCompleteItem.Kind.FIELD;
+            default -> AutoCompleteItem.Kind.VARIABLE;
+        };
     }
 
     public List<AutoCompleteItem> suggestions(IdeCompletionContext context) {
@@ -137,7 +111,10 @@ public final class JavaFastCompletionProvider {
             COMMON_TYPES.forEach(value -> put(candidates,
                     new Symbol(value, AutoCompleteItem.Kind.CLASS, "Java")));
             symbolsOf(context.text(), "arquivo atual").forEach(symbol -> put(candidates, symbol));
-            projectSymbols.get().forEach(symbol -> put(candidates, symbol));
+            if (projectIndex != null) {
+                projectIndex.projectSymbols().forEach(symbol -> put(candidates,
+                        new Symbol(symbol.name(), kindOf(symbol.kind()), symbol.detail())));
+            }
         }
 
         String needle = prefix.toLowerCase(Locale.ROOT);
@@ -202,29 +179,6 @@ public final class JavaFastCompletionProvider {
         }
     }
 
-    private static List<Symbol> scan(JavaProjectDescriptor descriptor) {
-        Map<String, Symbol> found = new LinkedHashMap<>();
-        int visited = 0;
-        outer:
-        for (JavaModule module : descriptor.modules()) {
-            List<Path> roots = new ArrayList<>(module.existingSourceRoots());
-            roots.addAll(module.existingTestRoots());
-            for (Path root : roots) {
-                int remaining = MAX_FILES - visited;
-                if (remaining <= 0) {
-                    break outer;
-                }
-                for (Path file : JavaProjectConventions.javaSources(root, 0, remaining)) {
-                    visited++;
-                    String source = JavaProjectConventions.readOrEmpty(file);
-                    symbolsOf(source, file.getFileName().toString())
-                            .forEach(symbol -> put(found, symbol));
-                }
-            }
-        }
-        return List.copyOf(found.values());
-    }
-
     private static List<Symbol> symbolsOf(String source, String detail) {
         if (source == null || source.isBlank()) return List.of();
         String code = structural(source);
@@ -260,12 +214,6 @@ public final class JavaFastCompletionProvider {
 
     private static String structural(String source) {
         return JavaSourceText.blankStringContents(JavaSourceText.blankComments(source));
-    }
-
-    private static Map<String, Symbol> unique(Collection<Symbol> symbols) {
-        Map<String, Symbol> unique = new LinkedHashMap<>();
-        symbols.forEach(symbol -> put(unique, symbol));
-        return unique;
     }
 
     private static void put(Map<String, Symbol> target, Symbol symbol) {

@@ -5,6 +5,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -91,5 +92,29 @@ class BuildRunConfigurationsTest {
 
         assertTrue(java.nio.file.Files.isRegularFile(
                 root.resolve(".orion").resolve("java.properties")));
+    }
+
+    @Test
+    void activeProfilesAreStoredPerProject() {
+        Path otherRoot = root.resolve("other");
+        BuildRunConfigurations current = new BuildRunConfigurations(root);
+        BuildRunConfigurations other = new BuildRunConfigurations(otherRoot);
+
+        assertTrue(current.saveActiveProfiles(Set.of("dev", "linux")));
+
+        assertEquals(Set.of("dev", "linux"), current.activeProfiles());
+        assertTrue(other.activeProfiles().isEmpty());
+    }
+
+    @Test
+    void clearingProfilesPreservesSavedRunConfigurations() {
+        BuildRunConfigurations configurations = new BuildRunConfigurations(root);
+        configurations.save(new BuildRunConfigurations.Entry("Build", List.of("clean", "install")));
+        configurations.saveActiveProfiles(Set.of("dev"));
+
+        assertTrue(configurations.saveActiveProfiles(Set.of()));
+
+        assertTrue(configurations.activeProfiles().isEmpty());
+        assertEquals(List.of("clean", "install"), configurations.all().getFirst().goals());
     }
 }

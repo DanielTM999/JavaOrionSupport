@@ -186,14 +186,14 @@ public final class JavaProblemsPanel extends JPanel {
             return;
         }
 
-        TreeNode<BuildDiagnostic> root = new TreeNode<>(null, "root");
+        TreeNode<BuildDiagnostic> root = UiSupport.treeNode(null, "root");
         Map<Path, List<BuildDiagnostic>> grouped = new LinkedHashMap<>();
         for (BuildDiagnostic problem : visible) {
             grouped.computeIfAbsent(problem.file(), ignored -> new ArrayList<>()).add(problem);
         }
         grouped.forEach((file, problems) -> {
             String id = file == null ? "build" : file.toString();
-            TreeNode<BuildDiagnostic> group = new TreeNode<>(null, "file|" + id);
+            TreeNode<BuildDiagnostic> group = UiSupport.treeNode(null, "file|" + id);
             group.setLabel(displayPath(file) + "  (" + problems.size() + ")");
             group.setIcon(file == null ? JavaIcons.buildTool(null, JavaIcons.SMALL)
                     : JavaIcons.java(JavaIcons.SMALL));
@@ -213,7 +213,7 @@ public final class JavaProblemsPanel extends JPanel {
     private TreeNode<BuildDiagnostic> problemNode(BuildDiagnostic problem) {
         String id = problem.file() + "|" + problem.line() + "|" + problem.column()
                 + "|" + problem.severity() + "|" + problem.message();
-        TreeNode<BuildDiagnostic> node = new TreeNode<>(problem, id);
+        TreeNode<BuildDiagnostic> node = UiSupport.treeNode(problem, id);
         String message = problem.message().replace('\n', ' ').replaceAll("\\s+", " ").trim();
         String position = problem.hasLocation()
                 ? "  " + problem.line() + ":" + Math.max(1, problem.column()) : "";

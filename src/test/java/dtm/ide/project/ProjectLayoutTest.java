@@ -75,6 +75,37 @@ class ProjectLayoutTest {
     }
 
     @Test
+    void aFolderCanBeMarkedAsResources() throws IOException {
+        Path resources = root.resolve("config");
+        Files.createDirectories(resources);
+
+        ProjectLayout layout = ProjectLayout.of(root);
+        layout.setRole(resources, ProjectLayout.Role.RESOURCE);
+        layout.save();
+
+        JavaModule module = JavaProjectConventions.describe(root).rootModule();
+        assertEquals(ProjectLayout.Role.RESOURCE, ProjectLayout.of(root).roleOf(resources));
+        assertTrue(module.existingSourceRoots().contains(resources));
+        assertFalse(module.existingTestRoots().contains(resources));
+    }
+
+    @Test
+    void aFolderCanBeMarkedAsTestResources() throws IOException {
+        Path testResources = root.resolve("test-data");
+        Files.createDirectories(testResources);
+
+        ProjectLayout layout = ProjectLayout.of(root);
+        layout.setRole(testResources, ProjectLayout.Role.TEST_RESOURCE);
+        layout.save();
+
+        JavaModule module = JavaProjectConventions.describe(root).rootModule();
+        assertEquals(ProjectLayout.Role.TEST_RESOURCE,
+                ProjectLayout.of(root).roleOf(testResources));
+        assertTrue(module.existingTestRoots().contains(testResources));
+        assertFalse(module.existingSourceRoots().contains(testResources));
+    }
+
+    @Test
     void theChoicesSurviveAReload() {
         ProjectLayout layout = ProjectLayout.of(root);
         layout.setRole(root.resolve("src/main/java"), ProjectLayout.Role.SOURCE);
@@ -101,5 +132,21 @@ class ProjectLayoutTest {
 
         JavaModule module = JavaProjectConventions.describe(root).rootModule();
         assertTrue(module.existingTestRoots().contains(root.resolve("src/test/java")));
+    }
+
+    @Test
+    void clearingAllRolesKeepsUnrelatedProjectSettings() throws IOException {
+        Path settings = root.resolve(JavaProjectConventions.ORION_SETTINGS_DIR)
+                .resolve(JavaProjectConventions.ORION_JAVA_PROPERTIES);
+        Files.createDirectories(settings.getParent());
+        Files.writeString(settings, "jdk.version=21\nlayout.generated=SOURCE\n");
+
+        ProjectLayout layout = ProjectLayout.of(root);
+        layout.clearRoles();
+        layout.save();
+
+        String saved = Files.readString(settings);
+        assertTrue(saved.contains("jdk.version=21"));
+        assertTrue(ProjectLayout.of(root).isEmpty());
     }
 }

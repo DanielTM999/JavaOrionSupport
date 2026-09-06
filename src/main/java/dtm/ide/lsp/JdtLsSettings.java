@@ -61,7 +61,7 @@ final class JdtLsSettings {
         java.put("contentProvider", Map.of("preferred", "fernflower"));
         java.put("jdt", Map.of("ls", Map.of("lombokSupport", Map.of("enabled", true))));
         java.put("autobuild", Map.of("enabled", true));
-        java.put("maxConcurrentBuilds", 1);
+        java.put("maxConcurrentBuilds", Math.max(1, Runtime.getRuntime().availableProcessors() / 2));
         java.put("errors", Map.of("incompleteClasspath", Map.of("severity", "warning")));
 
         return Map.of("java", java);

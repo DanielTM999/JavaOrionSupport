@@ -230,7 +230,7 @@ public final class JavaTestExplorerPanel extends JPanel {
     private void rebuildTree() {
         boolean filtering = onlyFailures.isSelected();
         Set<String> expansion = tree.snapshotExpansion();
-        TreeNode<Object> root = new TreeNode<>(null, "root");
+        TreeNode<Object> root = UiSupport.treeNode(null, "root");
 
         Map<String, TreeNode<Object>> packages = new LinkedHashMap<>();
         for (Map.Entry<String, List<JavaTest>> entry : JavaTest.byClass(tests).entrySet()) {
@@ -244,7 +244,7 @@ public final class JavaTestExplorerPanel extends JPanel {
                 continue;
             }
             String className = entry.getKey();
-            TreeNode<Object> classNode = new TreeNode<>(
+            TreeNode<Object> classNode = UiSupport.treeNode(
                     new ClassNode(className, summaryOf(entry.getValue())), "class|" + className);
             classNode.setLabel(simpleClassName(className));
             classNode.setIcon(JavaIcons.java(JavaIcons.SMALL));
@@ -255,7 +255,7 @@ public final class JavaTestExplorerPanel extends JPanel {
 
             String packageName = packageName(className);
             TreeNode<Object> packageNode = packages.computeIfAbsent(packageName, name -> {
-                TreeNode<Object> node = new TreeNode<>(new PackageNode(name), "package|" + name);
+                TreeNode<Object> node = UiSupport.treeNode(new PackageNode(name), "package|" + name);
                 node.setLabel(name.isBlank() ? text("tree.defaultPackage", "(pacote padrao)") : name);
                 node.setIcon(JavaIcons.folder(JavaIcons.SMALL));
                 node.setForeground(UiTokens.muted());
@@ -277,7 +277,7 @@ public final class JavaTestExplorerPanel extends JPanel {
     private TreeNode<Object> testNode(JavaTest test) {
         TestResult result = resultOf(test);
         boolean running = runningKeys.contains(test.selector());
-        TreeNode<Object> node = new TreeNode<>(
+        TreeNode<Object> node = UiSupport.treeNode(
                 new TestNode(test, result, running), "test|" + test.selector());
 
         String duration = result == null ? "" : "   " + result.durationMs() + " ms";

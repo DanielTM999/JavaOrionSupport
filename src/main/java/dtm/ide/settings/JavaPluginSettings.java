@@ -6,10 +6,8 @@ import lombok.extern.slf4j.Slf4j;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Properties;
-import java.util.Set;
 
 @Slf4j
 public final class JavaPluginSettings {
@@ -25,7 +23,6 @@ public final class JavaPluginSettings {
     private static final String KEY_SKIP_TESTS_ON_RUN = "skipTestsOnRun";
     private static final String KEY_HOT_RELOAD_MODE = "hotReloadMode";
     private static final String KEY_LOMBOK_SUPPORT = "lombokSupport";
-    private static final String KEY_BUILD_PROFILES = "buildProfiles";
     private static final String KEY_TODO_MARKERS = "todoMarkers";
     private static final String KEY_BUILD_FILE_COMPLETION = "buildFileCompletion";
     private static final String KEY_SPRING_SUPPORT = "springSupport";
@@ -48,7 +45,6 @@ public final class JavaPluginSettings {
     private boolean skipTestsOnRun = true;
     private HotReloadMode hotReloadMode = HotReloadMode.MANUAL;
     private boolean lombokSupport = true;
-    private Set<String> buildProfiles = Set.of();
     private List<String> todoMarkers = TodoScanner.DEFAULT_MARKERS;
     private boolean buildFileCompletion = true;
     private boolean springSupport = true;
@@ -151,14 +147,6 @@ public final class JavaPluginSettings {
         this.lombokSupport = value;
     }
 
-    public Set<String> getBuildProfiles() {
-        return buildProfiles;
-    }
-
-    public void setBuildProfiles(Set<String> value) {
-        this.buildProfiles = value == null ? Set.of() : Set.copyOf(value);
-    }
-
     public List<String> getTodoMarkers() {
         return todoMarkers;
     }
@@ -185,20 +173,6 @@ public final class JavaPluginSettings {
             }
         }
         return markers.isEmpty() ? TodoScanner.DEFAULT_MARKERS : List.copyOf(markers);
-    }
-
-    private static Set<String> splitProfiles(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return Set.of();
-        }
-        Set<String> profiles = new LinkedHashSet<>();
-        for (String part : raw.split(",")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                profiles.add(trimmed);
-            }
-        }
-        return Set.copyOf(profiles);
     }
 
     public boolean isSpringCodeLens() {
@@ -235,7 +209,6 @@ public final class JavaPluginSettings {
         skipTestsOnRun = true;
         hotReloadMode = HotReloadMode.MANUAL;
         lombokSupport = true;
-        buildProfiles = Set.of();
         todoMarkers = TodoScanner.DEFAULT_MARKERS;
         buildFileCompletion = true;
         springSupport = true;
@@ -270,7 +243,6 @@ public final class JavaPluginSettings {
         springSupport = bool(properties, KEY_SPRING_SUPPORT, true);
         safeDelete = bool(properties, KEY_SAFE_DELETE, true);
         lombokSupport = bool(properties, KEY_LOMBOK_SUPPORT, true);
-        buildProfiles = splitProfiles(properties.getProperty(KEY_BUILD_PROFILES, ""));
         todoMarkers = splitMarkers(properties.getProperty(KEY_TODO_MARKERS, ""));
         buildFileCompletion = bool(properties, KEY_BUILD_FILE_COMPLETION, true);
         springCodeLens = bool(properties, KEY_SPRING_CODE_LENS, true);
@@ -294,7 +266,6 @@ public final class JavaPluginSettings {
         properties.setProperty(KEY_SPRING_SUPPORT, Boolean.toString(springSupport));
         properties.setProperty(KEY_SAFE_DELETE, Boolean.toString(safeDelete));
         properties.setProperty(KEY_LOMBOK_SUPPORT, Boolean.toString(lombokSupport));
-        properties.setProperty(KEY_BUILD_PROFILES, String.join(",", buildProfiles));
         properties.setProperty(KEY_TODO_MARKERS, String.join(",", todoMarkers));
         properties.setProperty(KEY_BUILD_FILE_COMPLETION, Boolean.toString(buildFileCompletion));
         properties.setProperty(KEY_SPRING_CODE_LENS, Boolean.toString(springCodeLens));

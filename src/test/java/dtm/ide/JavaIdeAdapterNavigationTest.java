@@ -2,16 +2,31 @@ package dtm.ide;
 
 import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.IdeWordClickContext;
+import dtm.stools.component.panels.editor.code.CodeEditor;
+import dtm.stools.component.panels.editor.code.hover.HoverInfo;
+import dtm.stools.component.panels.editor.code.provider.TokenRenderCodeEditorProvider;
+import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenClassifierProvider;
+import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenColorProvider;
 import org.junit.jupiter.api.Test;
 
+import javax.swing.JFrame;
+import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
+import java.awt.BorderLayout;
+import java.awt.GraphicsEnvironment;
 import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaIdeAdapterNavigationTest {
@@ -20,6 +35,78 @@ class JavaIdeAdapterNavigationTest {
             IdeEditorContext.class.getClassLoader(),
             new Class<?>[]{IdeEditorContext.class},
             (proxy, method, args) -> null);
+
+    @Test
+    void decompiledClassEditorGetsJavaHighlightAndHover() {
+        CodeEditor editor = new CodeEditor();
+        editor.setText("class Demo { }");
+
+        JavaIdeAdapter.applyClassFileEditorProviders(editor, Path.of("Demo.java"),
+                new JavaEditorRegistry(), context -> new HoverInfo("doc"));
+
+        assertNotNull(editor.getTokenizerProvider(), "faltou o tokenizer java");
+        assertNotNull(editor.getTokenClassifierProvider());
+        assertNotNull(editor.getTokenColorProvider());
+        assertNotNull(editor.getTokenRenderProvider());
+        assertTrue(editor.isSyntaxHighlightEnabled());
+        assertNotNull(editor.getTextArea().getHoverDocumentationProvider());
+    }
+
+    @Test
+    void decompiledClassEditorHighlightsAfterTheTabIsOpened() throws Exception {
+        assumeFalse(GraphicsEnvironment.isHeadless(), "o editor precisa de ambiente grafico");
+        AtomicInteger renders = new AtomicInteger();
+        CodeEditor editor = new CodeEditor();
+        editor.addProvider(new DefaultTokenClassifierProvider());
+        editor.addProvider(new DefaultTokenColorProvider());
+        editor.addProvider((TokenRenderCodeEditorProvider)
+                (tokens, colors, area) -> renders.incrementAndGet());
+
+        JFrame frame = new JFrame();
+        JPanel host = new JPanel(new BorderLayout());
+        frame.setContentPane(host);
+        frame.setSize(400, 300);
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                frame.setVisible(true);
+                editor.setText("package java.util; public interface List { int size(); }");
+                JavaIdeAdapter.applyClassFileEditorProviders(editor, Path.of("List.java"),
+                        new JavaEditorRegistry(), context -> null);
+                host.add(editor, BorderLayout.CENTER);
+                host.revalidate();
+                host.remove(editor);
+                host.revalidate();
+                host.add(editor, BorderLayout.CENTER);
+                host.revalidate();
+            });
+            awaitRender(renders);
+        } finally {
+            SwingUtilities.invokeAndWait(frame::dispose);
+        }
+
+        assertTrue(renders.get() > 0,
+                "o destaque precisa ser reaplicado depois que a aba abre");
+    }
+
+    private static void awaitRender(AtomicInteger renders) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline && renders.get() == 0) {
+            SwingUtilities.invokeAndWait(() -> {});
+            Thread.sleep(50);
+        }
+    }
+
+    @Test
+    void decompiledClassEditorKeepsTheProvidersTheIdeAlreadyInstalled() {
+        CodeEditor editor = new CodeEditor();
+        DefaultTokenColorProvider colors = new DefaultTokenColorProvider();
+        editor.addProvider(colors);
+
+        JavaIdeAdapter.applyClassFileEditorProviders(editor, Path.of("Demo.java"),
+                new JavaEditorRegistry(), context -> null);
+
+        assertSame(colors, editor.getTokenColorProvider());
+    }
 
     @Test
     void ctrlLeftClickOnAJavaWordRequestsDefinitionNavigation() {
@@ -52,6 +139,33 @@ class JavaIdeAdapterNavigationTest {
         String source = "var total = pedido.calcularTotal();";
 
         assertNull(JavaIdeAdapter.safeDebugExpression(source, source.indexOf('(')));
+    }
+
+    @Test
+    void readsTheIdentifierUnderTheCaretForApproximateNavigation() {
+        String source = """
+                class Demo {
+                    OrderService service;
+                }
+                """;
+
+        assertEquals("OrderService", JavaIdeAdapter.identifierAt(source, 1, 4));
+        assertEquals("OrderService", JavaIdeAdapter.identifierAt(source, 1, 10));
+        assertEquals("OrderService", JavaIdeAdapter.identifierAt(source, 1, 16));
+        assertEquals("service", JavaIdeAdapter.identifierAt(source, 1, 20));
+    }
+
+    @Test
+    void reportsNoIdentifierOutsideAWord() {
+        String source = """
+                class Demo {
+                    int a = 1;
+                }
+                """;
+
+        assertNull(JavaIdeAdapter.identifierAt(source, 1, 0));
+        assertNull(JavaIdeAdapter.identifierAt(source, 5, 0));
+        assertNull(JavaIdeAdapter.identifierAt(null, 0, 0));
     }
 
     private static IdeWordClickContext click(Path path, int button, int modifiers) {

@@ -92,6 +92,14 @@ public final class ProjectLayout {
         }
     }
 
+    public void clearRoles() {
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(KEY_PREFIX)) {
+                properties.remove(key);
+            }
+        }
+    }
+
     public List<Path> foldersWith(Role role) {
         List<Path> folders = new ArrayList<>();
         for (String key : properties.stringPropertyNames()) {

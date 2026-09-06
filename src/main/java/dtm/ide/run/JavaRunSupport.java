@@ -374,9 +374,22 @@ public class JavaRunSupport {
 
     /** Executa o build previo exigido pela configuracao, quando aplicavel. */
     Optional<String> buildBeforeRun(RunConfigurationData configuration) {
+        Optional<BuildSystem.BuildAction> action = buildBeforeRunAction(configuration);
+        if (action.isEmpty()) {
+            return Optional.empty();
+        }
+        if (action.get() == BuildSystem.BuildAction.PACKAGE) {
+            return packageModule(configuration);
+        }
+        return compile(configuration);
+    }
+
+    /** Informa ao host se o Run executara um build interno antes de abrir o processo. */
+    public static Optional<BuildSystem.BuildAction> buildBeforeRunAction(
+            RunConfigurationData configuration) {
         String type = configuration == null ? "" : configuration.getType();
         if (JavaRunTypes.BUILD_TOOL.contains(type)) {
-            // Maven, Gradle e Testes ja passam pelo build tool no proprio lancamento.
+            // Maven, Gradle e Testes sao o proprio processo executado e devem manter o terminal.
             return Optional.empty();
         }
         boolean enabled = JavaRunValidation.flag(propertiesOf(configuration),
@@ -385,9 +398,11 @@ public class JavaRunSupport {
             return Optional.empty();
         }
         if (JavaRunTypes.JAR.equals(type)) {
-            return packageModule(configuration);
+            return Optional.of(BuildSystem.BuildAction.PACKAGE);
         }
-        return compile(configuration);
+        return Optional.of(usesTestClasspath(configuration)
+                ? BuildSystem.BuildAction.TEST_COMPILE
+                : BuildSystem.BuildAction.COMPILE);
     }
 
     private Optional<String> packageModule(RunConfigurationData configuration) {

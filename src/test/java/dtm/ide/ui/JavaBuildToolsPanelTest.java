@@ -6,15 +6,18 @@ import dtm.stools.component.tree.TreeView;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import javax.swing.JButton;
 import javax.swing.SwingUtilities;
 import javax.swing.tree.TreeNode;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.GraphicsEnvironment;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -47,6 +50,52 @@ class JavaBuildToolsPanelTest {
 
         await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 3);
         assertEquals("demo", firstRootChild(tree).toString());
+    }
+
+    @Test
+    void refreshingKeepsTheTaskTreeVisible() throws Exception {
+        AtomicInteger loads = new AtomicInteger();
+        JavaBuildToolsPanel.Host host = new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model(loads.incrementAndGet() == 1 ? "first" : "second");
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+            }
+
+            @Override
+            public void cancel() {
+            }
+        };
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(host));
+        TreeView<?> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && "first".equals(String.valueOf(firstRootChild(tree))));
+        int rowsBefore = visibleRows(tree);
+        assertTrue(rowsBefore >= 3, "the first load should render the task tree");
+
+        onEdtRun(panel::reload);
+        await(() -> rootChildren(tree) == 1 && "second".equals(String.valueOf(firstRootChild(tree))));
+
+        assertEquals(rowsBefore, visibleRows(tree), "refreshing must not blank the task tree");
+    }
+
+    @Test
+    void filteringKeepsMatchingTasksVisible() throws Exception {
+        BuildToolModel model = model("demo");
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(hostReturning(model)));
+        TreeView<?> tree = find(panel, TreeView.class);
+        MaskedTextField filter = find(panel, MaskedTextField.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 3);
+
+        onEdtRun(() -> filter.setText("clean"));
+        flushEdt();
+        assertTrue(visibleRows(tree) >= 3, "a matching filter must not blank the task tree");
+
+        onEdtRun(() -> filter.setText(""));
+        flushEdt();
+        assertTrue(visibleRows(tree) >= 3, "clearing the filter must not blank the task tree");
     }
 
     @Test
@@ -99,6 +148,84 @@ class JavaBuildToolsPanelTest {
         assertEquals("newest", firstRootChild(tree).toString());
     }
 
+    @Test
+    void executingSeveralSelectedGoalsRunsThemTogetherInTreeOrder() throws Exception {
+        AtomicReference<List<String>> executed = new AtomicReference<>();
+        BuildToolModel model = modelWithCommands("demo", "clean", "compile", "install");
+        JavaBuildToolsPanel.Host host = new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+            }
+
+            @Override
+            public void executeGoals(BuildToolModel.Node context, List<String> goals) {
+                executed.set(goals);
+            }
+
+            @Override
+            public void cancel() {
+            }
+        };
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(host));
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 5);
+
+        onEdtRun(() -> {
+            dtm.stools.component.tree.TreeNode<BuildToolModel.Node> project =
+                    tree.getRootNode().getChildrenList().getFirst();
+            dtm.stools.component.tree.TreeNode<BuildToolModel.Node> lifecycle =
+                    project.getChildrenList().getFirst();
+            tree.selectNodes(List.of(lifecycle.getChildrenList().get(2),
+                    lifecycle.getChildrenList().getFirst(), lifecycle.getChildrenList().get(1)));
+            findButton(panel, "Executar").doClick();
+        });
+
+        assertEquals(List.of("clean", "compile", "install"), executed.get());
+    }
+
+    @Test
+    void reloadUsesOnlyProfilesSavedForTheCurrentProject() throws Exception {
+        AtomicReference<Set<String>> stored = new AtomicReference<>(Set.of("stale", "dev"));
+        BuildToolModel.Node dev = new BuildToolModel.Node(BuildToolModel.Kind.PROFILE,
+                "dev", null, List.of(), List.of());
+        BuildToolModel model = new BuildToolModel("Maven", model("demo").projects(), List.of(dev));
+        JavaBuildToolsPanel.Host host = new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+            }
+
+            @Override
+            public void profilesChanged(Set<String> profiles) {
+                stored.set(profiles);
+            }
+
+            @Override
+            public Set<String> activeProfiles() {
+                return stored.get();
+            }
+
+            @Override
+            public void cancel() {
+            }
+        };
+
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(host));
+        TreeView<?> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 2);
+
+        assertEquals(Set.of("dev"), stored.get());
+    }
+
     private static JavaBuildToolsPanel.Host hostReturning(BuildToolModel model) {
         return new JavaBuildToolsPanel.Host() {
             @Override
@@ -117,13 +244,49 @@ class JavaBuildToolsPanelTest {
     }
 
     private static BuildToolModel model(String projectName) {
-        BuildToolModel.Node command = new BuildToolModel.Node(BuildToolModel.Kind.COMMAND,
-                "clean", null, List.of("clean"), List.of());
+        return modelWithCommands(projectName, "clean");
+    }
+
+    private static BuildToolModel modelWithCommands(String projectName, String... names) {
+        List<BuildToolModel.Node> commands = java.util.Arrays.stream(names)
+                .map(name -> new BuildToolModel.Node(BuildToolModel.Kind.COMMAND,
+                        name, null, List.of(name), List.of()))
+                .toList();
         BuildToolModel.Node group = new BuildToolModel.Node(BuildToolModel.Kind.GROUP,
-                "Lifecycle", null, List.of(), List.of(command));
+                "Lifecycle", null, List.of(), commands);
         BuildToolModel.Node project = new BuildToolModel.Node(BuildToolModel.Kind.PROJECT,
                 projectName, null, List.of(), List.of(group));
         return new BuildToolModel("Maven", List.of(project), List.of());
+    }
+
+    private static JButton findButton(Container root, String tooltip) {
+        if (root instanceof JButton button && tooltip.equals(button.getToolTipText())) {
+            return button;
+        }
+        for (Component component : root.getComponents()) {
+            if (component instanceof Container child) {
+                JButton found = findButtonOrNull(child, tooltip);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        throw new AssertionError("Button not found: " + tooltip);
+    }
+
+    private static JButton findButtonOrNull(Container root, String tooltip) {
+        if (root instanceof JButton button && tooltip.equals(button.getToolTipText())) {
+            return button;
+        }
+        for (Component component : root.getComponents()) {
+            if (component instanceof Container child) {
+                JButton found = findButtonOrNull(child, tooltip);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
     }
 
     private static int rootChildren(TreeView<?> tree) {

@@ -2,6 +2,7 @@ package dtm.ide.editor;
 
 import dtm.ide.api.project.editor.IdeCompletionContext;
 import dtm.ide.api.project.editor.IdeCompletionTriggerKind;
+import dtm.ide.index.JavaLexicalIndex;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaFastCompletionProviderTest {
 
-    private final JavaFastCompletionProvider completion = new JavaFastCompletionProvider();
+    private final JavaLexicalIndex projectIndex = new JavaLexicalIndex();
+    private final JavaFastCompletionProvider completion =
+            new JavaFastCompletionProvider(projectIndex);
 
     @Test
     void completesCurrentDocumentSymbolsWithoutALanguageServer() {
@@ -38,12 +41,13 @@ class JavaFastCompletionProviderTest {
 
     @Test
     void refreshMakesSymbolsFromAnotherSourceImmediatelyAvailable() {
-        completion.refreshFile(Path.of("OrderService.java"),
+        projectIndex.refreshFile(Path.of("OrderService.java").toAbsolutePath(),
                 "class OrderService { void recalculateOrder() {} }");
+        assertTrue(projectIndex.awaitIdle(5_000));
 
         List<String> labels = labels(completion.suggestions(context("class Use { Ord", "Ord")));
 
-        assertTrue(labels.contains("OrderService"));
+        assertTrue(labels.contains("OrderService"), labels.toString());
     }
 
     @Test

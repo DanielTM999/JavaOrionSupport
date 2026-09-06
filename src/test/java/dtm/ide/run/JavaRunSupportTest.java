@@ -164,6 +164,39 @@ class JavaRunSupportTest {
     }
 
     @Test
+    void applicationRunReportsItsInternalCompile() {
+        assertEquals(Optional.of(BuildSystem.BuildAction.COMPILE),
+                JavaRunSupport.buildBeforeRunAction(configuration(
+                        JavaRunSupport.TYPE_RUN, Map.of())));
+    }
+
+    @Test
+    void buildToolRunDoesNotReportAnInternalBuild() {
+        assertTrue(JavaRunSupport.buildBeforeRunAction(configuration(
+                JavaRunSupport.TYPE_MAVEN, Map.of(JavaRunTypes.GOALS, "spring-boot:run")))
+                .isEmpty());
+        assertTrue(JavaRunSupport.buildBeforeRunAction(configuration(
+                JavaRunSupport.TYPE_GRADLE, Map.of(JavaRunTypes.TASKS, "bootRun")))
+                .isEmpty());
+    }
+
+    @Test
+    void disablingBuildBeforeRunDoesNotStartTheLoader() {
+        assertTrue(JavaRunSupport.buildBeforeRunAction(configuration(
+                JavaRunSupport.TYPE_RUN,
+                Map.of(JavaRunTypes.BUILD_BEFORE_RUN, Boolean.FALSE.toString())))
+                .isEmpty());
+    }
+
+    @Test
+    void jarRunReportsPackagingAsItsInternalBuild() {
+        assertEquals(Optional.of(BuildSystem.BuildAction.PACKAGE),
+                JavaRunSupport.buildBeforeRunAction(configuration(
+                        JavaRunSupport.TYPE_JAR,
+                        Map.of(JavaRunTypes.BUILD_BEFORE_RUN, Boolean.TRUE.toString()))));
+    }
+
+    @Test
     void javaHomePointsToTheSelectedJdk() {
         JavaRunSupport.LaunchCommand launch = command(configuration(JavaRunSupport.TYPE_RUN,
                 Map.of(JavaRunSupport.PROPERTY_MAIN_CLASS, "com.example.Main")), 0);

@@ -50,6 +50,50 @@ class TwoStageProcessTerminatorTest {
         assertFalse(grandchild.isAlive());
     }
 
+    @Test
+    void fallsBackToTheProcessItselfWhenTheHandleIsUnsupported() {
+        UnsupportedHandleProcess process = new UnsupportedHandleProcess();
+        TwoStageProcessTerminator terminator = new TwoStageProcessTerminator(process);
+
+        terminator.terminate();
+        assertTrue(process.destroyed.get());
+        assertTrue(process.isAlive());
+
+        terminator.terminate();
+        assertTrue(process.forciblyDestroyed.get());
+        assertFalse(process.isAlive());
+    }
+
+    private static final class UnsupportedHandleProcess extends Process {
+
+        private final AtomicBoolean alive = new AtomicBoolean(true);
+        private final AtomicBoolean destroyed = new AtomicBoolean();
+        private final AtomicBoolean forciblyDestroyed = new AtomicBoolean();
+
+        @Override public java.io.OutputStream getOutputStream() {
+            return java.io.OutputStream.nullOutputStream();
+        }
+        @Override public java.io.InputStream getInputStream() {
+            return java.io.InputStream.nullInputStream();
+        }
+        @Override public java.io.InputStream getErrorStream() {
+            return java.io.InputStream.nullInputStream();
+        }
+        @Override public int waitFor() { return 0; }
+        @Override public int exitValue() { return 0; }
+        @Override public boolean isAlive() { return alive.get(); }
+        @Override public long pid() { throw new UnsupportedOperationException("pid"); }
+        @Override public ProcessHandle toHandle() {
+            throw new UnsupportedOperationException("toHandle");
+        }
+        @Override public void destroy() { destroyed.set(true); }
+        @Override public Process destroyForcibly() {
+            forciblyDestroyed.set(true);
+            alive.set(false);
+            return this;
+        }
+    }
+
     private static final class FakeProcessHandle implements ProcessHandle {
 
         private final long pid;

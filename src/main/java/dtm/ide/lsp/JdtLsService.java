@@ -98,9 +98,15 @@ public class JdtLsService {
     private static final long COMPLETION_RESOLVE_BUDGET_MS = 260;
     private static final long INITIALIZE_TIMEOUT_MS = 120_000;
     private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
+    private static final long SERVICE_READY_POLL_MS = 250;
     private static final long DOCUMENT_RECOVERY_COOLDOWN_MS = 5_000;
     private static final int MAX_COMPLETION_ITEMS = 80;
     private static final int MAX_COMPLETION_RESOLVE_ITEMS = 1;
+    private static final long CODE_LENS_RESOLVE_BUDGET_MS = 1_200;
+    private static final int MAX_CODE_LENS_RESOLVE = 60;
+    private static final long CODE_LENS_RETRY_TIMEOUT_MS = 20_000;
+    private static final int MAX_CODE_LENS_RETRIES = 2;
+    private static final long CODE_LENS_WORK_REFRESH_COOLDOWN_MS = 2_000;
 
     private static final List<String> TOKEN_TYPES = List.of(
             "namespace", "class", "interface", "enum", "enumMember", "type", "typeParameter",
@@ -130,10 +136,12 @@ public class JdtLsService {
     private final Map<Path, List<JsonNode>> rawDiagnosticsByPath = new ConcurrentHashMap<>();
     private final Map<String, SymbolCache> symbolCache = new ConcurrentHashMap<>();
     private final Map<String, CodeLensCache> codeLensCache = new ConcurrentHashMap<>();
+    private final Map<String, CodeLensRetry> codeLensRetries = new ConcurrentHashMap<>();
     private final Map<String, CompletionCache> completionCache = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<JsonNode>> inFlightRequests = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> lastFailureLog = new ConcurrentHashMap<>();
     private final AtomicLong lastDocumentRecovery = new AtomicLong();
+    private final AtomicLong lastCodeLensWorkRefresh = new AtomicLong();
     private final AtomicBoolean completionResolveDisabled = new AtomicBoolean();
     private final Object processLock = new Object();
 
@@ -148,6 +156,7 @@ public class JdtLsService {
     private volatile ServerCapabilities capabilities = ServerCapabilities.none();
     private volatile StatusListener statusListener = (message, percent) -> {
     };
+    private volatile StatusListener workspaceBuildProgress;
     private volatile String maxHeap = "2G";
     private volatile Path lombokAgentJar;
     private volatile boolean springSupport;
@@ -155,6 +164,8 @@ public class JdtLsService {
     private volatile boolean testBundleLoaded;
     private volatile Map<String, Object> effectiveSettings = Map.of();
     private volatile Consumer<Path> onCodeLensRefresh = path -> {
+    };
+    private volatile Consumer<Path> onDocumentUpgrade = path -> {
     };
 
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
@@ -209,6 +220,12 @@ public class JdtLsService {
     }
 
     private record CodeLensCache(String text, List<JavaCodeLens> lenses) {
+    }
+
+    record CodeLensRetry(String text, int attempts, boolean inFlight) {
+        CodeLensRetry settled() {
+            return new CodeLensRetry(text, attempts, false);
+        }
     }
 
     private record CompletionCache(String text, int line, int col,
@@ -277,6 +294,11 @@ public class JdtLsService {
 
     public void setCodeLensRefreshListener(Consumer<Path> listener) {
         this.onCodeLensRefresh = listener == null ? path -> {
+        } : listener;
+    }
+
+    public void setDocumentUpgradeListener(Consumer<Path> listener) {
+        this.onDocumentUpgrade = listener == null ? path -> {
         } : listener;
     }
 
@@ -371,13 +393,31 @@ public class JdtLsService {
         if (rpc == null) {
             throw new IllegalStateException("Cliente LSP indisponivel durante a indexacao");
         }
+        CountDownLatch ready = serviceReadyLatch;
+        CompletableFuture<JsonNode> projects = rpc.request("workspace/executeCommand", Map.of(
+                "command", "java.project.getAll",
+                "arguments", List.of()));
+        long deadline = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(SERVICE_READY_TIMEOUT_MS);
         try {
-            rpc.request("workspace/executeCommand", Map.of(
-                            "command", "java.project.getAll",
-                            "arguments", List.of()))
-                    .get(SERVICE_READY_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            while (System.nanoTime() < deadline) {
+                if (ready.await(SERVICE_READY_POLL_MS, TimeUnit.MILLISECONDS)) {
+                    projects.cancel(false);
+                    return;
+                }
+                if (projects.isDone()) {
+                    projects.get();
+                    return;
+                }
+                if (state == State.STOPPED) {
+                    projects.cancel(false);
+                    return;
+                }
+            }
+            projects.cancel(false);
+            throw new TimeoutException("A indexacao do projeto excedeu o tempo limite");
         } catch (Exception commandFailure) {
-            if (serviceReadyLatch.getCount() > 0) {
+            if (ready.getCount() > 0) {
                 throw commandFailure;
             }
         }
@@ -564,6 +604,7 @@ public class JdtLsService {
         rawDiagnosticsByPath.clear();
         symbolCache.clear();
         codeLensCache.clear();
+        codeLensRetries.clear();
         completionCache.clear();
         inFlightRequests.clear();
         capabilities = ServerCapabilities.none();
@@ -705,8 +746,17 @@ public class JdtLsService {
     }
 
     public String buildWorkspace(boolean fullBuild) {
-        JsonNode result = requestInteractive("java/buildWorkspace", fullBuild, 120_000);
-        return result == null || result.isNull() ? "FAILED" : result.asText("FAILED");
+        return buildWorkspace(fullBuild, null);
+    }
+
+    public String buildWorkspace(boolean fullBuild, StatusListener progress) {
+        workspaceBuildProgress = progress;
+        try {
+            JsonNode result = requestInteractive("java/buildWorkspace", fullBuild, 120_000);
+            return result == null || result.isNull() ? "FAILED" : result.asText("FAILED");
+        } finally {
+            workspaceBuildProgress = null;
+        }
     }
 
     public java.util.Optional<String> runtimeClasspath(Path projectOrSource) {
@@ -871,6 +921,13 @@ public class JdtLsService {
         int percent = value.has("percentage") ? value.path("percentage").asInt(-1) : -1;
         if (!text.isBlank()) {
             statusListener.onStatus("Java: " + text, percent);
+            StatusListener buildProgress = workspaceBuildProgress;
+            if (buildProgress != null) {
+                buildProgress.onStatus(text, percent);
+            }
+        }
+        if ("end".equalsIgnoreCase(value.path("kind").asText(""))) {
+            refreshCodeLensesAfterWork();
         }
     }
 
@@ -935,6 +992,7 @@ public class JdtLsService {
         rawDiagnosticsByPath.remove(normalizePath(filePath));
         symbolCache.remove(uri);
         codeLensCache.remove(uri);
+        codeLensRetries.remove(uri);
         completionCache.remove(uri);
         cancelInFlightForUri(uri);
 
@@ -1074,10 +1132,14 @@ public class JdtLsService {
 
     private void refreshOpenDocuments() {
         openDocuments.keySet().forEach(uri -> {
+            symbolCache.remove(uri);
+            codeLensCache.remove(uri);
+            completionCache.remove(uri);
             Path path = LspConversions.toPath(uri);
             if (path != null) {
                 onDiagnosticsPublished.accept(path);
                 onCodeLensRefresh.accept(path);
+                onDocumentUpgrade.accept(path);
             }
         });
     }
@@ -1261,10 +1323,21 @@ public class JdtLsService {
     }
 
     public List<Location> definitions(Path filePath, String text, int line, int col) {
+        return definitions(filePath, text, line, col, false);
+    }
+
+    public List<Location> definitionsInteractive(Path filePath, String text, int line, int col) {
+        return definitions(filePath, text, line, col, true);
+    }
+
+    private List<Location> definitions(Path filePath, String text, int line, int col,
+                                       boolean interactive) {
         if (!capabilities.definition()) {
             return List.of();
         }
-        return LspConversions.locations(requestAt("textDocument/definition", filePath, text, line, col));
+        return LspConversions.locations(interactive
+                ? requestAtInteractive("textDocument/definition", filePath, text, line, col)
+                : requestAt("textDocument/definition", filePath, text, line, col));
     }
 
     public List<Location> definitionsAtUri(String uri, int line, int col) {
@@ -1278,6 +1351,19 @@ public class JdtLsService {
                         "character", Math.max(0, col)));
         return LspConversions.locations(requestInteractive(
                 "textDocument/definition", params, INTERACTIVE_TIMEOUT_MS));
+    }
+
+    public HoverInfo hoverAtUri(String uri, int line, int col) {
+        if (!JavaClassFileNavigation.isClassFileUri(uri)) {
+            return null;
+        }
+        Map<String, Object> params = Map.of(
+                "textDocument", Map.of("uri", uri),
+                "position", Map.of(
+                        "line", Math.max(0, line),
+                        "character", Math.max(0, col)));
+        return LspConversions.hover(requestInteractive(
+                "textDocument/hover", params, INTERACTIVE_TIMEOUT_MS));
     }
 
     public String classFileContents(String uri) {
@@ -1300,29 +1386,60 @@ public class JdtLsService {
     }
 
     public List<Location> implementations(Path filePath, String text, int line, int col) {
+        return implementations(filePath, text, line, col, false);
+    }
+
+    public List<Location> implementationsInteractive(Path filePath, String text, int line, int col) {
+        return implementations(filePath, text, line, col, true);
+    }
+
+    private List<Location> implementations(Path filePath, String text, int line, int col,
+                                           boolean interactive) {
         if (!capabilities.implementation()) {
             return List.of();
         }
-        return LspConversions.locations(
-                requestAt("textDocument/implementation", filePath, text, line, col));
+        return LspConversions.locations(interactive
+                ? requestAtInteractive("textDocument/implementation", filePath, text, line, col)
+                : requestAt("textDocument/implementation", filePath, text, line, col));
     }
 
     public List<Location> typeDefinitions(Path filePath, String text, int line, int col) {
+        return typeDefinitions(filePath, text, line, col, false);
+    }
+
+    public List<Location> typeDefinitionsInteractive(Path filePath, String text, int line, int col) {
+        return typeDefinitions(filePath, text, line, col, true);
+    }
+
+    private List<Location> typeDefinitions(Path filePath, String text, int line, int col,
+                                           boolean interactive) {
         if (!capabilities.typeDefinition()) {
             return List.of();
         }
-        return LspConversions.locations(
-                requestAt("textDocument/typeDefinition", filePath, text, line, col));
+        return LspConversions.locations(interactive
+                ? requestAtInteractive("textDocument/typeDefinition", filePath, text, line, col)
+                : requestAt("textDocument/typeDefinition", filePath, text, line, col));
     }
 
     public List<Location> references(Path filePath, String text, int line, int col) {
+        return references(filePath, text, line, col, false);
+    }
+
+    public List<Location> referencesInteractive(Path filePath, String text, int line, int col) {
+        return references(filePath, text, line, col, true);
+    }
+
+    private List<Location> references(Path filePath, String text, int line, int col,
+                                      boolean interactive) {
         if (!capabilities.references()) {
             return List.of();
         }
         Map<String, Object> params = positionParams(filePath, line, col);
         params.put("context", Map.of("includeDeclaration", false));
         syncBeforeRequest(filePath, text);
-        return LspConversions.locations(request("textDocument/references", params, REQUEST_TIMEOUT_MS));
+        return LspConversions.locations(interactive
+                ? requestInteractive("textDocument/references", params, INTERACTIVE_TIMEOUT_MS)
+                : request("textDocument/references", params, REQUEST_TIMEOUT_MS));
     }
 
     public boolean supportsCallHierarchy() {
@@ -1410,6 +1527,14 @@ public class JdtLsService {
     }
 
     public List<DocumentSymbol> documentSymbols(Path filePath, String text) {
+        return documentSymbols(filePath, text, false);
+    }
+
+    public List<DocumentSymbol> documentSymbolsInteractive(Path filePath, String text) {
+        return documentSymbols(filePath, text, true);
+    }
+
+    private List<DocumentSymbol> documentSymbols(Path filePath, String text, boolean interactive) {
         if (!capabilities.documentSymbol()) {
             return List.of();
         }
@@ -1421,9 +1546,12 @@ public class JdtLsService {
         }
         syncBeforeRequest(filePath, text);
         int version = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
-        JsonNode result = requestCoalesced("textDocument/documentSymbol",
-                Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS,
-                "symbols|" + uri + "|" + version);
+        String key = "symbols|" + uri + "|" + version;
+        JsonNode result = interactive
+                ? requestCoalescedInteractive("textDocument/documentSymbol",
+                        Map.of("textDocument", documentId(filePath)), INTERACTIVE_TIMEOUT_MS, key)
+                : requestCoalesced("textDocument/documentSymbol",
+                        Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS, key);
         List<DocumentSymbol> symbols = List.copyOf(LspConversions.documentSymbols(result));
         if (requestedText.equals(openDocuments.get(uri))) {
             symbolCache.put(uri, new SymbolCache(requestedText, symbols));
@@ -1433,10 +1561,22 @@ public class JdtLsService {
     }
 
     public List<DocumentHighlight> documentHighlights(Path filePath, String text, int line, int col) {
+        return documentHighlights(filePath, text, line, col, false);
+    }
+
+    public List<DocumentHighlight> documentHighlightsInteractive(Path filePath, String text,
+                                                                 int line, int col) {
+        return documentHighlights(filePath, text, line, col, true);
+    }
+
+    private List<DocumentHighlight> documentHighlights(Path filePath, String text, int line, int col,
+                                                       boolean interactive) {
         if (!capabilities.documentHighlight()) {
             return List.of();
         }
-        JsonNode result = requestAt("textDocument/documentHighlight", filePath, text, line, col);
+        JsonNode result = interactive
+                ? requestAtInteractive("textDocument/documentHighlight", filePath, text, line, col)
+                : requestAt("textDocument/documentHighlight", filePath, text, line, col);
         if (result == null || !result.isArray() || !isCurrentText(filePath, text)) {
             return List.of();
         }
@@ -1804,14 +1944,43 @@ public class JdtLsService {
         if (result == null || !result.isArray()) {
             return List.of();
         }
-        List<JavaCodeLens> lenses = new ArrayList<>(result.size());
-        for (JsonNode unresolved : result) {
-            JsonNode resolved = unresolved;
-            if (!unresolved.hasNonNull("command")) {
-                JsonNode answer = request("codeLens/resolve", unresolved, REQUEST_TIMEOUT_MS);
-                if (answer != null && !answer.isNull()) {
-                    resolved = answer;
+        List<JsonNode> raw = new ArrayList<>(result.size());
+        result.forEach(raw::add);
+
+        LspJsonRpcClient rpc = client;
+        Map<Integer, CompletableFuture<JsonNode>> pending = new LinkedHashMap<>();
+        if (rpc != null) {
+            for (int index = 0; index < raw.size() && pending.size() < MAX_CODE_LENS_RESOLVE; index++) {
+                if (!raw.get(index).hasNonNull("command")) {
+                    pending.put(index, rpc.request("codeLens/resolve", raw.get(index)));
                 }
+            }
+        }
+
+        long deadline = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(CODE_LENS_RESOLVE_BUDGET_MS);
+        boolean complete = pending.size() == countUnresolved(raw);
+        List<JavaCodeLens> lenses = new ArrayList<>(raw.size());
+        for (int index = 0; index < raw.size(); index++) {
+            JsonNode resolved = raw.get(index);
+            CompletableFuture<JsonNode> future = pending.get(index);
+            if (future != null) {
+                try {
+                    long remaining = deadline - System.nanoTime();
+                    JsonNode answer = remaining <= 0
+                            ? future.getNow(null)
+                            : future.get(remaining, TimeUnit.NANOSECONDS);
+                    if (answer != null && !answer.isNull()) {
+                        resolved = answer;
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    complete = false;
+                } catch (Exception e) {
+                    logRequestFailure("codeLens/resolve", e);
+                    complete = false;
+                }
+                complete = complete && resolved != raw.get(index);
             }
             JavaCodeLens lens = LspConversions.codeLens(resolved);
             if (lens != null) {
@@ -1819,11 +1988,98 @@ public class JdtLsService {
             }
         }
         if (!requestedText.equals(openDocuments.get(uri))) {
+            pending.values().forEach(future -> future.cancel(false));
             return List.of();
         }
         List<JavaCodeLens> answer = List.copyOf(lenses);
-        codeLensCache.put(uri, new CodeLensCache(requestedText, answer));
+        if (complete) {
+            codeLensRetries.remove(uri);
+            codeLensCache.put(uri, new CodeLensCache(requestedText, answer));
+        } else {
+            scheduleCodeLensRetry(uri, filePath, requestedText, pending.values());
+        }
         return answer;
+    }
+
+    private void scheduleCodeLensRetry(String uri, Path filePath, String text,
+                                       Collection<CompletableFuture<JsonNode>> pending) {
+        List<CompletableFuture<JsonNode>> unfinished = pending.stream()
+                .filter(future -> !future.isDone())
+                .toList();
+        if (unfinished.isEmpty()) {
+            return;
+        }
+        AtomicBoolean claimed = new AtomicBoolean();
+        codeLensRetries.compute(uri, (key, current) -> {
+            CodeLensRetry next = claimCodeLensRetry(current, text);
+            if (next == null) {
+                return current;
+            }
+            claimed.set(true);
+            return next;
+        });
+        if (!claimed.get()) {
+            unfinished.forEach(future -> future.cancel(false));
+            return;
+        }
+        CompletableFuture.allOf(unfinished.toArray(CompletableFuture[]::new))
+                .orTimeout(CODE_LENS_RETRY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        unfinished.forEach(future -> future.cancel(false));
+                    }
+                    onCodeLensResolveSettled(uri, filePath, text);
+                });
+    }
+
+    static CodeLensRetry claimCodeLensRetry(CodeLensRetry current, String text) {
+        CodeLensRetry base = current != null && current.text().equals(text)
+                ? current : new CodeLensRetry(text, 0, false);
+        if (base.inFlight() || base.attempts() >= MAX_CODE_LENS_RETRIES) {
+            return null;
+        }
+        return new CodeLensRetry(text, base.attempts() + 1, true);
+    }
+
+    private void onCodeLensResolveSettled(String uri, Path filePath, String text) {
+        codeLensRetries.computeIfPresent(uri, (key, current) ->
+                current.text().equals(text) ? current.settled() : current);
+        if (!isReady() || !text.equals(openDocuments.get(uri))) {
+            return;
+        }
+        codeLensCache.remove(uri);
+        onCodeLensRefresh.accept(filePath);
+    }
+
+    private void refreshCodeLensesAfterWork() {
+        if (!isReady()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long previous = lastCodeLensWorkRefresh.get();
+        if (now - previous < CODE_LENS_WORK_REFRESH_COOLDOWN_MS
+                || !lastCodeLensWorkRefresh.compareAndSet(previous, now)) {
+            return;
+        }
+        openDocuments.keySet().forEach(uri -> {
+            if (codeLensCache.containsKey(uri)) {
+                return;
+            }
+            Path path = LspConversions.toPath(uri);
+            if (path != null) {
+                onCodeLensRefresh.accept(path);
+            }
+        });
+    }
+
+    private static int countUnresolved(List<JsonNode> lenses) {
+        int total = 0;
+        for (JsonNode lens : lenses) {
+            if (!lens.hasNonNull("command")) {
+                total++;
+            }
+        }
+        return total;
     }
 
     public List<SemanticToken> semanticTokens(Path filePath, String text) {

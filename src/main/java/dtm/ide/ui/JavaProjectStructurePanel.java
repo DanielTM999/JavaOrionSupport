@@ -2,6 +2,7 @@ package dtm.ide.ui;
 
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.ProjectLayout;
+import dtm.ide.run.form.RunFormUi;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.stools.component.feedback.badge.BadgeLabel;
 import dtm.stools.component.panels.card.CardPanel;
@@ -32,6 +33,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 public final class JavaProjectStructurePanel extends JPanel {
@@ -77,6 +79,10 @@ public final class JavaProjectStructurePanel extends JPanel {
             JavaIcons.create(JavaIcons.SMALL));
     private final JButton reloadButton = new JButton(text("action.reload", "Recarregar"),
             JavaIcons.sync(JavaIcons.SMALL));
+    private final JButton addFolderButton = new JButton(
+            text("action.addFolder", "Adicionar pasta..."), JavaIcons.folder(JavaIcons.SMALL));
+    private final JButton removeFolderButton = new JButton(
+            text("action.removeFolder", "Remover"), JavaIcons.stop(JavaIcons.SMALL));
     private final BadgeLabel status = new BadgeLabel(" ", BadgeLabel.Tone.NEUTRAL)
             .setStyle(BadgeLabel.Style.SOFT).setShowDot(true).setSize(BadgeLabel.Size.SM);
 
@@ -106,6 +112,11 @@ public final class JavaProjectStructurePanel extends JPanel {
 
         applyButton.addActionListener(event -> apply());
         reloadButton.addActionListener(event -> reload());
+        addFolderButton.addActionListener(event -> addFolder());
+        removeFolderButton.addActionListener(event -> removeSelectedFolder());
+        foldersTable.getSelectionModel().addListSelectionListener(
+                event -> refreshFolderActions());
+        refreshFolderActions();
 
         UiSupport.quietFocus(this);
         modulesTable.setFocusable(true);
@@ -173,6 +184,16 @@ public final class JavaProjectStructurePanel extends JPanel {
         foldersTable.getColumnModel().getColumn(0).setCellRenderer(UiSupport.monoColumn());
 
         JScrollPane scroll = UiSupport.plainScroll(new JScrollPane(foldersTable));
+
+        ToolBarPanel actions = new ToolBarPanel().setPaintSurface(false)
+                .setItemGap(UiTokens.space(1));
+        actions.addItem(addFolderButton).addItem(removeFolderButton).addSpacer();
+
+        JPanel content = new JPanel(new BorderLayout(0, UiTokens.space(1)));
+        content.setOpaque(false);
+        content.add(actions, BorderLayout.NORTH);
+        content.add(scroll, BorderLayout.CENTER);
+
         JPanel wrapper = new JPanel(new BorderLayout());
         wrapper.setOpaque(false);
         wrapper.add(new CardPanel(text("card.sources", "Pastas de codigo"),
@@ -180,8 +201,65 @@ public final class JavaProjectStructurePanel extends JPanel {
                         "Marque cada pasta como codigo, teste, recurso ou excluida"))
                 .setVariant(CardPanel.Variant.FILLED)
                 .setArc(UiTokens.radius(UiTokens.Radius.MD))
-                .setContent(scroll), BorderLayout.CENTER);
+                .setContent(content), BorderLayout.CENTER);
         return wrapper;
+    }
+
+    private void refreshFolderActions() {
+        removeFolderButton.setEnabled(foldersTable.getSelectedRow() >= 0);
+    }
+
+    private void addFolder() {
+        Path root = host.projectRoot();
+        RunFormUi.chooseDirectory(this,
+                text("action.addFolder.title", "Escolha a pasta do projeto"), root, chosen -> {
+                    if (chosen == null) {
+                        return;
+                    }
+                    Path folder = chosen.toAbsolutePath().normalize();
+                    if (root != null && !folder.startsWith(root.toAbsolutePath().normalize())) {
+                        status.setText(text("status.folderOutside",
+                                        "A pasta precisa estar dentro do projeto"))
+                                .setTone(BadgeLabel.Tone.DANGER);
+                        return;
+                    }
+                    int existing = foldersModel.indexOf(folder);
+                    if (existing >= 0) {
+                        selectFolderRow(existing);
+                        status.setText(text("status.folderAlreadyListed", "Pasta ja listada"))
+                                .setTone(BadgeLabel.Tone.WARNING);
+                        return;
+                    }
+                    foldersModel.add(new FolderRole(folder, ProjectLayout.Role.RESOURCE));
+                    selectFolderRow(foldersModel.getRowCount() - 1);
+                    status.setText(text("status.folderAdded",
+                                    "Escolha o papel da pasta e clique em Aplicar"))
+                            .setTone(BadgeLabel.Tone.INFO);
+                });
+    }
+
+    private void removeSelectedFolder() {
+        int row = foldersTable.getSelectedRow();
+        if (row < 0) {
+            return;
+        }
+        if (foldersTable.isEditing()) {
+            foldersTable.getCellEditor().cancelCellEditing();
+        }
+        foldersModel.remove(row);
+        refreshFolderActions();
+        status.setText(text("status.folderRemoved",
+                        "Pasta removida; clique em Aplicar para confirmar"))
+                .setTone(BadgeLabel.Tone.INFO);
+    }
+
+    private void selectFolderRow(int row) {
+        if (row < 0 || row >= foldersModel.getRowCount()) {
+            return;
+        }
+        foldersTable.setRowSelectionInterval(row, row);
+        foldersTable.scrollRectToVisible(foldersTable.getCellRect(row, 0, true));
+        refreshFolderActions();
     }
 
     private static JPanel field(String label, JComponent input, String hint) {
@@ -247,6 +325,7 @@ public final class JavaProjectStructurePanel extends JPanel {
 
         modulesModel.setRows(host.modules(), host.projectRoot());
         foldersModel.setRows(host.folders(), host.projectRoot());
+        refreshFolderActions();
         status.setText(text("status.ready", "Pronto")).setTone(BadgeLabel.Tone.NEUTRAL);
     }
 
@@ -264,6 +343,9 @@ public final class JavaProjectStructurePanel extends JPanel {
     }
 
     private void apply() {
+        if (foldersTable.isEditing()) {
+            foldersTable.getCellEditor().stopCellEditing();
+        }
         JdkItem selectedJdk = (JdkItem) jdkSelector.getSelectedItem();
         Integer level = (Integer) languageLevel.getSelectedItem();
         host.apply(selectedJdk == null ? null : selectedJdk.installation, level,
@@ -345,6 +427,32 @@ public final class JavaProjectStructurePanel extends JPanel {
 
         List<FolderRole> rows() {
             return List.copyOf(rows);
+        }
+
+        int indexOf(Path folder) {
+            for (int index = 0; index < rows.size(); index++) {
+                if (Objects.equals(normalized(rows.get(index).folder()), normalized(folder))) {
+                    return index;
+                }
+            }
+            return -1;
+        }
+
+        void add(FolderRole row) {
+            rows.add(row);
+            fireTableRowsInserted(rows.size() - 1, rows.size() - 1);
+        }
+
+        void remove(int index) {
+            if (index < 0 || index >= rows.size()) {
+                return;
+            }
+            rows.remove(index);
+            fireTableRowsDeleted(index, index);
+        }
+
+        private static Path normalized(Path path) {
+            return path == null ? null : path.toAbsolutePath().normalize();
         }
 
         @Override

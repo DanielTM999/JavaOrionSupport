@@ -12,6 +12,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdtLsServiceTest {
@@ -112,6 +113,34 @@ class JdtLsServiceTest {
         assertFalse(JdtLsService.isCompletionDocumentationFailure(
                 "Failed to import projects"));
         assertFalse(JdtLsService.isCompletionDocumentationFailure(null));
+    }
+
+    @Test
+    void retriesTheCodeLensResolveUntilTheServerAnswersInTime() {
+        JdtLsService.CodeLensRetry first = JdtLsService.claimCodeLensRetry(null, "texto");
+        assertEquals(1, first.attempts());
+        assertTrue(first.inFlight());
+
+        assertNull(JdtLsService.claimCodeLensRetry(first, "texto"));
+
+        JdtLsService.CodeLensRetry second =
+                JdtLsService.claimCodeLensRetry(first.settled(), "texto");
+        assertEquals(2, second.attempts());
+
+        assertNull(JdtLsService.claimCodeLensRetry(second.settled(), "texto"));
+    }
+
+    @Test
+    void countsCodeLensRetriesPerBufferContent() {
+        JdtLsService.CodeLensRetry exhausted =
+                new JdtLsService.CodeLensRetry("antigo", 2, false);
+
+        assertNull(JdtLsService.claimCodeLensRetry(exhausted, "antigo"));
+
+        JdtLsService.CodeLensRetry afterEdit =
+                JdtLsService.claimCodeLensRetry(exhausted, "editado");
+        assertEquals(1, afterEdit.attempts());
+        assertEquals("editado", afterEdit.text());
     }
 
     @Test

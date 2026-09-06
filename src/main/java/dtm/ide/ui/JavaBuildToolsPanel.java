@@ -35,6 +35,7 @@ import java.awt.CardLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -86,6 +87,9 @@ public final class JavaBuildToolsPanel extends JPanel {
     private static final String CARD_EMPTY = "empty";
     private static final String CARD_TASKS = "tasks";
 
+    private record LoadedModel(BuildToolModel model, Set<String> activeProfiles) {
+    }
+
     private final Host host;
     private final TreeView<BuildToolModel.Node> tree = new TreeView<>();
     private final MaskedTextField filter = new MaskedTextField();
@@ -124,8 +128,6 @@ public final class JavaBuildToolsPanel extends JPanel {
         setBackground(UiTokens.background());
         setBorder(BorderFactory.createEmptyBorder(
                 UiTokens.space(2), UiTokens.space(2), UiTokens.space(2), UiTokens.space(2)));
-        activeProfiles.addAll(host.activeProfiles());
-
         configureTree();
         configureFilter();
         add(toolbar(), BorderLayout.NORTH);
@@ -169,7 +171,7 @@ public final class JavaBuildToolsPanel extends JPanel {
         cards.show(body, CARD_LOADING);
         refreshButton.setEnabled(false);
         status.setText(text("status.loading", "Carregando")).setTone(BadgeLabel.Tone.INFO);
-        CompletableFuture.supplyAsync(host::load)
+        CompletableFuture.supplyAsync(() -> new LoadedModel(host.load(), host.activeProfiles()))
                 .whenComplete((value, error) -> SwingUtilities.invokeLater(() -> {
                     if (ticket != reloadTicket) {
                         return;
@@ -181,13 +183,28 @@ public final class JavaBuildToolsPanel extends JPanel {
                                 .setTone(BadgeLabel.Tone.DANGER);
                         return;
                     }
-                    current = value == null
-                            ? new BuildToolModel("Build Tools", List.of(), List.of()) : value;
+                    current = value == null || value.model() == null
+                            ? new BuildToolModel("Build Tools", List.of(), List.of()) : value.model();
+                    reloadActiveProfiles(value == null ? Set.of() : value.activeProfiles());
                     rebuild();
                     status.setText(current.projects().size() + " "
                                     + text("status.projects", "projeto(s)"))
                             .setTone(BadgeLabel.Tone.NEUTRAL);
                 }));
+    }
+
+    private void reloadActiveProfiles(Set<String> savedProfiles) {
+        Set<String> saved = savedProfiles == null ? Set.of() : Set.copyOf(savedProfiles);
+        Set<String> stored = new LinkedHashSet<>(saved);
+        Set<String> available = new LinkedHashSet<>();
+        current.profiles().forEach(profile -> available.add(profile.name()));
+        stored.retainAll(available);
+
+        activeProfiles.clear();
+        activeProfiles.addAll(stored);
+        if (!stored.equals(saved)) {
+            host.profilesChanged(Set.copyOf(stored));
+        }
     }
 
     public void setSyncPending(boolean pending) {
@@ -292,7 +309,7 @@ public final class JavaBuildToolsPanel extends JPanel {
         toolBadge.setText(current.tool());
 
         Set<String> expansion = tree.snapshotExpansion();
-        TreeNode<BuildToolModel.Node> root = new TreeNode<>(null, "root");
+        TreeNode<BuildToolModel.Node> root = UiSupport.treeNode(null, "root");
         appendProfiles(root, current.profiles(), query);
         for (BuildToolModel.Node project : current.projects()) {
             append(root, project, query);
@@ -324,7 +341,7 @@ public final class JavaBuildToolsPanel extends JPanel {
         if (profiles.isEmpty()) {
             return;
         }
-        TreeNode<BuildToolModel.Node> group = new TreeNode<>(null, "group|profiles");
+        TreeNode<BuildToolModel.Node> group = UiSupport.treeNode(null, "group|profiles");
         group.setLabel(text("group.profiles", "Profiles"));
         group.setIcon(JavaIcons.folder(JavaIcons.SMALL));
         group.setForeground(UiTokens.muted());
@@ -342,7 +359,7 @@ public final class JavaBuildToolsPanel extends JPanel {
     }
 
     private TreeNode<BuildToolModel.Node> profileNode(BuildToolModel.Node profile) {
-        TreeNode<BuildToolModel.Node> node = new TreeNode<>(profile, nodeId(profile));
+        TreeNode<BuildToolModel.Node> node = UiSupport.treeNode(profile, nodeId(profile));
         node.setLabel(profile.name());
         node.setCheckable(true);
         node.setCheckState(activeProfiles.contains(profile.name())
@@ -354,7 +371,7 @@ public final class JavaBuildToolsPanel extends JPanel {
 
     private boolean append(TreeNode<BuildToolModel.Node> parent, BuildToolModel.Node value,
                            String query) {
-        TreeNode<BuildToolModel.Node> node = new TreeNode<>(value, nodeId(value));
+        TreeNode<BuildToolModel.Node> node = UiSupport.treeNode(value, nodeId(value));
         node.setLabel(labelOf(value));
         node.setIcon(iconFor(value));
         node.setTooltip(tooltipFor(value));
@@ -404,7 +421,7 @@ public final class JavaBuildToolsPanel extends JPanel {
     private boolean appendRunConfigurations(TreeNode<BuildToolModel.Node> parent,
                                             BuildToolModel.Node project, String query) {
         List<BuildRunConfigurations.Entry> entries = host.runConfigurations();
-        TreeNode<BuildToolModel.Node> group = new TreeNode<>(null,
+        TreeNode<BuildToolModel.Node> group = UiSupport.treeNode(null,
                 "group|runconfigs|" + project.name());
         group.setLabel(text("group.runConfigurations", "Run Configurations"));
         group.setIcon(JavaIcons.folder(JavaIcons.SMALL));
@@ -422,7 +439,7 @@ public final class JavaBuildToolsPanel extends JPanel {
                     "(" + String.join(" ", entry.goals()) + ")", project.module(),
                     entry.goals(), List.of());
             TreeNode<BuildToolModel.Node> node =
-                    new TreeNode<>(value, "runconfig|" + project.name() + "|" + entry.name());
+                    UiSupport.treeNode(value, "runconfig|" + project.name() + "|" + entry.name());
             node.setLabel(labelOf(value));
             node.setIcon(JavaIcons.run(JavaIcons.SMALL));
             node.setTooltip(text("tooltip.runConfiguration",
@@ -465,7 +482,7 @@ public final class JavaBuildToolsPanel extends JPanel {
         BuildToolModel.Node value = new BuildToolModel.Node(
                 BuildToolModel.Kind.PLUGIN_GOAL, goal.invocation(), goal.description(),
                 plugin.coordinate(), plugin.module(), List.of(goal.invocation()), List.of());
-        TreeNode<BuildToolModel.Node> node = new TreeNode<>(value,
+        TreeNode<BuildToolModel.Node> node = UiSupport.treeNode(value,
                 "goal|" + plugin.name() + "|" + goal.name());
         node.setLabel(goal.invocation());
         node.setIcon(JavaIcons.goal(JavaIcons.SMALL));
@@ -475,7 +492,7 @@ public final class JavaBuildToolsPanel extends JPanel {
 
     private TreeNode<BuildToolModel.Node> unavailableGoalsNode(BuildToolModel.Node plugin) {
         TreeNode<BuildToolModel.Node> node =
-                new TreeNode<>(null, "goal|" + plugin.name() + "|unavailable");
+                UiSupport.treeNode(null, "goal|" + plugin.name() + "|unavailable");
         node.setLabel(text("plugin.goalsUnavailable", "Goals indisponiveis - rode o build uma vez"));
         node.setForeground(UiTokens.muted());
         node.setFont(UiTokens.fontSmall());
@@ -545,7 +562,7 @@ public final class JavaBuildToolsPanel extends JPanel {
     }
 
     private List<String> selectedGoals() {
-        List<TreeNode<BuildToolModel.Node>> selected = tree.getSelectedNodes();
+        List<TreeNode<BuildToolModel.Node>> selected = selectedGoalNodes();
         if (selected == null || selected.isEmpty()) {
             return List.of();
         }
@@ -558,6 +575,14 @@ public final class JavaBuildToolsPanel extends JPanel {
             }
         }
         return List.copyOf(goals);
+    }
+
+    private List<TreeNode<BuildToolModel.Node>> selectedGoalNodes() {
+        List<TreeNode<BuildToolModel.Node>> selected = new ArrayList<>(tree.getSelectedNodes());
+        selected.removeIf(node -> node.getData() == null || !node.getData().executable()
+                || node.getData().kind() == BuildToolModel.Kind.RUN_CONFIG);
+        selected.sort(Comparator.comparingInt(node -> tree.getRowForPath(tree.getPathForNode(node))));
+        return selected;
     }
 
     private void saveRunConfiguration(List<String> goals) {
@@ -621,11 +646,19 @@ public final class JavaBuildToolsPanel extends JPanel {
         if (node == null) {
             return;
         }
-        status.setText(text("status.running", "Executando") + " " + node.name())
+        List<TreeNode<BuildToolModel.Node>> selected = selectedGoalNodes();
+        List<String> goals = selectedGoals();
+        if (selected.size() > 1 && !goals.isEmpty()) {
+            node = selected.getFirst().getData();
+        }
+        String executionName = selected.size() > 1 ? String.join(" ", goals) : node.name();
+        status.setText(text("status.running", "Executando") + " " + executionName)
                 .setTone(BadgeLabel.Tone.INFO);
         runButton.setEnabled(false);
         stopButton.setEnabled(true);
-        if (node.command().size() > 1 || node.kind() == BuildToolModel.Kind.RUN_CONFIG
+        if (selected.size() > 1) {
+            host.executeGoals(node, goals);
+        } else if (node.command().size() > 1 || node.kind() == BuildToolModel.Kind.RUN_CONFIG
                 || node.kind() == BuildToolModel.Kind.PLUGIN_GOAL) {
             host.executeGoals(node, node.command());
         } else {

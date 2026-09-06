@@ -32,6 +32,11 @@ public final class JavaDevelopmentBuildService {
     }
 
     public Result build(JavaModule module, boolean fullBuild, Consumer<String> output) {
+        return build(module, fullBuild, output, null);
+    }
+
+    public Result build(JavaModule module, boolean fullBuild, Consumer<String> output,
+                        JdtLsService.StatusListener progress) {
         Instant started = Instant.now();
         JdtLsService server = languageServer == null ? null : languageServer.get();
         if (server == null || !server.isInteractive()) {
@@ -40,7 +45,8 @@ public final class JavaDevelopmentBuildService {
         emit(output, "> JDT incremental " + (fullBuild ? "rebuild" : "build")
                 + (module == null ? "" : " " + module.name()));
         try {
-            String status = server.buildWorkspace(fullBuild).toUpperCase(java.util.Locale.ROOT);
+            String status = server.buildWorkspace(fullBuild, progress)
+                    .toUpperCase(java.util.Locale.ROOT);
             Duration duration = Duration.between(started, Instant.now());
             if (status.contains("SUCCEED")) {
                 emit(output, "Build incremental concluido em " + duration.toMillis() + " ms");

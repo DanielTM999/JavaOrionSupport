@@ -6,9 +6,11 @@ import lombok.extern.slf4j.Slf4j;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
+import java.util.Set;
 
 @Slf4j
 public final class BuildRunConfigurations {
@@ -30,6 +32,7 @@ public final class BuildRunConfigurations {
     }
 
     private static final String KEY_PREFIX = "buildRun.";
+    private static final String KEY_ACTIVE_PROFILES = "buildProfiles";
 
     private final Path projectRoot;
 
@@ -71,6 +74,33 @@ public final class BuildRunConfigurations {
         Properties properties = load();
         if (properties.remove(KEY_PREFIX + name) == null) {
             return false;
+        }
+        return store(properties);
+    }
+
+    public Set<String> activeProfiles() {
+        Properties properties = load();
+        Set<String> profiles = new LinkedHashSet<>();
+        String raw = properties.getProperty(KEY_ACTIVE_PROFILES, "");
+        for (String part : raw.split(",")) {
+            String profile = part.trim();
+            if (!profile.isEmpty()) {
+                profiles.add(profile);
+            }
+        }
+        return Set.copyOf(profiles);
+    }
+
+    public boolean saveActiveProfiles(Set<String> activeProfiles) {
+        if (projectRoot == null) {
+            return false;
+        }
+        Properties properties = load();
+        Set<String> profiles = activeProfiles == null ? Set.of() : activeProfiles;
+        if (profiles.isEmpty()) {
+            properties.remove(KEY_ACTIVE_PROFILES);
+        } else {
+            properties.setProperty(KEY_ACTIVE_PROFILES, String.join(",", profiles));
         }
         return store(properties);
     }

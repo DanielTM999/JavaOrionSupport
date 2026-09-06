@@ -16,16 +16,23 @@ final class TwoStageProcessTerminator {
     private final ProcessHandle root;
     private final BooleanSupplier alive;
     private final Runnable gracefulStop;
+    private final Runnable forceStop;
     private final AtomicBoolean gracefulStopRequested = new AtomicBoolean();
 
     TwoStageProcessTerminator(Process process) {
-        this(process.toHandle(), process::isAlive, process::destroy);
+        this(handleOf(process), process::isAlive, process::destroy, process::destroyForcibly);
     }
 
     TwoStageProcessTerminator(ProcessHandle root, BooleanSupplier alive, Runnable gracefulStop) {
+        this(root, alive, gracefulStop, () -> { });
+    }
+
+    private TwoStageProcessTerminator(ProcessHandle root, BooleanSupplier alive,
+                                      Runnable gracefulStop, Runnable forceStop) {
         this.root = root;
         this.alive = alive;
         this.gracefulStop = gracefulStop;
+        this.forceStop = forceStop;
     }
 
     boolean isAlive() {
@@ -41,11 +48,43 @@ final class TwoStageProcessTerminator {
                 gracefulStop.run();
             } catch (RuntimeException error) {
                 log.debug("Falha ao solicitar a parada normal do processo {}: {}",
-                        root.pid(), error.getMessage());
+                        rootPid(), error.getMessage());
+            }
+            return;
+        }
+        if (root == null) {
+            try {
+                forceStop.run();
+            } catch (RuntimeException error) {
+                log.debug("Falha ao finalizar o processo a forca: {}", error.getMessage());
             }
             return;
         }
         forceTerminateTree(root);
+    }
+
+    private static ProcessHandle handleOf(Process process) {
+        try {
+            return process.toHandle();
+        } catch (RuntimeException error) {
+            log.debug("Processo sem ProcessHandle direto ({}); tentando resolver pelo pid.",
+                    error.toString());
+        }
+        try {
+            return ProcessHandle.of(process.pid()).orElse(null);
+        } catch (RuntimeException error) {
+            log.debug("Processo sem pid utilizavel ({}); a arvore nao sera encerrada.",
+                    error.toString());
+            return null;
+        }
+    }
+
+    private String rootPid() {
+        try {
+            return root == null ? "?" : String.valueOf(root.pid());
+        } catch (RuntimeException error) {
+            return "?";
+        }
     }
 
     private static void forceTerminateTree(ProcessHandle process) {
