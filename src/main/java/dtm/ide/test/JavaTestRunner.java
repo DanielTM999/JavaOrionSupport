@@ -3,6 +3,7 @@ package dtm.ide.test;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
+import dtm.ide.coverage.CoverageAgent;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import lombok.extern.slf4j.Slf4j;
@@ -89,6 +90,81 @@ public class JavaTestRunner {
                 target == null ? descriptor.root() : target.root());
 
         return new TestRun(buildResult, results);
+    }
+
+    public record CoverageRun(TestRun testRun, Path execFile) {
+
+        public CoverageRun {
+            testRun = testRun == null ? new TestRun(null, List.of()) : testRun;
+        }
+
+        public boolean hasExecFile() {
+            return execFile != null && Files.isRegularFile(execFile);
+        }
+    }
+
+    public CoverageRun runWithCoverage(List<JavaTest> tests, JavaModule module, Path agentJar,
+                                       Consumer<String> output) {
+        if (buildSystem == null || descriptor == null || agentJar == null) {
+            return new CoverageRun(null, null);
+        }
+        JavaModule target = module == null ? descriptor.rootModule() : module;
+        Path reportRoot = target == null ? descriptor.root() : target.root();
+        SurefireReportParser.clearReports(reportRoot);
+
+        Path execFile = CoverageAgent.execFileFor(reportRoot);
+        if (!prepareExecFile(execFile, output)) {
+            return new CoverageRun(null, null);
+        }
+
+        List<String> arguments = new ArrayList<>(selectorArguments(tests));
+        Path initScript = null;
+        try {
+            if (descriptor.isGradle()) {
+                initScript = Files.createTempFile("orion-gradle-coverage", ".gradle");
+                Files.writeString(initScript, CoverageAgent.gradleInitScript(agentJar, execFile));
+                arguments.add("--init-script");
+                arguments.add(initScript.toString());
+            } else {
+                arguments.addAll(CoverageAgent.mavenArguments(agentJar, execFile));
+            }
+            BuildResult result = buildSystem.execute(
+                    BuildRequest.of(BuildSystem.BuildAction.TEST, target).withArguments(arguments),
+                    output);
+            return new CoverageRun(
+                    new TestRun(result, SurefireReportParser.readModuleReports(reportRoot)),
+                    execFile);
+        } catch (Exception error) {
+            if (output != null) {
+                output.accept(error.getMessage() == null ? error.getClass().getSimpleName()
+                        : error.getMessage());
+            }
+            return new CoverageRun(null, null);
+        } finally {
+            if (initScript != null) {
+                try {
+                    Files.deleteIfExists(initScript);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private static boolean prepareExecFile(Path execFile, Consumer<String> output) {
+        if (execFile == null) {
+            return false;
+        }
+        try {
+            Files.createDirectories(execFile.getParent());
+            Files.deleteIfExists(execFile);
+            return true;
+        } catch (Exception error) {
+            if (output != null) {
+                output.accept(error.getMessage() == null ? error.getClass().getSimpleName()
+                        : error.getMessage());
+            }
+            return false;
+        }
     }
 
     public TestRun debug(List<JavaTest> tests, JavaModule module, int debugPort,

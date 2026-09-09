@@ -58,6 +58,9 @@ public final class JavaSettingsPage implements PluginSettingsPage {
     private final JCheckBox buildFileCompletion =
             new JCheckBox(text("field.buildFileCompletion",
                     "Completar dependencias no pom.xml e no build.gradle"));
+    private final JCheckBox coverageGutter =
+            new JCheckBox(text("field.coverageGutter",
+                    "Marcar cobertura de codigo na barra lateral do editor"));
     private final JTextField todoMarkers = new JTextField();
 
     private final JCheckBox lombokSupport =
@@ -132,6 +135,7 @@ public final class JavaSettingsPage implements PluginSettingsPage {
 
         settings.setLombokSupport(lombokSupport.isSelected());
         settings.setBuildFileCompletion(buildFileCompletion.isSelected());
+        settings.setCoverageGutter(coverageGutter.isSelected());
         settings.setTodoMarkers(parseMarkers(todoMarkers.getText()));
         settings.setSpringSupport(springSupport.isSelected());
         settings.setSpringCodeLens(springCodeLens.isSelected());
@@ -185,6 +189,7 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         content.add(section(text("section.buildRun", "Build e execucao"),
                 buildOffline,
                 skipTestsOnRun,
+                coverageGutter,
                 labeled(text("field.hotReload", "Hot reload:"), hotReloadMode),
                 labeled(text("field.jdtBuildMode", "Erros do projeto:"), jdtBuildMode)));
 
@@ -290,6 +295,7 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         defaultJdk.setSelectedItem(settings.getDefaultJdkVersion());
         lombokSupport.setSelected(settings.isLombokSupport());
         buildFileCompletion.setSelected(settings.isBuildFileCompletion());
+        coverageGutter.setSelected(settings.isCoverageGutter());
         todoMarkers.setText(String.join(", ", settings.getTodoMarkers()));
 
         formatOnSave.setSelected(settings.isFormatOnSave());

@@ -5,7 +5,6 @@ import javax.swing.BorderFactory;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
 import javax.swing.JComponent;
-import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JPanel;
@@ -15,7 +14,6 @@ import javax.swing.JTextField;
 import javax.swing.KeyStroke;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
-import javax.swing.WindowConstants;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.plaf.basic.BasicScrollBarUI;
@@ -26,17 +24,13 @@ import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
-import java.awt.GraphicsConfiguration;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
-import java.awt.Window;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.awt.event.WindowAdapter;
-import java.awt.event.WindowEvent;
 import java.util.List;
 
 public final class UsagesPopup {
@@ -54,25 +48,21 @@ public final class UsagesPopup {
     private static final Font UI_FONT = new Font("Segoe UI", Font.PLAIN, 12);
     private static final Font MONO_FONT = new Font("JetBrains Mono", Font.PLAIN, 12);
 
-    private static JDialog current;
+    public interface Host {
+
+        void close();
+
+        void moveTo(int screenX, int screenY);
+    }
 
     private UsagesPopup() {
     }
 
-    public static void show(Window owner, Point screen, String headerText, List<Item> items) {
-        List<Item> effective = items == null ? List.of() : items;
-        SwingUtilities.invokeLater(() -> doShow(owner, screen, headerText, effective));
+    public static JComponent content(String headerText, List<Item> items, Host host) {
+        return build(headerText, items == null ? List.of() : items, host);
     }
 
-    private static void doShow(Window owner, Point screen, String headerText, List<Item> items) {
-        if (current != null) {
-            current.dispose();
-        }
-        JDialog dialog = new JDialog(owner);
-        current = dialog;
-        dialog.setUndecorated(true);
-        dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
-
+    private static JComponent build(String headerText, List<Item> items, Host host) {
         JPanel root = new JPanel(new BorderLayout());
         root.setBackground(BG);
         root.setBorder(BorderFactory.createLineBorder(BORDER));
@@ -82,7 +72,7 @@ public final class UsagesPopup {
         header.setForeground(MUTED);
         header.setFont(UI_FONT.deriveFont(Font.BOLD, 11f));
         header.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
-        installDrag(dialog, header);
+        installDrag(root, header, host);
         JPanel top = new JPanel(new BorderLayout());
         top.setOpaque(false);
         top.add(header, BorderLayout.NORTH);
@@ -128,13 +118,13 @@ public final class UsagesPopup {
 
         Runnable activate = () -> {
             Item item = list.getSelectedValue();
-            dialog.dispose();
+            host.close();
             if (item != null && item.onActivate() != null) {
                 item.onActivate().run();
             }
         };
         bind(search, KeyEvent.VK_ENTER, "activate", activate);
-        bind(search, KeyEvent.VK_ESCAPE, "close", dialog::dispose);
+        bind(search, KeyEvent.VK_ESCAPE, "close", host::close);
         search.getDocument().addDocumentListener(new DocumentListener() {
             @Override public void insertUpdate(DocumentEvent event) { selectFirst(); }
             @Override public void removeUpdate(DocumentEvent event) { selectFirst(); }
@@ -165,7 +155,7 @@ public final class UsagesPopup {
             }
         });
         bind(list, KeyEvent.VK_ENTER, "activate", activate);
-        bind(list, KeyEvent.VK_ESCAPE, "close", dialog::dispose);
+        bind(list, KeyEvent.VK_ESCAPE, "close", host::close);
 
         JScrollPane scroll = new JScrollPane(list);
         scroll.setBorder(BorderFactory.createEmptyBorder());
@@ -174,26 +164,10 @@ public final class UsagesPopup {
         applyThinScrollBar(scroll.getHorizontalScrollBar());
         root.add(scroll, BorderLayout.CENTER);
 
-        dialog.setContentPane(root);
         int rows = Math.min(Math.max(items.size(), 1), 12);
-        dialog.setSize(new Dimension(560, 68 + rows * 24));
-        position(dialog, owner, screen);
-        dialog.addWindowFocusListener(new WindowAdapter() {
-            @Override
-            public void windowLostFocus(WindowEvent event) {
-                dialog.dispose();
-            }
-        });
-        dialog.addWindowListener(new WindowAdapter() {
-            @Override
-            public void windowClosed(WindowEvent event) {
-                if (current == dialog) {
-                    current = null;
-                }
-            }
-        });
-        dialog.setVisible(true);
-        search.requestFocusInWindow();
+        root.setPreferredSize(new Dimension(560, 68 + rows * 24));
+        SwingUtilities.invokeLater(search::requestFocusInWindow);
+        return root;
     }
 
     private static void bind(JComponent component, int key, String name, Runnable action) {
@@ -204,23 +178,6 @@ public final class UsagesPopup {
                 action.run();
             }
         });
-    }
-
-    private static void position(JDialog dialog, Window owner, Point requested) {
-        if (requested == null) {
-            dialog.setLocationRelativeTo(owner);
-            return;
-        }
-        GraphicsConfiguration configuration = owner == null
-                ? dialog.getGraphicsConfiguration() : owner.getGraphicsConfiguration();
-        Rectangle screen = configuration == null ? null : configuration.getBounds();
-        if (screen == null) {
-            dialog.setLocation(requested);
-            return;
-        }
-        int x = Math.max(screen.x, Math.min(requested.x, screen.x + screen.width - dialog.getWidth()));
-        int y = Math.max(screen.y, Math.min(requested.y, screen.y + screen.height - dialog.getHeight()));
-        dialog.setLocation(x, y);
     }
 
     private static Component renderRow(Item item, int index, boolean selected) {
@@ -285,27 +242,28 @@ public final class UsagesPopup {
         }
     }
 
-    private static void installDrag(JDialog dialog, JLabel handle) {
-        Point[] origin = {null};
+    private static void installDrag(JComponent root, JLabel handle, Host host) {
+        Point[] grab = {null};
         handle.addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent event) {
-                origin[0] = event.getPoint();
+                Point inRoot = SwingUtilities.convertPoint(handle, event.getPoint(), root);
+                grab[0] = inRoot;
             }
 
             @Override
             public void mouseReleased(MouseEvent event) {
-                origin[0] = null;
+                grab[0] = null;
             }
         });
         handle.addMouseMotionListener(new MouseAdapter() {
             @Override
             public void mouseDragged(MouseEvent event) {
-                if (origin[0] != null) {
-                    Point location = dialog.getLocation();
-                    dialog.setLocation(location.x + event.getX() - origin[0].x,
-                            location.y + event.getY() - origin[0].y);
+                if (grab[0] == null) {
+                    return;
                 }
+                Point screen = event.getLocationOnScreen();
+                host.moveTo(screen.x - grab[0].x, screen.y - grab[0].y);
             }
         });
     }

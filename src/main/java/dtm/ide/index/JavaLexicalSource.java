@@ -219,7 +219,7 @@ public final class JavaLexicalSource {
         }
     }
 
-    private static boolean isType(SymbolKind kind) {
+    public static boolean isType(SymbolKind kind) {
         return kind == SymbolKind.CLASS || kind == SymbolKind.INTERFACE
                 || kind == SymbolKind.ENUM || kind == SymbolKind.STRUCT;
     }

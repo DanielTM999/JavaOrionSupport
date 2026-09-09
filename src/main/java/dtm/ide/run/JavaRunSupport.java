@@ -108,8 +108,27 @@ public class JavaRunSupport {
         }
     }
 
+    private final ThreadLocal<String> coverageAgentArgument = new ThreadLocal<>();
+
     public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context) {
         return launch(configuration, context, 0);
+    }
+
+    public RunProcessHandle launchWithCoverage(RunConfigurationData configuration,
+                                               RunExecutionContext context, String agentArgument) {
+        coverageAgentArgument.set(agentArgument);
+        try {
+            return launch(configuration, context, 0);
+        } finally {
+            coverageAgentArgument.remove();
+        }
+    }
+
+    private void appendCoverageAgent(List<String> command) {
+        String argument = coverageAgentArgument.get();
+        if (argument != null && !argument.isBlank()) {
+            command.add(argument);
+        }
     }
 
     public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context,
@@ -185,6 +204,7 @@ public class JavaRunSupport {
 
         List<String> command = new ArrayList<>();
         command.add(jdk.javaExecutable().toString());
+        appendCoverageAgent(command);
 
         if (debugPort > 0) {
             command.add(jdwpAgent(debugPort));
@@ -230,6 +250,7 @@ public class JavaRunSupport {
 
         List<String> command = new ArrayList<>();
         command.add(jdk.javaExecutable().toString());
+        appendCoverageAgent(command);
         if (debugPort > 0) {
             command.add(jdwpAgent(debugPort));
         }

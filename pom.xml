@@ -17,6 +17,7 @@
         <request.action.version>1.0.7</request.action.version>
         <apache.compress.version>1.26.2</apache.compress.version>
         <lombok.version>1.18.42</lombok.version>
+        <jacoco.version>0.8.15</jacoco.version>
     </properties>
 
     <dependencies>
@@ -57,6 +58,16 @@
             <artifactId>pty4j</artifactId>
             <version>0.13.12</version>
             <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jacoco</groupId>
+            <artifactId>org.jacoco.agent</artifactId>
+            <version>${jacoco.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jacoco</groupId>
+            <artifactId>org.jacoco.core</artifactId>
+            <version>${jacoco.version}</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

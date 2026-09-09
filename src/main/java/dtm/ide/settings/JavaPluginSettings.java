@@ -25,6 +25,7 @@ public final class JavaPluginSettings {
     private static final String KEY_LOMBOK_SUPPORT = "lombokSupport";
     private static final String KEY_TODO_MARKERS = "todoMarkers";
     private static final String KEY_BUILD_FILE_COMPLETION = "buildFileCompletion";
+    private static final String KEY_COVERAGE_GUTTER = "coverageGutter";
     private static final String KEY_SPRING_SUPPORT = "springSupport";
     private static final String KEY_SPRING_CODE_LENS = "springCodeLens";
     private static final String KEY_SPRING_LIVE = "springLive";
@@ -54,6 +55,7 @@ public final class JavaPluginSettings {
     private boolean lombokSupport = true;
     private List<String> todoMarkers = TodoScanner.DEFAULT_MARKERS;
     private boolean buildFileCompletion = true;
+    private boolean coverageGutter = true;
     private boolean springSupport = true;
     private boolean springCodeLens = true;
     private boolean springLive = true;
@@ -186,6 +188,14 @@ public final class JavaPluginSettings {
         this.buildFileCompletion = value;
     }
 
+    public boolean isCoverageGutter() {
+        return coverageGutter;
+    }
+
+    public void setCoverageGutter(boolean value) {
+        this.coverageGutter = value;
+    }
+
     private static java.util.Set<String> splitInspections(String raw) {
         java.util.Set<String> ids = new java.util.LinkedHashSet<>();
         for (String part : raw == null ? new String[0] : raw.split(",")) {
@@ -308,6 +318,7 @@ public final class JavaPluginSettings {
         lombokSupport = true;
         todoMarkers = TodoScanner.DEFAULT_MARKERS;
         buildFileCompletion = true;
+        coverageGutter = true;
         springSupport = true;
         springCodeLens = true;
         springLive = true;
@@ -351,6 +362,7 @@ public final class JavaPluginSettings {
         lombokSupport = bool(properties, KEY_LOMBOK_SUPPORT, true);
         todoMarkers = splitMarkers(properties.getProperty(KEY_TODO_MARKERS, ""));
         buildFileCompletion = bool(properties, KEY_BUILD_FILE_COMPLETION, true);
+        coverageGutter = bool(properties, KEY_COVERAGE_GUTTER, true);
         springCodeLens = bool(properties, KEY_SPRING_CODE_LENS, true);
         springLive = bool(properties, KEY_SPRING_LIVE, true);
         springNavigation = bool(properties, KEY_SPRING_NAVIGATION, true);
@@ -381,6 +393,7 @@ public final class JavaPluginSettings {
         properties.setProperty(KEY_LOMBOK_SUPPORT, Boolean.toString(lombokSupport));
         properties.setProperty(KEY_TODO_MARKERS, String.join(",", todoMarkers));
         properties.setProperty(KEY_BUILD_FILE_COMPLETION, Boolean.toString(buildFileCompletion));
+        properties.setProperty(KEY_COVERAGE_GUTTER, Boolean.toString(coverageGutter));
         properties.setProperty(KEY_SPRING_CODE_LENS, Boolean.toString(springCodeLens));
         properties.setProperty(KEY_SPRING_LIVE, Boolean.toString(springLive));
         properties.setProperty(KEY_SPRING_NAVIGATION, Boolean.toString(springNavigation));

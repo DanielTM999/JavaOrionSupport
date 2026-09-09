@@ -11,6 +11,8 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -76,15 +78,57 @@ public final class SurefireReportParser {
                     results.add(readTestCase(testCase));
                 }
             }
-            return results;
+            return mergeInvocations(results);
         } catch (Exception e) {
             log.debug("Relatorio ilegivel {}: {}", reportFile, e.getMessage());
             return List.of();
         }
     }
 
+    static String baseMethodName(String rawName) {
+        if (rawName == null) {
+            return "";
+        }
+        String name = rawName.trim();
+        int cut = name.length();
+        int parenthesis = name.indexOf('(');
+        if (parenthesis >= 0) {
+            cut = parenthesis;
+        }
+        int bracket = name.indexOf('[');
+        if (bracket >= 0 && bracket < cut) {
+            cut = bracket;
+        }
+        return name.substring(0, cut).trim();
+    }
+
+    static List<TestResult> mergeInvocations(List<TestResult> results) {
+        Map<String, TestResult> merged = new LinkedHashMap<>();
+        for (TestResult result : results) {
+            merged.merge(result.key(), result, SurefireReportParser::worstOf);
+        }
+        return List.copyOf(merged.values());
+    }
+
+    private static TestResult worstOf(TestResult current, TestResult candidate) {
+        long duration = current.durationMs() + candidate.durationMs();
+        TestResult dominant = rank(candidate.status()) > rank(current.status()) ? candidate : current;
+        return new TestResult(dominant.className(), dominant.methodName(), dominant.status(),
+                duration, dominant.message(), dominant.stackTrace());
+    }
+
+    private static int rank(TestResult.Status status) {
+        return switch (status) {
+            case ERROR -> 3;
+            case FAILED -> 2;
+            case SKIPPED -> 1;
+            case PASSED -> 0;
+        };
+    }
+
     private static TestResult readTestCase(Element testCase) {
-        String methodName = testCase.getAttribute("name");
+        String rawName = testCase.getAttribute("name");
+        String methodName = baseMethodName(rawName);
         String className = testCase.getAttribute("classname");
         long duration = parseDurationMs(testCase.getAttribute("time"));
 

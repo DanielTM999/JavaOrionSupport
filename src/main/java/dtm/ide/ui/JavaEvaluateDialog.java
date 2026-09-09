@@ -4,22 +4,19 @@ import dtm.ide.debug.JavaDebugSnapshot;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
-import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
-import javax.swing.WindowConstants;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.Cursor;
 import java.awt.FlowLayout;
 import java.awt.Font;
-import java.awt.Window;
 import java.util.concurrent.CompletableFuture;
 
-public final class JavaEvaluateDialog extends JDialog {
+public final class JavaEvaluateDialog extends JPanel {
 
     @FunctionalInterface
     public interface Evaluator {
@@ -35,15 +32,13 @@ public final class JavaEvaluateDialog extends JDialog {
     private final Evaluator evaluator;
     private final java.util.function.Consumer<String> watchConsumer;
 
-    public JavaEvaluateDialog(Window owner, String initialExpression, Evaluator evaluator,
+    public JavaEvaluateDialog(String initialExpression, Evaluator evaluator,
                               JavaDebugValueTree.ChildrenProvider childrenProvider,
                               java.util.function.Consumer<String> watchConsumer) {
-        super(owner, "Evaluate Expression");
+        super(new BorderLayout());
         this.evaluator = evaluator;
         this.watchConsumer = watchConsumer == null ? value -> { } : watchConsumer;
         result.bindChildrenProvider(childrenProvider);
-        setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
-        setModal(false);
         JPanel root = new JPanel(new BorderLayout(8, 8));
         root.setBackground(JavaDebugTheme.panel());
         root.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
@@ -81,7 +76,7 @@ public final class JavaEvaluateDialog extends JDialog {
         statusLine.add(status, BorderLayout.CENTER);
         statusLine.add(progress, BorderLayout.EAST);
         root.add(statusLine, BorderLayout.SOUTH);
-        setContentPane(root);
+        add(root, BorderLayout.CENTER);
         result.setPreferredSize(new Dimension(620, 320));
         evaluate.addActionListener(event -> evaluate());
         expression.addActionListener(event -> evaluate());
@@ -92,13 +87,11 @@ public final class JavaEvaluateDialog extends JDialog {
                 status.setText("Added to Watches");
             }
         });
-        setSize(680, 440);
+        setPreferredSize(new Dimension(680, 440));
         setMinimumSize(new Dimension(560, 360));
-        setLocationRelativeTo(owner);
     }
 
     public void open() {
-        setVisible(true);
         SwingUtilities.invokeLater(() -> {
             expression.requestFocusInWindow();
             expression.selectAll();

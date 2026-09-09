@@ -43,6 +43,7 @@ import dtm.ide.api.project.editor.IdeCompletionTriggerKind;
 import dtm.ide.api.project.editor.IdeWordCaretContext;
 import dtm.ide.api.project.editor.IdeWordClickContext;
 import dtm.ide.api.project.editor.SemanticToken;
+import dtm.ide.api.project.editor.EditorShortcutScope;
 import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.NativeEditorType;
 import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
@@ -59,10 +60,21 @@ import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.build.MavenBuildService;
 import dtm.ide.build.BuildSystems;
 import dtm.ide.build.BuildToolModel;
+import dtm.ide.coverage.CoverageAgent;
+import dtm.ide.coverage.CoverageDisplay;
+import dtm.ide.coverage.CoverageGutter;
+import dtm.ide.coverage.CoverageGutterLayer;
+import dtm.ide.coverage.CoverageProvisioner;
+import dtm.ide.coverage.CoverageReport;
+import dtm.ide.coverage.CoverageReadResult;
+import dtm.ide.coverage.CoverageStore;
+import dtm.ide.coverage.FileCoverage;
+import dtm.ide.coverage.JacocoExecReader;
 import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.deps.DependencyService;
 import dtm.ide.deps.MavenCentralClient;
 import dtm.ide.editor.AutoCompleteIdleTrigger;
+import dtm.stools.configs.UiTokens;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
 import dtm.ide.editor.JavaSnippetCompletionProvider;
 import dtm.ide.editor.BuildFileCompletionProvider;
@@ -147,7 +159,9 @@ import dtm.ide.test.JavaTestProblems;
 import dtm.ide.test.JavaSemanticTestDiscovery;
 import dtm.ide.ui.DependencyManagerPanel;
 import dtm.ide.ui.JavaSourceActionDialogs;
+import dtm.ide.ui.JavaCoveragePanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
+import dtm.ide.ui.JavaTestGutterLayer;
 import dtm.ide.ui.JavaDebugPanel;
 import dtm.ide.ui.JavaDeleteDialogPanel;
 import dtm.ide.todo.TodoItem;
@@ -262,6 +276,8 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 500;
+    private static final long COVERAGE_POLL_INTERVAL_MS = 400L;
+    private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final long LEXICAL_USAGE_BUDGET_MS = 1_500;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
@@ -386,6 +402,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile RunFormChoicesLoader runFormChoicesLoader;
     private volatile RunProcessHandle debugProcessHandle;
     private volatile JavaTestExplorerPanel testPanel;
+    private final CoverageStore coverageStore = new CoverageStore();
+    private volatile CoverageProvisioner coverageProvisioner;
     private volatile String testPanelId;
     private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
     private final MavenPluginGoals pluginGoals = new MavenPluginGoals();
@@ -408,8 +426,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile String fileWatcherListenerId;
     private volatile String springBaseUrl = JavaPluginSettings.DEFAULT_SPRING_BASE_URL;
     private volatile JavaPluginSettings settings;
-    private volatile JComponent codeActionLamp;
-    private volatile JLayeredPane codeActionLampLayer;
+    private volatile Object codeActionLampHandle;
+    private volatile IdeEditorContext codeActionLampContext;
     private volatile IdeEditorContext activeJavaEditor;
     private final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
     private final AtomicBoolean languageServerReadyHandled = new AtomicBoolean();
@@ -473,6 +491,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         liveLspProblems.clear();
         lastBuildProblems = List.of();
         refreshProblemsPanel();
+        clearCoverage();
+        detachAllCoverageGutters();
         lspProgress.set(0);
         hideProgress(LSP_PROGRESS_ID);
         SwingUtilities.invokeLater(this::hideCodeActionLamp);
@@ -513,6 +533,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         liveLspProblems.clear();
         lastBuildProblems = List.of();
         refreshProblemsPanel();
+        clearCoverage();
         JdtLsService lsp = jdtLs;
 
         background.submit(() -> {
@@ -619,6 +640,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (descriptor.isMaven() || descriptor.isGradle()) {
             ensureBuildToolsPanel();
         }
+        ensureTestPanel();
         refreshRunButtonsForCurrentFile();
     }
 
@@ -972,6 +994,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         editorContext.setFoldingEnabled(true);
         editorContext.setAutoCompleteOnTyping(!debugActive.get());
         configureGhostText(editorContext);
+        installCoverageGutter(editorContext);
+        installTestGutter(editorContext);
         installCodeActionCommandHandler(editorContext);
         installJavaShortcuts(editorContext);
     }
@@ -1021,8 +1045,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private boolean isAutoCompletePopupVisible() {
-        return Boolean.TRUE.equals(
-                invokeEditorBoolean(resolveTextArea(activeJavaEditor), "isAutoCompleteVisible"));
+        IdeEditorContext editor = activeJavaEditor;
+        return editor != null && editor.isAutoCompleteVisible();
     }
 
     private AutoCompleteIdleTrigger.Caret currentIdleCaret() {
@@ -1870,9 +1894,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                         .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
                         .onClick(event -> {
                             MouseEvent mouse = event == null ? null : event.mouseEvent();
-                            Component invoker = mouse == null ? null : mouse.getComponent();
                             Point screen = mouse == null ? null : mouse.getLocationOnScreen();
-                            openLensUsages(targets, context, lensLine, lensCol, invoker, screen);
+                            openLensUsages(targets, context, lensLine, lensCol, screen);
                         })
                         .build();
                 lenses.add(CodeLens.inline(lensLine, item));
@@ -1880,6 +1903,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
 
         addRunLens(lenses, context);
+        addCoverageLens(lenses, context);
 
         List<JavaTest> fileTests = JUnitTestDiscovery.discoverInSource(
                 context.filePath(), context.text());
@@ -2012,6 +2036,25 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
+    private void addCoverageLens(List<CodeLens> lenses, IdeCodeLensContext context) {
+        FileCoverage coverage = coverageStore.forFile(context.filePath()).orElse(null);
+        if (coverage == null || coverage.isEmpty()) {
+            return;
+        }
+        String branches = CoverageDisplay.branchSummary(coverage);
+        String tooltip = text("lens.coverageTooltip", "Cobertura da ultima execucao de testes");
+        if (!branches.isBlank()) {
+            tooltip = tooltip + " - " + text("lens.coverageBranches", "branches") + ": " + branches;
+        }
+        int line = CoverageDisplay.lensLineOf(lexicalIndex.outline(context.text()));
+        lenses.add(CodeLens.inline(line, CodeLensItem.builder()
+                .text(text("lens.coverage", "Cobertura") + ": " + CoverageDisplay.summary(coverage))
+                .tooltip(tooltip)
+                .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+                .onClick(event -> requestOpenToolPanel(testPanelId))
+                .build()));
+    }
+
     private void addJpaLenses(List<CodeLens> lenses, SpringIndexSnapshot snapshot,
                               IdeCodeLensContext context) {
         if (!settings().isSpringJpa()) {
@@ -2042,9 +2085,9 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         MouseEvent mouse = event == null ? null : event.mouseEvent();
-        Component invoker = mouse == null ? null : mouse.getComponent();
         Point screen = mouse == null ? null : mouse.getLocationOnScreen();
-        showUsagesPopup(targets, context.filePath(), context.text(), invoker, screen);
+        showUsagesPopup(targets, context.filePath(), context.text(),
+                editorContextFor(context.filePath()), screen);
     }
 
     private void addRunLens(List<CodeLens> lenses, IdeCodeLensContext context) {
@@ -2149,9 +2192,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void openLensUsages(List<Location> targets, IdeCodeLensContext context,
-                                int line, int col, Component invoker, Point screen) {
+                                int line, int col, Point screen) {
         if (!targets.isEmpty()) {
-            showUsagesPopup(targets, context.filePath(), context.text(), invoker, screen);
+            showUsagesPopup(targets, context.filePath(), context.text(),
+                    editorContextFor(context.filePath()), screen);
             return;
         }
         if (interactiveServerFor(context.filePath()) == null) {
@@ -2162,7 +2206,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             List<Location> resolved = resolveReferences(
                     context.filePath(), context.text(), line, col);
             SwingUtilities.invokeLater(() -> showUsagesPopup(resolved, context.filePath(),
-                    context.text(), invoker, screen));
+                    context.text(), editorContextFor(context.filePath()), screen));
         });
     }
 
@@ -2197,15 +2241,42 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
-                                 Component invoker, Point screen) {
+                                 IdeEditorContext context, Point screen) {
         List<UsagesPopup.Item> items = buildUsageItems(locations, currentFile, currentText);
-        Window owner = invoker == null ? null : SwingUtilities.getWindowAncestor(invoker);
         String header = switch (items.size()) {
             case 0 -> text("lens.noReferences", "Nenhum uso encontrado");
             case 1 -> text("lens.referenceOne", "1 referencia");
             default -> items.size() + " " + text("lens.references", "referencias");
         };
-        UsagesPopup.show(owner, screen, header, items);
+        openUsagesPopup(context, screen, header, items);
+    }
+
+    private IdeEditorContext editorContextFor(Path file) {
+        Path normalized = JavaProjectConventions.normalize(file);
+        return normalized == null ? null : javaEditors.get(normalized);
+    }
+
+    private void openUsagesPopup(IdeEditorContext context, Point screen, String header,
+                                 List<UsagesPopup.Item> items) {
+        if (context == null) {
+            return;
+        }
+        SwingUtilities.invokeLater(() -> {
+            Object[] handle = new Object[1];
+            UsagesPopup.Host host = new UsagesPopup.Host() {
+                @Override
+                public void close() {
+                    context.closeEditorWindow(handle[0]);
+                }
+
+                @Override
+                public void moveTo(int screenX, int screenY) {
+                    context.moveEditorWindow(handle[0], new Point(screenX, screenY));
+                }
+            };
+            handle[0] = context.openEditorPopup(
+                    UsagesPopup.content(header, items, host), screen, true, null);
+        });
     }
 
     private List<UsagesPopup.Item> buildUsageItems(List<Location> locations, Path currentFile,
@@ -3007,9 +3078,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     + text("navigation.definitions", "definicao(oes)");
             default -> items.size() + " " + text("navigation.usages", "uso(s)");
         };
-        Component component = resolveEditorComponent(context);
-        UsagesPopup.show(component == null ? null : SwingUtilities.getWindowAncestor(component),
-                null, header, items);
+        openUsagesPopup(context, null, header, items);
     }
 
     @Override
@@ -3104,12 +3173,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void showCodeActionLamp(IdeWordCaretContext context, DiagnosticSeverity severity) {
-        Component editor = resolveEditorComponent(context.editorContext());
-        if (editor == null || !editor.isShowing()) {
-            return;
-        }
-        JRootPane root = SwingUtilities.getRootPane(editor);
-        if (root == null) {
+        IdeEditorContext editorContext = context.editorContext();
+        Rectangle editorBounds = editorContext == null
+                ? null : editorContext.getEditorBoundsOnScreen();
+        if (editorBounds == null) {
             return;
         }
         hideCodeActionLamp();
@@ -3123,14 +3190,20 @@ public class JavaIdeAdapter extends IdeAdapter {
         });
 
         Dimension size = lamp.getPreferredSize();
-        Point location = codeActionLampLocation(editor, context, size);
-        JLayeredPane layer = root.getLayeredPane();
-        SwingUtilities.convertPointFromScreen(location, layer);
-        lamp.setBounds(location.x, location.y, size.width, size.height);
-        layer.add(lamp, JLayeredPane.POPUP_LAYER);
-        layer.repaint(lamp.getBounds());
-        codeActionLamp = lamp;
-        codeActionLampLayer = layer;
+        Object handle = editorContext.addEditorOverlay(lamp,
+                codeActionLampBounds(editorBounds, context.mouseY(), size));
+        if (handle == null) {
+            return;
+        }
+        codeActionLampHandle = handle;
+        codeActionLampContext = editorContext;
+    }
+
+    static Rectangle codeActionLampBounds(Rectangle editorBounds, int anchorY, Dimension size) {
+        int maxY = Math.max(0, editorBounds.height - size.height);
+        int y = Math.max(0, Math.min(anchorY - size.height / 2, maxY));
+        return new Rectangle(editorBounds.x - size.width + 2, editorBounds.y + y,
+                size.width, size.height);
     }
 
     private Icon loadCodeActionLampIcon(DiagnosticSeverity severity) {
@@ -3149,122 +3222,257 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .orElseGet(() -> UIManager.getIcon(fallback));
     }
 
-    private static Point codeActionLampLocation(Component editor, IdeWordCaretContext context,
-                                                 Dimension size) {
-        Point screen = editor.getLocationOnScreen();
-        int anchorY = context.mouseY();
-        if (editor instanceof JTextComponent textComponent) {
-            try {
-                int offset = Math.max(0, Math.min(context.startOffset(),
-                        textComponent.getDocument().getLength()));
-                Rectangle2D caret = textComponent.modelToView2D(offset);
-                if (caret != null) {
-                    anchorY = (int) Math.round(caret.getY() + caret.getHeight() / 2.0);
-                }
-            } catch (Exception ignored) {
-            }
-        }
-        int y = Math.max(0, Math.min(anchorY - size.height / 2,
-                Math.max(0, editor.getHeight() - size.height)));
-        return new Point(screen.x - size.width + 2, screen.y + y);
-    }
 
     private void hideCodeActionLamp() {
-        JComponent lamp = codeActionLamp;
-        JLayeredPane layer = codeActionLampLayer;
-        codeActionLamp = null;
-        codeActionLampLayer = null;
-        if (lamp != null && layer != null) {
-            Rectangle bounds = lamp.getBounds();
-            layer.remove(lamp);
-            layer.repaint(bounds);
+        Object handle = codeActionLampHandle;
+        IdeEditorContext context = codeActionLampContext;
+        codeActionLampHandle = null;
+        codeActionLampContext = null;
+        if (handle != null && context != null) {
+            context.removeEditorOverlay(handle);
         }
     }
 
-    private Component resolveEditorComponent(IdeEditorContext context) {
-        Object textArea = resolveTextArea(context);
-        if (textArea instanceof Component component) {
-            return component;
+
+    private CoverageProvisioner coverageProvisioner() {
+        CoverageProvisioner existing = coverageProvisioner;
+        if (existing != null) {
+            return existing;
         }
-        Object codeEditor = resolveField(context, "codeEditor");
-        return codeEditor instanceof Component component ? component : null;
+        JdkService jdks = jdkService;
+        if (jdks == null) {
+            return null;
+        }
+        CoverageProvisioner created = new CoverageProvisioner(jdks);
+        coverageProvisioner = created;
+        return created;
     }
 
-    private static Object resolveTextArea(IdeEditorContext context) {
-        Object codeEditor = resolveField(context, "codeEditor");
-        if (codeEditor == null) {
-            return null;
+    private void readCoverage(Path execFile, JavaProjectDescriptor current) {
+        if (execFile == null || current == null) {
+            return;
         }
-        try {
-            return codeEditor.getClass().getMethod("getTextArea").invoke(codeEditor);
-        } catch (Exception ignored) {
-            return null;
+        List<Path> classDirectories = new ArrayList<>();
+        List<Path> sourceRoots = new ArrayList<>();
+        for (JavaModule module : current.modules()) {
+            if (module.outputDir() != null) {
+                classDirectories.add(module.outputDir());
+            }
+            sourceRoots.addAll(module.existingSourceRoots());
+            sourceRoots.addAll(module.existingTestRoots());
         }
+        CoverageReadResult result = JacocoExecReader.read(execFile, classDirectories, sourceRoots);
+        if (!result.isSuccess()) {
+            setStatusBarText(coverageFailureText(result));
+            return;
+        }
+        coverageStore.set(result.report());
+        JavaTestExplorerPanel panel = testPanel;
+        if (panel != null) {
+            panel.setCoverage(result.report());
+        }
+        Path root = projectRoot;
+        if (root != null) {
+            requestRefreshCodeLenses(root);
+        }
+        SwingUtilities.invokeLater(this::refreshCoverageGutters);
+        setStatusBarText(coverageSummaryText(result.report()));
+        showCoveragePopup(result.report());
+    }
+
+    private void showCoveragePopup(CoverageReport report) {
+        if (report == null || report.totals().isEmpty()) {
+            return;
+        }
+        SwingUtilities.invokeLater(() -> showPopup(PlatformPopupBuilder.builder()
+                .component(new JavaCoveragePanel(report, this::openCoverageRow))
+                .title(text("coverage.popupTitle", "Cobertura de codigo"))
+                .size(760, 460)
+                .modalityType(java.awt.Dialog.ModalityType.MODELESS)
+                .build()));
+    }
+
+    private void openCoverageRow(JavaCoveragePanel.Row row) {
+        if (row == null || row.file() == null) {
+            return;
+        }
+        requestOpenFile(row.file());
+    }
+
+    private String coverageSummaryText(CoverageReport report) {
+        CoverageReport.Totals totals = report.totals();
+        if (totals.isEmpty()) {
+            return text("coverage.empty",
+                    "Java: nenhuma classe compilada foi coberta pela execucao");
+        }
+        return text("coverage.summary", "Java: cobertura")
+                + " " + CoverageDisplay.percent(totals.linePercentage())
+                + " (" + totals.coveredLines() + "/" + totals.totalLines() + " "
+                + text("coverage.lines", "linhas") + ")";
+    }
+
+    private static boolean awaitExecFile(Path execFile) {
+        long deadline = System.currentTimeMillis() + COVERAGE_SETTLE_TIMEOUT_MS;
+        long lastSize = -1;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                if (Files.isRegularFile(execFile)) {
+                    long size = Files.size(execFile);
+                    if (size > 0 && size == lastSize) {
+                        return true;
+                    }
+                    lastSize = size;
+                }
+                Thread.sleep(COVERAGE_POLL_INTERVAL_MS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return Files.isRegularFile(execFile);
+            } catch (Exception ignored) {
+                return Files.isRegularFile(execFile);
+            }
+        }
+        return Files.isRegularFile(execFile);
+    }
+
+    private String coverageFailureText(CoverageReadResult result) {
+        return switch (result.failure()) {
+            case MISSING_EXEC -> text("coverage.missingExec",
+                    "Java: a execucao nao gerou dados de cobertura");
+            case UNREADABLE_EXEC -> text("coverage.unreadableExec",
+                    "Java: dados de cobertura ilegiveis") + ": " + result.detail();
+            case UNSUPPORTED_BYTECODE -> text("coverage.unsupportedBytecode",
+                    "Java: cobertura indisponivel, bytecode nao suportado pela versao do JaCoCo");
+            case NO_CLASSES -> text("coverage.noClasses",
+                    "Java: compile o projeto antes de medir a cobertura");
+            case NONE -> "";
+        };
+    }
+
+    private void clearCoverage() {
+        coverageStore.clear();
+        JavaTestExplorerPanel panel = testPanel;
+        if (panel != null) {
+            panel.setCoverage(null);
+        }
+        SwingUtilities.invokeLater(this::refreshCoverageGutters);
+    }
+
+    private void detachCoverageGutter(Path filePath) {
+        IdeEditorContext context = javaEditors.get(JavaProjectConventions.normalize(filePath));
+        if (context != null) {
+            CoverageGutter.detach(context);
+        }
+    }
+
+    private void detachAllCoverageGutters() {
+        javaEditors.values().forEach(CoverageGutter::detach);
+    }
+
+    private void installCoverageGutter(IdeEditorContext context) {
+        if (context == null) {
+            return;
+        }
+        Path file = JavaProjectConventions.normalize(context.filePath());
+        if (file == null || !JavaProjectConventions.isJava(file)) {
+            return;
+        }
+        CoverageGutterLayer layer = CoverageGutter.attach(context);
+        if (layer == null) {
+            return;
+        }
+        if (settings().isCoverageGutter()) {
+            CoverageGutter.apply(layer, coverageStore.forFile(file).orElse(null));
+        } else {
+            CoverageGutter.clear(layer);
+        }
+        context.repaintGutter();
+    }
+
+    private void refreshCoverageGutters() {
+        javaEditors.values().forEach(this::installCoverageGutter);
+    }
+
+    private void installTestGutter(IdeEditorContext context) {
+        if (context == null) {
+            return;
+        }
+        Path file = JavaProjectConventions.normalize(context.filePath());
+        if (file == null || !JavaProjectConventions.isJava(file)) {
+            return;
+        }
+        JavaTestGutterLayer layer = context.getGutterLayer(JavaTestGutterLayer.class);
+        if (layer == null) {
+            layer = new JavaTestGutterLayer(this::showTestGutterMenu);
+            if (!context.addGutterLayer(layer)) {
+                return;
+            }
+        }
+        layer.setColor(UiTokens.success());
+        layer.setTests(JUnitTestDiscovery.discoverInSource(file, context.getText()));
+        context.repaintGutter();
+    }
+
+    private void showTestGutterMenu(MouseEvent event, JavaTest test) {
+        ActionMenu menu = ActionMenu.of(new JMenu());
+        menu.item(text("lens.runAction", "Executar"), JavaIcons.test(JavaIcons.SMALL),
+                        action -> runTestFromLens(test, false))
+                .item(text("lens.debugAction", "Depurar"), JavaIcons.debug(JavaIcons.SMALL),
+                        action -> runTestFromLens(test, true));
+        if (coverageSupportedForProject()) {
+            menu.item(text("action.runCoverage", "Rodar com cobertura"),
+                    JavaIcons.test(JavaIcons.SMALL), action -> runTestWithCoverage(test));
+        }
+        menu.getMenu().getPopupMenu().show(event.getComponent(), event.getX(), event.getY());
+    }
+
+
+    private void awaitCoverageRun(RunProcessHandle handle, Path execFile,
+                                  JavaProjectDescriptor current) {
+        if (handle == null) {
+            return;
+        }
+        background.submit(() -> {
+            while (handle.isAlive()) {
+                try {
+                    Thread.sleep(COVERAGE_POLL_INTERVAL_MS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            awaitExecFile(execFile);
+            readCoverage(execFile, current);
+        });
+    }
+
+    private boolean coverageSupportedForProject() {
+        JavaProjectDescriptor current = descriptor;
+        return current != null && (current.isMaven() || current.isGradle());
+    }
+
+    private void runTestWithCoverage(JavaTest test) {
+        SwingUtilities.invokeLater(() -> {
+            ensureTestPanel();
+            if (testPanelId != null) {
+                requestOpenToolPanel(testPanelId);
+            }
+            if (testPanel != null) {
+                testPanel.runTestsWithCoverage(List.of(test));
+            }
+        });
     }
 
     private void configureGhostText(IdeEditorContext context) {
-        Object textArea = resolveTextArea(context);
-        if (textArea == null) {
+        if (context == null) {
             return;
         }
-        invokeEditorMethod(textArea, "setGhostTextEnabled", boolean.class, true);
-        invokeEditorMethod(textArea, "setGhostTextActivationMode",
-                GhostTextActivationMode.class, GhostTextActivationMode.CARET_IDLE);
-        invokeEditorMethod(textArea, "setGhostTextCaretIdleDelay", int.class,
-                GHOST_TEXT_IDLE_DELAY_MS);
+        context.setGhostTextEnabled(true);
+        context.setGhostTextActivationMode(GhostTextActivationMode.CARET_IDLE);
+        context.setGhostTextCaretIdleDelay(GHOST_TEXT_IDLE_DELAY_MS);
     }
 
-    private static Boolean invokeEditorBoolean(Object target, String name) {
-        if (target == null) {
-            return null;
-        }
-        for (Class<?> type = target.getClass(); type != null && type != Object.class;
-             type = type.getSuperclass()) {
-            try {
-                Method method = type.getDeclaredMethod(name);
-                method.setAccessible(true);
-                Object value = method.invoke(target);
-                return value instanceof Boolean result ? result : null;
-            } catch (NoSuchMethodException ignored) {
-            } catch (ReflectiveOperationException | RuntimeException e) {
-                return null;
-            }
-        }
-        return null;
-    }
 
-    private static void invokeEditorMethod(Object target, String name, Class<?> parameterType,
-                                           Object value) {
-        try {
-            Method method = parameterType == null
-                    ? target.getClass().getMethod(name)
-                    : target.getClass().getMethod(name, parameterType);
-            if (parameterType == null) {
-                method.invoke(target);
-            } else {
-                method.invoke(target, value);
-            }
-        } catch (ReflectiveOperationException ignored) {
-        }
-    }
 
-    private static Object resolveField(Object owner, String name) {
-        if (owner == null) {
-            return null;
-        }
-        for (Class<?> type = owner.getClass(); type != null && type != Object.class;
-             type = type.getSuperclass()) {
-            try {
-                Field field = type.getDeclaredField(name);
-                field.setAccessible(true);
-                return field.get(owner);
-            } catch (NoSuchFieldException ignored) {
-            } catch (Exception ignored) {
-                return null;
-            }
-        }
-        return null;
-    }
 
     private static final class CodeActionLamp extends JComponent {
         private static final Color HOVER_BG = new Color(128, 128, 128, 60);
@@ -3321,6 +3529,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void onEditorOpen(IdeEditorContext editorContext) {
         configureGhostText(editorContext);
+        installCoverageGutter(editorContext);
+        installTestGutter(editorContext);
         installCodeActionCommandHandler(editorContext);
         installJavaShortcuts(editorContext);
         JdtLsService lsp = jdtLs;
@@ -3349,87 +3559,55 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void installCodeActionCommandHandler(IdeEditorContext context) {
-        Object codeEditor = resolveField(context, "codeEditor");
-        if (codeEditor == null) {
+        if (context == null) {
             return;
         }
-        try {
-            Method method = codeEditor.getClass().getMethod("setCommandHandler", CommandHandler.class);
-            CommandHandler handler = this::handleCodeActionCommand;
-            method.invoke(codeEditor, handler);
-        } catch (Exception e) {
-            log.debug("Nao foi possivel registrar as correcoes Java: {}", e.getMessage());
+        if (!context.setCommandHandler(this::handleCodeActionCommand)) {
+            log.debug("Nao foi possivel registrar as correcoes Java em {}", context.filePath());
         }
     }
 
     private void installJavaShortcuts(IdeEditorContext context) {
-        Object textArea = resolveTextArea(context);
-        if (!(textArea instanceof JComponent component)) return;
-        bindJavaShortcut(component, "control B", "java.goToDefinition",
-                () -> onGoToDeclaration(context));
-        bindJavaShortcut(component, "control alt B", "java.goToImplementation",
-                () -> onGoToImplementation(context));
-        bindJavaShortcut(component, "alt F7", "java.findUsages",
-                () -> onFindUsages(context));
-        bindJavaShortcut(component, KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_INSERT,
-                        java.awt.event.InputEvent.ALT_DOWN_MASK), "java.generate",
-                () -> showGenerateActions(context));
-        bindJavaShortcut(component, "control INSERT", "java.overrideMethods",
-                () -> showOverrideMethods(context, false));
-        bindJavaShortcut(component, "control I", "java.implementMethods",
-                () -> showOverrideMethods(context, true));
-        bindJavaShortcut(component, "alt F8", "java.evaluateExpression",
-                () -> showEvaluateDialog(context, 0));
-        bindDebugShortcut(component, "F5", "java.debug.continue",
-                () -> withDebugSession(JavaDebugSession::continueExecution));
-        bindDebugShortcut(component, "F6", "java.debug.pause",
-                () -> withDebugSession(JavaDebugSession::pause));
-        bindDebugShortcut(component, "F10", "java.debug.stepOver",
-                () -> withDebugSession(JavaDebugSession::next));
-        bindDebugShortcut(component, "F11", "java.debug.stepInto",
-                () -> withDebugSession(JavaDebugSession::stepIn));
-        bindDebugShortcut(component, "shift F11", "java.debug.stepOut",
-                () -> withDebugSession(JavaDebugSession::stepOut));
-        bindDebugShortcut(component, "shift F5", "java.debug.stop", this::closeDebugSession);
-        bindDebugShortcut(component, "control F5", "java.debug.hotReload", this::runHotReload);
-    }
-
-    private static void bindJavaShortcut(JComponent component, String stroke,
-                                         String actionId, Runnable action) {
-        bindJavaShortcut(component, KeyStroke.getKeyStroke(stroke), actionId, action);
-    }
-
-    private static void bindJavaShortcut(JComponent component, KeyStroke keyStroke,
-                                         String actionId, Runnable action) {
-        if (keyStroke == null) return;
-        component.getInputMap(JComponent.WHEN_FOCUSED).put(keyStroke, actionId);
-        component.getActionMap().put(actionId, new AbstractAction() {
-            @Override public void actionPerformed(java.awt.event.ActionEvent event) {
-                action.run();
-            }
-        });
-    }
-
-    private void bindDebugShortcut(JComponent component, String stroke,
-                                   String actionId, Runnable action) {
-        KeyStroke keyStroke = KeyStroke.getKeyStroke(stroke);
-        if (keyStroke == null) {
+        if (context == null) {
             return;
         }
-        javax.swing.InputMap input = component.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
-        Object previousKey = input.get(keyStroke);
-        javax.swing.Action previous = previousKey == null || actionId.equals(previousKey)
-                ? null : component.getActionMap().get(previousKey);
-        input.put(keyStroke, actionId);
-        component.getActionMap().put(actionId, new AbstractAction() {
-            @Override
-            public void actionPerformed(java.awt.event.ActionEvent event) {
-                if (debugActive.get()) {
-                    action.run();
-                } else if (previous != null) {
-                    previous.actionPerformed(event);
-                }
+        context.registerShortcut("java.goToDefinition", "control B",
+                () -> onGoToDeclaration(context));
+        context.registerShortcut("java.goToImplementation", "control alt B",
+                () -> onGoToImplementation(context));
+        context.registerShortcut("java.findUsages", "alt F7",
+                () -> onFindUsages(context));
+        context.registerShortcut("java.generate", "alt INSERT",
+                () -> showGenerateActions(context));
+        context.registerShortcut("java.overrideMethods", "control INSERT",
+                () -> showOverrideMethods(context, false));
+        context.registerShortcut("java.implementMethods", "control I",
+                () -> showOverrideMethods(context, true));
+        context.registerShortcut("java.evaluateExpression", "alt F8",
+                () -> showEvaluateDialog(context, 0));
+        bindDebugShortcut(context, "F5", "java.debug.continue",
+                () -> withDebugSession(JavaDebugSession::continueExecution));
+        bindDebugShortcut(context, "F6", "java.debug.pause",
+                () -> withDebugSession(JavaDebugSession::pause));
+        bindDebugShortcut(context, "F10", "java.debug.stepOver",
+                () -> withDebugSession(JavaDebugSession::next));
+        bindDebugShortcut(context, "F11", "java.debug.stepInto",
+                () -> withDebugSession(JavaDebugSession::stepIn));
+        bindDebugShortcut(context, "shift F11", "java.debug.stepOut",
+                () -> withDebugSession(JavaDebugSession::stepOut));
+        bindDebugShortcut(context, "shift F5", "java.debug.stop", this::closeDebugSession);
+        bindDebugShortcut(context, "control F5", "java.debug.hotReload", this::runHotReload);
+    }
+
+
+    private void bindDebugShortcut(IdeEditorContext context, String stroke,
+                                   String actionId, Runnable action) {
+        context.registerShortcut(actionId, stroke, EditorShortcutScope.WINDOW, () -> {
+            if (!debugActive.get()) {
+                return false;
             }
+            action.run();
+            return true;
         });
     }
 
@@ -3789,6 +3967,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         JdtLsService lsp = jdtLs;
         if (JavaProjectConventions.isJava(filePath)) {
+            detachCoverageGutter(filePath);
             javaEditors.remove(JavaProjectConventions.normalize(filePath));
             if (lsp != null) {
                 lsp.closeDocument(filePath);
@@ -4561,6 +4740,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void onRunConfigurationChanged(RunConfigurationData configuration) {
         selectedRunConfig = configuration;
+        refreshCoverageButton();
         if (JavaRunSupport.isCurrentFileType(configuration)) {
             refreshRunButtonsForCurrentFile();
             return;
@@ -4596,6 +4776,53 @@ public class JavaIdeAdapter extends IdeAdapter {
                 () -> ensureRunSupport().launch(resolved, context));
         trackRunningProcess(configuration, handle);
         return handle;
+    }
+
+    @Override
+    public RunProcessHandle launchCoverage(RunConfigurationData configuration,
+                                           RunExecutionContext context) {
+        RunConfigurationData resolved = resolveCurrentFileConfiguration(configuration).orElse(null);
+        if (resolved == null) {
+            return ensureRunSupport().failure(text("error.currentFileMain",
+                    "O arquivo atual nao possui um metodo main Java valido."));
+        }
+        String coverageArgument = coverageArgumentFor(resolved);
+        if (coverageArgument == null) {
+            return ensureRunSupport().failure(text("coverage.unsupportedRunType",
+                    "Java: cobertura no Run so vale para Aplicacao, Spring Boot e JAR"));
+        }
+        RunProcessHandle handle = launchWithBuildProgress(resolved,
+                () -> ensureRunSupport().launchWithCoverage(resolved, context, coverageArgument));
+        trackRunningProcess(configuration, handle);
+        awaitCoverageRun(handle, CoverageAgent.execFileFor(descriptor.root()), descriptor);
+        return handle;
+    }
+
+    private String coverageArgumentFor(RunConfigurationData configuration) {
+        JavaProjectDescriptor current = descriptor;
+        if (current == null || configuration == null) {
+            return null;
+        }
+        if (!JavaRunTypes.LOCAL_JVM.contains(configuration.getType())) {
+            return null;
+        }
+        CoverageProvisioner provisioner = coverageProvisioner();
+        Path agent = provisioner == null ? null : provisioner.ensureAgent().orElse(null);
+        Path execFile = CoverageAgent.execFileFor(current.root());
+        if (agent == null || execFile == null) {
+            setStatusBarText(text("coverage.agentMissing",
+                    "Java: nao foi possivel preparar o agente de cobertura"));
+            return null;
+        }
+        try {
+            Files.createDirectories(execFile.getParent());
+            Files.deleteIfExists(execFile);
+        } catch (Exception error) {
+            setStatusBarText(text("coverage.agentMissing",
+                    "Java: nao foi possivel preparar o agente de cobertura"));
+            return null;
+        }
+        return CoverageAgent.agentArgument(agent, execFile, false);
     }
 
     @Override
@@ -4764,6 +4991,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void refreshRunButtonsForCurrentFile() {
+        refreshCoverageButton();
         if (!JavaRunSupport.isCurrentFileType(selectedRunConfig)) {
             return;
         }
@@ -4772,6 +5000,22 @@ public class JavaIdeAdapter extends IdeAdapter {
             requestSetRunButtonEnabled(runnable);
             requestSetDebugButtonEnabled(runnable);
         });
+    }
+
+    private void refreshCoverageButton() {
+        boolean available = coverageSupportedForProject() && coverageRunnableConfiguration();
+        SwingUtilities.invokeLater(() -> {
+            requestSetCoverageButtonVisible(available);
+            requestSetCoverageButtonEnabled(available);
+        });
+    }
+
+    private boolean coverageRunnableConfiguration() {
+        RunConfigurationData configuration = selectedRunConfig;
+        if (JavaRunSupport.isCurrentFileType(configuration)) {
+            return currentMainClass().isPresent();
+        }
+        return configuration != null && JavaRunTypes.LOCAL_JVM.contains(configuration.getType());
     }
 
     private Optional<RunConfigurationData> resolveCurrentFileConfiguration(
@@ -5056,30 +5300,14 @@ public class JavaIdeAdapter extends IdeAdapter {
                 return;
             }
             editor.setAutoCompleteOnTyping(enabled);
-            Object textArea = resolveTextArea(editor);
-            if (!enabled && textArea != null) {
-                invokeNoArg(textArea, "clearGhostText");
-                invokeNoArg(textArea, "hideAutoCompletePopup");
+            if (!enabled) {
+                editor.clearGhostText();
+                editor.hideAutoCompletePopup();
             }
             requestRepaintCodeEditor(editor.filePath());
         });
     }
 
-    private static void invokeNoArg(Object target, String methodName) {
-        Class<?> type = target.getClass();
-        while (type != null) {
-            try {
-                Method method = type.getDeclaredMethod(methodName);
-                method.setAccessible(true);
-                method.invoke(target);
-                return;
-            } catch (NoSuchMethodException error) {
-                type = type.getSuperclass();
-            } catch (Exception ignored) {
-                return;
-            }
-        }
-    }
 
     private boolean isDebugPaused() {
         JavaDebugSession session = debugSession;
@@ -5096,12 +5324,12 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         String initial = selectedDebugExpression(editor);
-        Component component = resolveEditorComponent(editor);
-        Window owner = component == null ? null : SwingUtilities.getWindowAncestor(component);
-        JavaEvaluateDialog dialog = new JavaEvaluateDialog(owner, initial,
+        JavaEvaluateDialog content = new JavaEvaluateDialog(initial,
                 expression -> session.evaluate(expression, frameId), session::variables,
                 this::addDebugWatch);
-        dialog.open();
+        editor.openEditorDialog(text("debug.evaluate.title", "Evaluate Expression"),
+                content, false, null);
+        content.open();
     }
 
     private void addDebugWatch(String expression) {
@@ -5725,6 +5953,63 @@ public class JavaIdeAdapter extends IdeAdapter {
                 publishBuildDiagnostics(JavaTestProblems.withTestFailures(run, tests), true);
                 setStatusBarText("Java: " + run.summary());
                 onFinished.accept(run);
+            });
+        }
+
+        @Override
+        public void clearCoverage() {
+            JavaIdeAdapter.this.clearCoverage();
+            Path root = projectRoot;
+            if (root != null) {
+                requestRefreshCodeLenses(root);
+            }
+        }
+
+        @Override
+        public boolean supportsCoverage() {
+            JavaProjectDescriptor current = descriptor;
+            return current != null && (current.isMaven() || current.isGradle());
+        }
+
+        @Override
+        public void runWithCoverage(List<JavaTest> tests,
+                                    java.util.function.Consumer<JavaTestRunner.TestRun> onFinished) {
+            JavaProjectDescriptor current = descriptor;
+            BuildSystem build = ensureBuildSystem();
+            CoverageProvisioner provisioner = coverageProvisioner();
+            if (current == null || build == null || provisioner == null) {
+                onFinished.accept(null);
+                return;
+            }
+            if (!current.isMaven() && !current.isGradle()) {
+                setStatusBarText(text("coverage.unsupportedProject",
+                        "Java: cobertura requer Maven ou Gradle"));
+                onFinished.accept(null);
+                return;
+            }
+            OutputPanelHandle panel = requestOutputPanel("Tests", OutputPanelOptions.interactive(null));
+            if (panel != null) {
+                panel.clear();
+                panel.show();
+            }
+            requestShowRunOutput();
+
+            background.submit(() -> {
+                Path agent = provisioner.ensureAgent().orElse(null);
+                if (agent == null) {
+                    setStatusBarText(text("coverage.agentMissing",
+                            "Java: nao foi possivel preparar o agente de cobertura"));
+                    onFinished.accept(null);
+                    return;
+                }
+                JavaTestRunner runner = new JavaTestRunner(current, build);
+                JavaTestRunner.CoverageRun coverageRun = runner.runWithCoverage(
+                        tests, moduleOf(tests, current), agent, line -> writeOutput(panel, line));
+                JavaTestRunner.TestRun run = coverageRun.testRun();
+                publishBuildDiagnostics(JavaTestProblems.withTestFailures(run, tests), true);
+                setStatusBarText("Java: " + run.summary());
+                onFinished.accept(run);
+                readCoverage(coverageRun.execFile(), current);
             });
         }
 
@@ -6606,6 +6891,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (root != null) {
             requestRefreshCodeLenses(root);
         }
+        SwingUtilities.invokeLater(this::refreshCoverageGutters);
         if (!applyBuildModeChange(current.getJdtBuildMode(), root)) {
             applyLombokSettingChange(root);
         }

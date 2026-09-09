@@ -114,6 +114,27 @@ construído em milissegundos ao abrir o projeto e atualizado a cada gravação.
 
 ---
 
+## Testes e cobertura
+
+O Test Explorer descobre testes JUnit 4/5 e TestNG, executa por pacote, classe ou método, repete só
+as falhas e abre a linha apontada pela stack trace.
+
+**Rodar com cobertura** executa a mesma suíte com o agente JaCoCo empacotado no plugin — nada é
+baixado. O agente entra pelo `argLine` no Maven e por um init-script no Gradle, e nos dois casos o
+plugin desliga a configuração de JaCoCo do próprio projeto para não subir dois agentes disputando o
+mesmo processo.
+
+Depois da execução, as linhas cobertas, parcialmente cobertas (branch pela metade) e descobertas são
+marcadas na barra lateral do editor, um code lens no topo da classe mostra o percentual do arquivo, e
+o percentual por pacote e por classe aparece na árvore do Test Explorer. **Limpar cobertura** apaga
+tudo isso de uma vez.
+
+A leitura usa a saída compilada pela ferramenta de build, então a cobertura reflete o que o Maven ou o
+Gradle produziu — rode um build antes de medir. Projetos sem ferramenta de build não têm
+cobertura.
+
+---
+
 ## JDKs e dependências
 
 ### JDK Manager
@@ -153,6 +174,7 @@ Todo projeto gerado já compila, já roda e já é reconhecido pelo próprio plu
 ## Preferências
 
 Modo do IntelliSense (automático, sempre, ou só snippets) · memória do language server · formatar e
-organizar imports ao salvar · JDK padrão · layout da árvore · build offline · pular testes ao
+organizar imports ao salvar · JDK padrão · marcar cobertura na barra lateral · layout da árvore ·
+build offline · pular testes ao
 executar · parar em todas as exceções · ligar/desligar o suporte a Spring, o code lens e a consulta
 ao Actuator · URL da aplicação.

@@ -14,6 +14,7 @@ projetos Maven e Gradle, execução, depuração, testes e ferramentas Spring em
 - Execução em terminal PTY e configurações reutilizáveis por projeto.
 - Depuração DAP, breakpoints condicionais, watches, avaliação e hot reload.
 - Test Explorer para JUnit 4/5/6 e TestNG.
+- Cobertura de código com JaCoCo, marcada no editor e resumida no Test Explorer.
 - Ferramentas Spring para beans, injeções, endpoints, propriedades e Actuator.
 - Assistentes para criar projetos Java, Maven, Gradle e Spring Boot.
 
@@ -74,7 +75,7 @@ dele, o plugin resolve uma instalação disponível.
 |---|---|
 | **Problemas** | Lista erros e avisos por arquivo. Duplo clique abre a linha correspondente. |
 | **Build Tools** | Exibe módulos, tarefas, goals, plugins, dependências e perfis Maven/Gradle. |
-| **Testes** | Descobre, executa e depura testes por pacote, classe ou método. |
+| **Testes** | Descobre, executa e depura testes por pacote, classe ou método, com cobertura opcional. |
 | **Debug** | Mostra threads, pilha, variáveis, watches e controles de execução. |
 | **Spring** | Apresenta beans, injeções, endpoints, propriedades e informações do Actuator. |
 | **Dependências** | Pesquisa artefatos e atualiza `pom.xml` ou scripts Gradle. |
@@ -107,6 +108,14 @@ variáveis de ambiente e perfis.
 O Test Explorer reconhece JUnit e TestNG, permite repetir falhas e abre diretamente a linha indicada
 pela stack trace.
 
+O botão **Rodar com cobertura** executa a suíte com o agente JaCoCo. As linhas cobertas, parcialmente
+cobertas e descobertas passam a ser marcadas na barra lateral do editor, um code lens no topo da
+classe mostra o percentual do arquivo, e o percentual por pacote e por classe aparece no próprio Test
+Explorer. **Limpar cobertura** apaga tudo isso de uma vez.
+
+O recurso exige Maven ou Gradle e usa a saída compilada pela ferramenta de build, então rode um build
+antes de medir.
+
 ## Depuração e hot reload
 
 A depuração usa o Java Debug Server por DAP e suporta execução passo a passo, breakpoints
@@ -123,6 +132,7 @@ Nas preferências do plugin é possível ajustar:
 - modo e memória do IntelliSense;
 - JDK padrão e suporte a Lombok;
 - formatação e organização de imports ao salvar;
+- marcação de cobertura na barra lateral do editor;
 - build offline e execução de testes antes do Run;
 - modo de hot reload;
 - marcadores do painel TODO;

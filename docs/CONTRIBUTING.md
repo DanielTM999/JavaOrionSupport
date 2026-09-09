@@ -64,6 +64,7 @@ claro e escuro.
 ```text
 src/main/java/dtm/ide/
 ├── build/       Maven, Gradle, javac e diagnósticos
+├── coverage/    agente JaCoCo, leitura do exec e marcação na gutter
 ├── debug/       cliente DAP, sessão e hot reload
 ├── deps/        pesquisa e edição de dependências
 ├── editor/      completion, tema e tokenização

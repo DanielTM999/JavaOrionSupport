@@ -1,5 +1,7 @@
 package dtm.ide.ui;
 
+import dtm.ide.coverage.CoverageDisplay;
+import dtm.ide.coverage.CoverageReport;
 import dtm.ide.test.JavaTest;
 import dtm.ide.test.JavaTestRunner;
 import dtm.ide.test.TestResult;
@@ -56,6 +58,18 @@ public final class JavaTestExplorerPanel extends JPanel {
 
         void debug(List<JavaTest> tests, Consumer<JavaTestRunner.TestRun> onFinished);
 
+        default void runWithCoverage(List<JavaTest> tests,
+                                     Consumer<JavaTestRunner.TestRun> onFinished) {
+            run(tests, onFinished);
+        }
+
+        default boolean supportsCoverage() {
+            return false;
+        }
+
+        default void clearCoverage() {
+        }
+
         void cancel();
 
         void openFile(Path file, int line);
@@ -79,6 +93,10 @@ public final class JavaTestExplorerPanel extends JPanel {
             JavaIcons.test(JavaIcons.SMALL));
     private final JButton debugSelectedButton = new JButton(
             text("action.debugSelected", "Depurar selecao"), JavaIcons.debug(JavaIcons.SMALL));
+    private final JButton coverageButton = new JButton(
+            text("action.runCoverage", "Rodar com cobertura"), JavaIcons.test(JavaIcons.SMALL));
+    private final JButton clearCoverageButton = new JButton(
+            text("action.clearCoverage", "Limpar cobertura"), JavaIcons.refresh(JavaIcons.SMALL));
     private final JButton refreshButton = new JButton(text("action.refresh", "Atualizar"),
             JavaIcons.refresh(JavaIcons.SMALL));
     private final JButton rerunFailuresButton = new JButton(
@@ -92,6 +110,7 @@ public final class JavaTestExplorerPanel extends JPanel {
 
     private final Map<String, TestResult> resultsByKey = new LinkedHashMap<>();
     private final Set<String> runningKeys = new LinkedHashSet<>();
+    private CoverageReport coverage = CoverageReport.EMPTY;
     private List<JavaTest> tests = List.of();
     private volatile long discoveryTicket;
 
@@ -164,6 +183,7 @@ public final class JavaTestExplorerPanel extends JPanel {
 
         stopButton.setEnabled(false);
         rerunFailuresButton.setEnabled(false);
+        clearCoverageButton.setEnabled(false);
 
         UiSupport.quietFocus(this);
         tree.setFocusable(true);
@@ -177,6 +197,8 @@ public final class JavaTestExplorerPanel extends JPanel {
         runAllButton.addActionListener(event -> run(List.of()));
         runSelectedButton.addActionListener(event -> run(selectedTests()));
         debugSelectedButton.addActionListener(event -> debug(selectedTests()));
+        coverageButton.addActionListener(event -> runCoverage(selectedTests()));
+        clearCoverageButton.addActionListener(event -> host.clearCoverage());
         refreshButton.addActionListener(event -> reload());
         rerunFailuresButton.addActionListener(event -> run(tests.stream()
                 .filter(this::isFailure).toList()));
@@ -186,9 +208,18 @@ public final class JavaTestExplorerPanel extends JPanel {
         ToolBarPanel bar = new ToolBarPanel().setPaintSurface(true)
                 .setArc(UiTokens.radius(UiTokens.Radius.MD)).setItemGap(UiTokens.space(2));
         bar.addItem(runAllButton).addItem(runSelectedButton).addItem(debugSelectedButton)
-                .addSeparator().addItem(refreshButton).addItem(rerunFailuresButton)
+                .addItem(coverageButton).addItem(clearCoverageButton);
+        bar.addSeparator().addItem(refreshButton).addItem(rerunFailuresButton)
                 .addItem(stopButton).addSpacer().addItem(onlyFailures);
+        refreshCoverageControls();
         return bar;
+    }
+
+    private void refreshCoverageControls() {
+        boolean supported = host.supportsCoverage();
+        coverageButton.setVisible(supported);
+        clearCoverageButton.setVisible(supported);
+        clearCoverageButton.setEnabled(supported && !coverage.isEmpty());
     }
 
     public void reload() {
@@ -197,6 +228,7 @@ public final class JavaTestExplorerPanel extends JPanel {
             return;
         }
         long ticket = ++discoveryTicket;
+        refreshCoverageControls();
         refreshButton.setEnabled(false);
         status.setText(text("status.discovering", "Descobrindo testes..."))
                 .setTone(BadgeLabel.Tone.INFO);
@@ -246,7 +278,7 @@ public final class JavaTestExplorerPanel extends JPanel {
             String className = entry.getKey();
             TreeNode<Object> classNode = UiSupport.treeNode(
                     new ClassNode(className, summaryOf(entry.getValue())), "class|" + className);
-            classNode.setLabel(simpleClassName(className));
+            classNode.setLabel(simpleClassName(className) + classCoverageLabel(className));
             classNode.setIcon(JavaIcons.java(JavaIcons.SMALL));
             classNode.setTooltip(className + "  -  " + summaryOf(entry.getValue()));
             for (JavaTest test : visible) {
@@ -256,7 +288,8 @@ public final class JavaTestExplorerPanel extends JPanel {
             String packageName = packageName(className);
             TreeNode<Object> packageNode = packages.computeIfAbsent(packageName, name -> {
                 TreeNode<Object> node = UiSupport.treeNode(new PackageNode(name), "package|" + name);
-                node.setLabel(name.isBlank() ? text("tree.defaultPackage", "(pacote padrao)") : name);
+                node.setLabel((name.isBlank() ? text("tree.defaultPackage", "(pacote padrao)") : name)
+                        + packageCoverageLabel(name));
                 node.setIcon(JavaIcons.folder(JavaIcons.SMALL));
                 node.setForeground(UiTokens.muted());
                 node.setFont(UiTokens.fontSmall());
@@ -341,6 +374,28 @@ public final class JavaTestExplorerPanel extends JPanel {
         debug(selection);
     }
 
+    private void runCoverage(List<JavaTest> selection) {
+        setBusy(true);
+        markRunning(selection);
+        status.setText(text("status.coverage", "Executando testes com cobertura..."))
+                .setTone(BadgeLabel.Tone.INFO);
+        host.runWithCoverage(selection, run -> SwingUtilities.invokeLater(() -> finishRun(run)));
+    }
+
+    public void runTestsWithCoverage(List<JavaTest> selection) {
+        runCoverage(selection);
+    }
+
+    public void setCoverage(CoverageReport report) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> setCoverage(report));
+            return;
+        }
+        coverage = report == null ? CoverageReport.EMPTY : report;
+        refreshCoverageControls();
+        rebuildTree();
+    }
+
     private void finishRun(JavaTestRunner.TestRun run) {
         setBusy(false);
         runningKeys.clear();
@@ -368,6 +423,8 @@ public final class JavaTestExplorerPanel extends JPanel {
         runAllButton.setEnabled(!busy);
         runSelectedButton.setEnabled(!busy);
         debugSelectedButton.setEnabled(!busy);
+        coverageButton.setEnabled(!busy);
+        clearCoverageButton.setEnabled(!busy && !coverage.isEmpty() && host.supportsCoverage());
         refreshButton.setEnabled(!busy);
         rerunFailuresButton.setEnabled(!busy && resultsByKey.values().stream()
                 .anyMatch(TestResult::isFailure));
@@ -495,6 +552,18 @@ public final class JavaTestExplorerPanel extends JPanel {
                 .filter(result -> result != null && result.isSuccess())
                 .count();
         return passed + "/" + executed + " " + text("status.passed", "passou");
+    }
+
+    private String classCoverageLabel(String className) {
+        return coverage.forClass(className)
+                .filter(file -> !file.isEmpty())
+                .map(file -> "   " + CoverageDisplay.percent(file.linePercentage()))
+                .orElse("");
+    }
+
+    private String packageCoverageLabel(String packageName) {
+        CoverageReport.Totals totals = coverage.forPackage(packageName);
+        return totals.isEmpty() ? "" : "   " + CoverageDisplay.percent(totals.linePercentage());
     }
 
     private static String simpleClassName(String name) {
