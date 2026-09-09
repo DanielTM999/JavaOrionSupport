@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkVendor;
 import org.junit.jupiter.api.Test;
@@ -7,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -113,6 +115,33 @@ class JdtLsServiceTest {
         assertFalse(JdtLsService.isCompletionDocumentationFailure(
                 "Failed to import projects"));
         assertFalse(JdtLsService.isCompletionDocumentationFailure(null));
+    }
+
+    @Test
+    void clearsCachedDiagnosticsAndNotifiesAffectedEditors() {
+        List<Path> published = new ArrayList<>();
+        JdtLsService service = new JdtLsService(null, null, null, published::add);
+        Path source = root.resolve("Example.java").toAbsolutePath().normalize();
+        var params = new ObjectMapper().valueToTree(Map.of(
+                "uri", source.toUri().toString(),
+                "diagnostics", List.of(Map.of(
+                        "range", Map.of(
+                                "start", Map.of("line", 1, "character", 2),
+                                "end", Map.of("line", 1, "character", 6)),
+                        "severity", 1,
+                        "message", "stale diagnostic",
+                        "source", "test"))));
+
+        service.onPublishDiagnostics(params);
+        assertEquals(1, service.diagnostics(source).size());
+
+        published.clear();
+        service.clearDiagnostics();
+
+        assertTrue(service.diagnostics(source).isEmpty());
+        assertEquals(List.of(source), published);
+        service.clearDiagnostics();
+        assertEquals(List.of(source), published);
     }
 
     @Test

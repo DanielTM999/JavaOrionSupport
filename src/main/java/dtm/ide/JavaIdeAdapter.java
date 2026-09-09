@@ -317,6 +317,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             new JavaFastCompletionProvider(lexicalIndex);
     private final AtomicLong problemsRefreshTicket = new AtomicLong();
     private final AtomicBoolean renameWaitCanceled = new AtomicBoolean();
+    private final AtomicBoolean diagnosticReanalysisRunning = new AtomicBoolean();
     private final BuildFileCompletionProvider buildFileCompletion =
             new BuildFileCompletionProvider(mavenCentral);
     private final EditorTheme theme = new JavaEditorTheme(() -> requestEditorThemeConfig("java"));
@@ -490,6 +491,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         lastBuildDiagnostics.clear();
         liveLspProblems.clear();
         lastBuildProblems = List.of();
+        diagnosticReanalysisRunning.set(false);
         refreshProblemsPanel();
         clearCoverage();
         detachAllCoverageGutters();
@@ -681,6 +683,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 hideProgress(LSP_PROGRESS_ID);
                 setStatusBarText(text("status.noJdk",
                         "Java: nenhuma JDK encontrada - instale uma pelo JDK Manager"));
+                finishDiagnosticReanalysis(ticket, root, false);
                 promptForProjectJdk(ticket, root, resolution);
                 return;
             }
@@ -735,6 +738,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             hideProgress(LSP_PROGRESS_ID);
             if (!current(ticket, root)) {
                 lsp.stop();
+                finishDiagnosticReanalysis(ticket, root, false);
                 return;
             }
             if (error != null) {
@@ -742,6 +746,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 setStatusBarText(text("status.lspUnavailable", "Java: IntelliSense indisponivel")
                         + " - " + rootMessage(error));
             }
+            finishDiagnosticReanalysis(ticket, root, error == null && lsp.isReady());
         });
     }
 
@@ -4585,6 +4590,12 @@ public class JavaIdeAdapter extends IdeAdapter {
                         .tooltip(text("menu.sync.tip",
                                 "Reler o pom ou o build.gradle e atualizar o classpath"))
                         .onClick(event -> syncProject()))
+                .add(MenuNode.item("javaReanalyzeDiagnostics",
+                                text("menu.reanalyzeDiagnostics", "Limpar e rediagnosticar"))
+                        .icon(JavaIcons.refresh(JavaIcons.SMALL))
+                        .tooltip(text("menu.reanalyzeDiagnostics.tip",
+                                "Descartar os diagnosticos atuais e reiniciar a analise Java"))
+                        .onClick(event -> reanalyzeDiagnostics()))
                 .add(MenuNode.item("javaProjectStructure",
                                 text("menu.projectStructure", "Estrutura do projeto..."))
                         .icon(JavaIcons.module(JavaIcons.SMALL))
@@ -5775,6 +5786,76 @@ public class JavaIdeAdapter extends IdeAdapter {
         refreshProblemsPanel();
     }
 
+    private void reanalyzeDiagnostics() {
+        Path root = projectRoot;
+        if (root == null) {
+            setStatusBarText(text("status.noProject", "Java: nenhum projeto aberto"));
+            return;
+        }
+        if (!diagnosticReanalysisRunning.compareAndSet(false, true)) {
+            setStatusBarText(text("status.diagnosticsReanalysisRunning",
+                    "Java: a reanalise de diagnosticos ja esta em andamento"));
+            return;
+        }
+
+        long ticket = lifecycle.incrementAndGet();
+        Set<Path> affected = new LinkedHashSet<>(javaEditors.keySet());
+        affected.addAll(lastBuildDiagnostics.keySet());
+        affected.addAll(liveLspProblems.keySet());
+
+        lastBuildDiagnostics.clear();
+        lastBuildProblems = List.of();
+        liveLspProblems.clear();
+        JdtLsService lsp = jdtLs;
+        if (lsp != null) {
+            lsp.clearDiagnostics();
+        }
+        affected.forEach(this::requestRefreshDiagnostics);
+        refreshProblemsPanel();
+        setStatusBarText(text("status.reanalyzingDiagnostics",
+                "Java: limpando diagnosticos e reiniciando a analise..."));
+
+        background.submit(() -> {
+            if (lsp != null) {
+                lsp.stop();
+            }
+            if (!current(ticket, root)) {
+                diagnosticReanalysisRunning.set(false);
+                return;
+            }
+
+            liveLspProblems.clear();
+            languageServerReadyHandled.set(false);
+            SwingUtilities.invokeLater(() -> {
+                if (current(ticket, root)) {
+                    javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
+                    refreshProblemsPanel();
+                }
+            });
+            setupSpring(ticket, root);
+
+            if (settings().getLanguageServerMode().startsServer()) {
+                resolveProjectJdk(ticket, root);
+            } else {
+                finishDiagnosticReanalysis(ticket, root, true);
+            }
+        });
+    }
+
+    private void finishDiagnosticReanalysis(long ticket, Path root, boolean successful) {
+        if (!current(ticket, root)) {
+            diagnosticReanalysisRunning.set(false);
+            return;
+        }
+        diagnosticReanalysisRunning.set(false);
+        if (successful) {
+            javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
+            refreshProblemsPanel();
+            setStatusBarText(text("status.diagnosticsReanalyzed",
+                    "Java: diagnosticos atualizados"));
+        }
+    }
+
     private void ensureBuildToolsPanel() {
         if (buildToolsPanel != null) {
             buildToolsPanel.reload();
@@ -6089,6 +6170,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             springMetadata = springMetadata.withProjectProperties(projectConfigProperties());
             snapshot.beansIn(root).forEach(bean -> requestRefreshCodeLenses(bean.file()));
+            javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
             SwingUtilities.invokeLater(() -> {
                 if (!current(ticket, root)) {
                     return;

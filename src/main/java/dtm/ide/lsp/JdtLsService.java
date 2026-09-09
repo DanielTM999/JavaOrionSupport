@@ -869,7 +869,7 @@ public class JdtLsService {
         return current;
     }
 
-    private void onPublishDiagnostics(JsonNode params) {
+    void onPublishDiagnostics(JsonNode params) {
         if (params == null) {
             return;
         }
@@ -2245,6 +2245,20 @@ public class JdtLsService {
             return List.of();
         }
         return diagnosticsByPath.getOrDefault(normalizePath(filePath), List.of());
+    }
+
+    /**
+     * Discards every diagnostic cached from the current server session.
+     *
+     * <p>The listeners are notified after the caches are empty so editors can remove stale
+     * markers immediately, even when the language server itself is unresponsive.</p>
+     */
+    public void clearDiagnostics() {
+        Set<Path> affected = new java.util.LinkedHashSet<>(diagnosticsByPath.keySet());
+        affected.addAll(rawDiagnosticsByPath.keySet());
+        diagnosticsByPath.clear();
+        rawDiagnosticsByPath.clear();
+        affected.forEach(onDiagnosticsPublished);
     }
 
     public Diagnostic diagnosticAt(Path filePath, int line, int col) {
