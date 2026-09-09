@@ -59,6 +59,51 @@ class JavaFastCompletionProviderTest {
         assertFalse(labels.contains("PhantomService"));
     }
 
+    @Test
+    void ignoresIdentifiersThatAreOnlyUsedSomewhereElseInTheFile() {
+        String source = String.join("\n",
+                "class Demo {",
+                "    void first() { helperService.recalculateEverything(); }",
+                "    void second() { rec");
+
+        List<String> labels = labels(completion.suggestions(context(source, "rec")));
+
+        assertFalse(labels.contains("recalculateEverything"), labels.toString());
+        assertFalse(labels.contains("helperService"), labels.toString());
+    }
+
+    @Test
+    void offersLocalVariablesAndParametersVisibleBeforeTheCaret() {
+        String source = String.join("\n",
+                "class Demo {",
+                "    void run(String customerName) {",
+                "        int totalAmount = 10;",
+                "        cus");
+
+        List<String> labels = labels(completion.suggestions(context(source, "cus")));
+
+        assertTrue(labels.contains("customerName"), labels.toString());
+        assertTrue(labels(completion.suggestions(context(source.replace("cus", "tot"), "tot")))
+                .contains("totalAmount"));
+    }
+
+    @Test
+    void ignoresVariablesDeclaredAfterTheCaret() {
+        String source = String.join("\n",
+                "class Demo {",
+                "    void run() {",
+                "        lat",
+                "        String laterVariable = \"x\";",
+                "    }",
+                "}");
+        int caret = source.indexOf("lat") + 3;
+        IdeCompletionContext context = new IdeCompletionContext(
+                source, Path.of("Demo.java"), caret, 2, 11,
+                "        lat", "lat", caret - 3, IdeCompletionTriggerKind.TYPING);
+
+        assertFalse(labels(completion.suggestions(context)).contains("laterVariable"));
+    }
+
     private static IdeCompletionContext context(String source, String prefix) {
         int offset = source.length();
         int lineStart = source.lastIndexOf('\n') + 1;

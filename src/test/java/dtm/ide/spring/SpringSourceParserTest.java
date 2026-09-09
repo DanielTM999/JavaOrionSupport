@@ -317,6 +317,92 @@ class SpringSourceParserTest {
         assertEquals(code.length() - 1, SpringSourceParser.matchingBrace(code, open));
     }
 
+    @Test
+    void readsSetterInjection() {
+        SpringSourceParser.ParseResult result = parse("""
+                package com.example;
+
+                @Service
+                public class PedidoService {
+
+                    private Envio envio;
+
+                    @Autowired
+                    public void setEnvio(@Qualifier("rapido") Envio envio) {
+                        this.envio = envio;
+                    }
+                }
+                """);
+
+        assertEquals(1, result.injections().size());
+        SpringInjection injection = result.injections().getFirst();
+        assertEquals(SpringInjection.Kind.SETTER, injection.kind());
+        assertEquals("Envio", injection.targetSimpleName());
+        assertEquals("rapido", injection.qualifier());
+    }
+
+    @Test
+    void ignoresSettersWithoutAnInjectionAnnotation() {
+        SpringSourceParser.ParseResult result = parse("""
+                package com.example;
+
+                @Service
+                public class PedidoService {
+
+                    private String nome;
+
+                    public void setNome(String nome) {
+                        this.nome = nome;
+                    }
+                }
+                """);
+
+        assertTrue(result.injections().isEmpty());
+    }
+
+    @Test
+    void readsValuePlaceholdersAsPropertyUsages() {
+        SpringSourceParser.ParseResult result = parse("""
+                package com.example;
+
+                @Service
+                public class PedidoService {
+
+                    @Value("${app.timeout:30}")
+                    private int timeout;
+
+                    @Value("${app.destino}")
+                    private String destino;
+                }
+                """);
+
+        assertEquals(2, result.propertyUsages().size());
+        assertEquals("app.timeout", result.propertyUsages().getFirst().key());
+        assertEquals("30", result.propertyUsages().getFirst().defaultValue());
+        assertFalse(result.propertyUsages().getLast().hasDefault());
+    }
+
+    @Test
+    void readsConfigurationPropertiesPrefixAndItsFields() {
+        SpringSourceParser.ParseResult result = parse("""
+                package com.example;
+
+                @ConfigurationProperties(prefix = "app.envio")
+                public class EnvioProperties {
+                    private String url;
+                    private int timeout;
+                }
+                """);
+
+        List<String> keys = result.propertyUsages().stream()
+                .map(usage -> usage.key())
+                .toList();
+
+        assertTrue(keys.contains("app.envio"));
+        assertTrue(keys.contains("app.envio.url"));
+        assertTrue(keys.contains("app.envio.timeout"));
+    }
+
     private static SpringStereotype stereotypeOf(String annotation) {
         return parse(annotation + "\npublic class Exemplo { }").beans().getFirst().stereotype();
     }

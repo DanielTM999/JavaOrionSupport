@@ -72,6 +72,22 @@ public class JdtLsService {
     public static final String GENERATE_CONSTRUCTORS_PROMPT = "java.action.generateConstructorsPrompt";
     public static final String GENERATE_DELEGATE_METHODS_PROMPT = "java.action.generateDelegateMethodsPrompt";
 
+    public enum CompletionTrigger {
+        INVOKED(1),
+        TRIGGER_CHARACTER(2),
+        INCOMPLETE(3);
+
+        private final int lspKind;
+
+        CompletionTrigger(int lspKind) {
+            this.lspKind = lspKind;
+        }
+
+        public int lspKind() {
+            return lspKind;
+        }
+    }
+
     public record SourceAction(String title, String command) {
     }
 
@@ -95,13 +111,12 @@ public class JdtLsService {
     private static final long INTERACTIVE_TIMEOUT_MS = 800;
     private static final long INDEXING_COMPLETION_TIMEOUT_MS = 750;
     private static final long READY_COMPLETION_TIMEOUT_MS = 1_500;
-    private static final long COMPLETION_RESOLVE_BUDGET_MS = 260;
     private static final long INITIALIZE_TIMEOUT_MS = 120_000;
     private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
     private static final long SERVICE_READY_POLL_MS = 250;
     private static final long DOCUMENT_RECOVERY_COOLDOWN_MS = 5_000;
     private static final int MAX_COMPLETION_ITEMS = 80;
-    private static final int MAX_COMPLETION_RESOLVE_ITEMS = 1;
+    public static final int ANY_VERSION = -1;
     private static final long CODE_LENS_RESOLVE_BUDGET_MS = 1_200;
     private static final int MAX_CODE_LENS_RESOLVE = 60;
     private static final long CODE_LENS_RETRY_TIMEOUT_MS = 20_000;
@@ -138,11 +153,11 @@ public class JdtLsService {
     private final Map<String, CodeLensCache> codeLensCache = new ConcurrentHashMap<>();
     private final Map<String, CodeLensRetry> codeLensRetries = new ConcurrentHashMap<>();
     private final Map<String, CompletionCache> completionCache = new ConcurrentHashMap<>();
+    private final Map<String, List<Location>> navigationCache = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<JsonNode>> inFlightRequests = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> lastFailureLog = new ConcurrentHashMap<>();
     private final AtomicLong lastDocumentRecovery = new AtomicLong();
     private final AtomicLong lastCodeLensWorkRefresh = new AtomicLong();
-    private final AtomicBoolean completionResolveDisabled = new AtomicBoolean();
     private final Object processLock = new Object();
 
     private volatile State state = State.NOT_STARTED;
@@ -324,7 +339,6 @@ public class JdtLsService {
             state = State.STARTING;
             lastError = null;
             startupFailure = null;
-            completionResolveDisabled.set(false);
             projectRoot = root.toAbsolutePath().normalize();
             readyLatch = new CountDownLatch(1);
             serviceReadyLatch = new CountDownLatch(1);
@@ -577,6 +591,7 @@ public class JdtLsService {
         synchronized (processLock) {
             state = State.STOPPED;
         }
+        clearNavigationCache(null);
         serviceReadyLatch.countDown();
         readyLatch.countDown();
         LspJsonRpcClient rpc = client;
@@ -746,6 +761,7 @@ public class JdtLsService {
         if (rpc == null) {
             return false;
         }
+        clearNavigationCache(null);
         rpc.notify("java/projectConfigurationUpdate",
                 Map.of("uri", LspConversions.toUri(projectRoot)));
         return true;
@@ -899,10 +915,7 @@ public class JdtLsService {
     private void onServerLogMessage(JsonNode params) {
         String message = params == null ? "" : params.path("message").asText("");
         if (isCompletionDocumentationFailure(message)) {
-            if (completionResolveDisabled.compareAndSet(false, true)) {
-                log.debug("[jdtls] Javadoc invalido no completionItem/resolve; "
-                        + "usando a assinatura como fallback nesta sessao");
-            }
+            log.debug("[jdtls] Javadoc invalido no completion; a documentacao vem pelo hover");
             return;
         }
         if (isRecoverableDocumentError(message)) {
@@ -948,6 +961,7 @@ public class JdtLsService {
             symbolCache.remove(uri);
             codeLensCache.remove(uri);
             completionCache.remove(uri);
+            clearNavigationCache(uri);
             cancelInFlightForUri(uri);
         }
         documentVersions.computeIfAbsent(uri, key -> new AtomicInteger(1));
@@ -975,6 +989,7 @@ public class JdtLsService {
         symbolCache.remove(uri);
         codeLensCache.remove(uri);
         completionCache.remove(uri);
+        clearNavigationCache(uri);
         cancelInFlightForUri(uri);
 
         if (!canSyncDocuments()) {
@@ -1000,6 +1015,7 @@ public class JdtLsService {
         codeLensCache.remove(uri);
         codeLensRetries.remove(uri);
         completionCache.remove(uri);
+        clearNavigationCache(uri);
         cancelInFlightForUri(uri);
 
         LspJsonRpcClient rpc = client;
@@ -1008,12 +1024,56 @@ public class JdtLsService {
         }
     }
 
+    /** Tells JDT LS that a source appeared on disk outside the editor. */
+    public void pathCreated(Path createdPath) {
+        notifyWatchedFile(createdPath, 1);
+    }
+
+    /** Tells JDT LS that a source changed on disk outside the editor. */
+    public void pathChanged(Path changedPath) {
+        notifyWatchedFile(changedPath, 2);
+    }
+
+    private void notifyWatchedFile(Path path, int changeType) {
+        if (path == null) {
+            return;
+        }
+        Path target = normalizePath(path);
+        LspJsonRpcClient rpc = client;
+        if (rpc == null || rpc.isClosed() || !canSyncDocuments()) {
+            return;
+        }
+        String uri = LspConversions.toUri(target);
+        if (syncedDocuments.contains(uri)) {
+            return;
+        }
+        symbolCache.remove(uri);
+        codeLensCache.remove(uri);
+        completionCache.remove(uri);
+        clearNavigationCache(uri);
+        rpc.notify("workspace/didChangeWatchedFiles", Map.of("changes", List.of(Map.of(
+                "uri", uri,
+                "type", changeType))));
+    }
+
+    /** Asks JDT LS to reread the build files of the project. */
+    public void projectConfigurationUpdate() {
+        LspJsonRpcClient rpc = client;
+        Path root = projectRoot;
+        if (rpc == null || rpc.isClosed() || root == null || !isInteractive()) {
+            return;
+        }
+        rpc.notify("java/projectConfigurationUpdate",
+                Map.of("uri", LspConversions.toUri(root)));
+    }
+
     /** Tells JDT LS that a source disappeared, including files moved to Orion's trash. */
     public void pathDeleted(Path deletedPath) {
         if (deletedPath == null) {
             return;
         }
         Path deleted = normalizePath(deletedPath);
+        clearNavigationCache(null);
         List<Path> openBelowDeleted = openDocuments.keySet().stream()
                 .map(LspConversions::toPath)
                 .filter(java.util.Objects::nonNull)
@@ -1221,6 +1281,12 @@ public class JdtLsService {
     }
 
     public List<AutoCompleteItem> complete(Path filePath, String text, int line, int col) {
+        return complete(filePath, text, line, col, CompletionTrigger.INVOKED, null, ANY_VERSION);
+    }
+
+    public List<AutoCompleteItem> complete(Path filePath, String text, int line, int col,
+                                           CompletionTrigger trigger, Character triggerCharacter,
+                                           int expectedVersion) {
         if (!isInteractive()) {
             return List.of();
         }
@@ -1233,38 +1299,76 @@ public class JdtLsService {
         }
         syncBeforeRequest(filePath, text);
         int version = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
+        if (isStaleVersion(expectedVersion, version)) {
+            log.debug("Completion descartada antes do envio: versao {} esperada, {} atual",
+                    expectedVersion, version);
+            return List.of();
+        }
+        CompletionTrigger kind = trigger == null ? CompletionTrigger.INVOKED : trigger;
         long timeout = isReady() ? READY_COMPLETION_TIMEOUT_MS : INDEXING_COMPLETION_TIMEOUT_MS;
+        long started = System.nanoTime();
         JsonNode result = requestCoalescedInteractive("textDocument/completion",
-                positionParams(filePath, line, col), timeout,
-                "completion|" + uri + "|" + version + "|" + line + "|" + col);
+                completionParams(filePath, line, col, kind, triggerCharacter), timeout,
+                "completion|" + uri + "|" + version + "|" + line + "|" + col + "|" + kind);
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
         if (result == null) {
+            log.debug("Completion sem resposta em {} ms (limite {} ms, acionamento {})",
+                    elapsedMs, timeout, kind);
             return List.of();
         }
         JsonNode items = result.isArray() ? result : result.get("items");
         if (items == null || !items.isArray()) {
             return List.of();
         }
-        List<JsonNode> candidates = new ArrayList<>(Math.min(items.size(), MAX_COMPLETION_ITEMS));
+        List<AutoCompleteItem> completions = new ArrayList<>(
+                Math.min(items.size(), MAX_COMPLETION_ITEMS));
         for (JsonNode node : items) {
-            if (candidates.size() >= MAX_COMPLETION_ITEMS) {
+            if (completions.size() >= MAX_COMPLETION_ITEMS) {
                 break;
             }
-            if (node != null && !node.path("label").asText("").isBlank()) {
-                candidates.add(node);
+            if (node == null || node.path("label").asText("").isBlank()) {
+                continue;
             }
-        }
-        List<JsonNode> resolved = resolveCompletionItems(candidates);
-        List<AutoCompleteItem> completions = new ArrayList<>(resolved.size());
-        for (JsonNode node : resolved) {
             AutoCompleteItem item = LspConversions.completionItem(node);
             if (item != null) completions.add(item);
         }
-        if (!requestedText.equals(openDocuments.get(uri))) {
+        int current = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
+        if (!requestedText.equals(openDocuments.get(uri)) || current != version
+                || isStaleVersion(expectedVersion, current)) {
+            log.debug("Completion descartada: documento mudou durante a requisicao ({} ms)",
+                    elapsedMs);
             return List.of();
         }
         List<AutoCompleteItem> answer = List.copyOf(completions);
         completionCache.put(uri, new CompletionCache(requestedText, line, col, answer));
+        log.debug("Completion com {} item(ns) em {} ms (acionamento {})",
+                answer.size(), elapsedMs, kind);
         return answer;
+    }
+
+    public int documentVersion(Path filePath) {
+        if (filePath == null) {
+            return ANY_VERSION;
+        }
+        AtomicInteger version = documentVersions.get(LspConversions.toUri(filePath));
+        return version == null ? ANY_VERSION : version.get();
+    }
+
+    static boolean isStaleVersion(int expectedVersion, int currentVersion) {
+        return expectedVersion != ANY_VERSION && expectedVersion != currentVersion;
+    }
+
+    private static Map<String, Object> completionParams(Path filePath, int line, int col,
+                                                        CompletionTrigger trigger,
+                                                        Character triggerCharacter) {
+        Map<String, Object> params = positionParams(filePath, line, col);
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("triggerKind", trigger.lspKind());
+        if (trigger == CompletionTrigger.TRIGGER_CHARACTER && triggerCharacter != null) {
+            context.put("triggerCharacter", String.valueOf(triggerCharacter.charValue()));
+        }
+        params.put("context", context);
+        return params;
     }
 
     public List<AutoCompleteItem> cachedCompletions(Path filePath) {
@@ -1276,43 +1380,6 @@ public class JdtLsService {
     public void warmCompletion(Path filePath, String text, int line, int col) {
         if (!isInteractive() || isReady() || filePath == null) return;
         executor.submit(() -> complete(filePath, text, line, col));
-    }
-
-    private List<JsonNode> resolveCompletionItems(List<JsonNode> items) {
-        LspJsonRpcClient rpc = client;
-        if (!capabilities.completionResolve() || completionResolveDisabled.get()
-                || rpc == null || items.isEmpty()) {
-            return items;
-        }
-        int resolveCount = Math.min(items.size(), MAX_COMPLETION_RESOLVE_ITEMS);
-        List<CompletableFuture<JsonNode>> futures = new ArrayList<>(resolveCount);
-        for (int index = 0; index < resolveCount; index++) {
-            JsonNode item = items.get(index);
-            futures.add(needsCompletionResolve(item)
-                    ? rpc.request("completionItem/resolve", item).exceptionally(error -> item)
-                    : CompletableFuture.completedFuture(item));
-        }
-        List<JsonNode> result = new ArrayList<>(items);
-        long budget = isReady() ? COMPLETION_RESOLVE_BUDGET_MS : 100;
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budget);
-        for (int index = 0; index < resolveCount; index++) {
-            CompletableFuture<JsonNode> future = futures.get(index);
-            try {
-                long remaining = Math.max(1, deadline - System.nanoTime());
-                JsonNode resolved = future.get(remaining, TimeUnit.NANOSECONDS);
-                if (resolved != null && !resolved.isNull()) result.set(index, resolved);
-            } catch (Exception ignored) {
-                future.cancel(false);
-            }
-        }
-        return result;
-    }
-
-    private static boolean needsCompletionResolve(JsonNode item) {
-        if (item == null || !item.hasNonNull("data")) return false;
-        JsonNode documentation = item.get("documentation");
-        return documentation == null || documentation.isNull()
-                || LspConversions.documentation(documentation).isBlank();
     }
 
     public HoverInfo hover(Path filePath, String text, int line, int col) {
@@ -1341,9 +1408,46 @@ public class JdtLsService {
         if (!capabilities.definition()) {
             return List.of();
         }
-        return LspConversions.locations(interactive
-                ? requestAtInteractive("textDocument/definition", filePath, text, line, col)
-                : requestAt("textDocument/definition", filePath, text, line, col));
+        return navigate("textDocument/definition", filePath, text, line, col, interactive, null);
+    }
+
+    private List<Location> navigate(String method, Path filePath, String text, int line, int col,
+                                    boolean interactive, Map<String, Object> extraParams) {
+        if (filePath == null) {
+            return List.of();
+        }
+        String uri = LspConversions.toUri(filePath);
+        syncBeforeRequest(filePath, text);
+        int version = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
+        String key = method + "|" + uri + "|" + version + "|" + line + "|" + col;
+        List<Location> cached = navigationCache.get(key);
+        if (cached != null) {
+            log.debug("Navegacao {} respondida pelo cache da versao {}", method, version);
+            return cached;
+        }
+        Map<String, Object> params = positionParams(filePath, line, col);
+        if (extraParams != null) {
+            params.putAll(extraParams);
+        }
+        long timeout = interactive ? INTERACTIVE_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+        long started = System.nanoTime();
+        JsonNode result = requestCoalesced(method, params, timeout, key, interactive);
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        if (result == null) {
+            log.debug("Navegacao {} sem resposta em {} ms (limite {} ms)",
+                    method, elapsedMs, timeout);
+            return List.of();
+        }
+        int current = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
+        if (current != version) {
+            log.debug("Navegacao {} descartada: documento mudou durante a requisicao ({} ms)",
+                    method, elapsedMs);
+            return List.of();
+        }
+        List<Location> locations = LspConversions.locations(result);
+        navigationCache.put(key, locations);
+        log.debug("Navegacao {} com {} destino(s) em {} ms", method, locations.size(), elapsedMs);
+        return locations;
     }
 
     public List<Location> definitionsAtUri(String uri, int line, int col) {
@@ -1404,9 +1508,8 @@ public class JdtLsService {
         if (!capabilities.implementation()) {
             return List.of();
         }
-        return LspConversions.locations(interactive
-                ? requestAtInteractive("textDocument/implementation", filePath, text, line, col)
-                : requestAt("textDocument/implementation", filePath, text, line, col));
+        return navigate("textDocument/implementation", filePath, text, line, col,
+                interactive, null);
     }
 
     public List<Location> typeDefinitions(Path filePath, String text, int line, int col) {
@@ -1422,9 +1525,8 @@ public class JdtLsService {
         if (!capabilities.typeDefinition()) {
             return List.of();
         }
-        return LspConversions.locations(interactive
-                ? requestAtInteractive("textDocument/typeDefinition", filePath, text, line, col)
-                : requestAt("textDocument/typeDefinition", filePath, text, line, col));
+        return navigate("textDocument/typeDefinition", filePath, text, line, col,
+                interactive, null);
     }
 
     public List<Location> references(Path filePath, String text, int line, int col) {
@@ -1440,12 +1542,8 @@ public class JdtLsService {
         if (!capabilities.references()) {
             return List.of();
         }
-        Map<String, Object> params = positionParams(filePath, line, col);
-        params.put("context", Map.of("includeDeclaration", false));
-        syncBeforeRequest(filePath, text);
-        return LspConversions.locations(interactive
-                ? requestInteractive("textDocument/references", params, INTERACTIVE_TIMEOUT_MS)
-                : request("textDocument/references", params, REQUEST_TIMEOUT_MS));
+        return navigate("textDocument/references", filePath, text, line, col, interactive,
+                Map.of("context", Map.of("includeDeclaration", false)));
     }
 
     public boolean supportsCallHierarchy() {
@@ -2290,6 +2388,14 @@ public class JdtLsService {
                     ? "tempo limite excedido" : rootMessage(error);
             log.debug("Requisicao {} falhou: {}", method, reason);
         }
+    }
+
+    private void clearNavigationCache(String uri) {
+        if (uri == null || uri.isBlank()) {
+            navigationCache.clear();
+            return;
+        }
+        navigationCache.keySet().removeIf(key -> key.contains("|" + uri + "|"));
     }
 
     private void cancelInFlightForUri(String uri) {

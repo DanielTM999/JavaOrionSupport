@@ -4,8 +4,10 @@ import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class JavaIdeAdapterCompletionTest {
 
@@ -60,6 +62,42 @@ class JavaIdeAdapterCompletionTest {
 
         assertEquals(" {\n            \n        } catch (Exception e) {\n            \n        }",
                 JavaIdeAdapter.indentMultilineGhostText(suffix, "        try"));
+    }
+
+    @Test
+    void keepsOverloadedMethodsThatShareTheSameLabel() {
+        AutoCompleteItem first = new AutoCompleteItem("substring(${1:beginIndex})",
+                "substring", "String", null, null, AutoCompleteItem.Kind.METHOD);
+        AutoCompleteItem second = new AutoCompleteItem("substring(${1:beginIndex}, ${2:endIndex})",
+                "substring", "String", null, null, AutoCompleteItem.Kind.METHOD);
+
+        List<AutoCompleteItem> merged = JavaIdeAdapter.mergeCompletionSuggestions(
+                List.of(first, second), List.of());
+
+        assertEquals(2, merged.size(), merged.toString());
+    }
+
+    @Test
+    void dropsSemanticItemsRepeatedWithTheSameSignature() {
+        AutoCompleteItem item = new AutoCompleteItem("length()", "length", "String",
+                null, null, AutoCompleteItem.Kind.METHOD);
+
+        List<AutoCompleteItem> merged = JavaIdeAdapter.mergeCompletionSuggestions(
+                List.of(item, item), List.of());
+
+        assertEquals(1, merged.size());
+    }
+
+    @Test
+    void recognizesOnlyRealTriggerCharactersBeforeTheCaret() {
+        Set<Character> triggers = Set.of('.', '@');
+
+        assertEquals('.', JavaIdeAdapter.completionTriggerCharacter("value.", 6, triggers));
+        assertEquals('@', JavaIdeAdapter.completionTriggerCharacter("    @", 5, triggers));
+        assertNull(JavaIdeAdapter.completionTriggerCharacter("value", 5, triggers));
+        assertNull(JavaIdeAdapter.completionTriggerCharacter("value ", 6, triggers));
+        assertNull(JavaIdeAdapter.completionTriggerCharacter(null, 3, triggers));
+        assertNull(JavaIdeAdapter.completionTriggerCharacter("value.", 0, triggers));
     }
 
     @Test

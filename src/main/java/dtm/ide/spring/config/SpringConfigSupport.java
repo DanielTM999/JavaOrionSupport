@@ -74,6 +74,43 @@ public final class SpringConfigSupport {
         return items;
     }
 
+    private static final java.util.Set<String> PROFILE_KEYS = java.util.Set.of(
+            "spring.profiles.active", "spring.profiles.include", "spring.profiles.default");
+
+    public static List<AutoCompleteItem> completeValues(SpringConfigIndex index, Path file,
+                                                        String content, int line, int column) {
+        if (index == null || !isConfigFile(file)) {
+            return List.of();
+        }
+        SpringConfigDocument.Format format =
+                SpringConfigDocument.Format.of(file.getFileName().toString());
+        String key = SpringConfigDocument.keyAt(content, line, format);
+        if (key == null || !PROFILE_KEYS.contains(SpringConfigMetadata.canonical(key))) {
+            return List.of();
+        }
+        if (!afterSeparator(content, line, column, format)) {
+            return List.of();
+        }
+        List<AutoCompleteItem> items = new ArrayList<>();
+        for (String profile : index.profiles()) {
+            items.add(new AutoCompleteItem(profile, profile, "profile", "", null,
+                    AutoCompleteItem.Kind.PROPERTY, List.of()));
+        }
+        return items;
+    }
+
+    private static boolean afterSeparator(String content, int line, int column,
+                                          SpringConfigDocument.Format format) {
+        String[] lines = content == null ? new String[0] : content.split("\\n", -1);
+        if (line < 0 || line >= lines.length) {
+            return false;
+        }
+        String text = lines[line];
+        int separator = format == SpringConfigDocument.Format.PROPERTIES
+                ? text.indexOf('=') : text.indexOf(':');
+        return separator >= 0 && column > separator;
+    }
+
     private static String insertTextFor(SpringConfigProperty property, String parentPath,
                                         SpringConfigDocument.Format format) {
         if (format == SpringConfigDocument.Format.PROPERTIES) {
@@ -128,13 +165,15 @@ public final class SpringConfigSupport {
                         + (deprecated.replacement().isBlank() ? "."
                         : ": " + text("diagnostic.useInstead", "use")
                           + " " + deprecated.replacement());
-                diagnostics.add(diagnostic(key, DiagnosticSeverity.WARNING, message));
+                diagnostics.add(diagnostic(key, DiagnosticSeverity.WARNING, message,
+                        dtm.ide.inspection.JavaInspection.CONFIG_DEPRECATED_KEY.id()));
                 continue;
             }
             if (metadata.fromClasspath() && !metadata.isKnown(key.key())) {
                 diagnostics.add(diagnostic(key, DiagnosticSeverity.WARNING,
                         text("diagnostic.unknown", "Propriedade desconhecida no classpath:")
-                                + " " + key.key()));
+                                + " " + key.key(),
+                        dtm.ide.inspection.JavaInspection.CONFIG_UNKNOWN_KEY.id()));
             }
         }
         return diagnostics;
@@ -142,7 +181,13 @@ public final class SpringConfigSupport {
 
     private static Diagnostic diagnostic(SpringConfigDocument.ConfigKey key,
                                          DiagnosticSeverity severity, String message) {
+        return diagnostic(key, severity, message, SOURCE);
+    }
+
+    private static Diagnostic diagnostic(SpringConfigDocument.ConfigKey key,
+                                         DiagnosticSeverity severity, String message,
+                                         String source) {
         return new Diagnostic(key.line(), key.keyStart(), key.line(), key.keyEnd(),
-                severity, message, SOURCE, null);
+                severity, message, source, null);
     }
 }

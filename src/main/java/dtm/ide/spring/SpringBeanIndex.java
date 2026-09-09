@@ -3,6 +3,9 @@ package dtm.ide.spring;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
+import dtm.ide.spring.infra.SpringInfraModel;
+import dtm.ide.spring.jpa.JpaEntity;
+import dtm.ide.spring.jpa.JpaRepositoryInfo;
 import lombok.extern.slf4j.Slf4j;
 
 import java.nio.file.Path;
@@ -40,8 +43,9 @@ public class SpringBeanIndex {
         return CompletableFuture.supplyAsync(() -> {
             SpringIndexSnapshot built = scan(descriptor);
             snapshot.set(built);
-            log.info("Indice Spring: {} bean(s), {} injecao(oes) em {}",
-                    built.beans().size(), built.injections().size(), descriptor.root());
+            log.info("Indice Spring: {} bean(s), {} injecao(oes), {} entidade(s) JPA em {}",
+                    built.beans().size(), built.injections().size(), built.entities().size(),
+                    descriptor.root());
             return built;
         }, executor);
     }
@@ -59,6 +63,10 @@ public class SpringBeanIndex {
         }, executor);
     }
 
+    public SpringIndexSnapshot applyRuntimeBeans(List<SpringBean> runtimeBeans) {
+        return snapshot.updateAndGet(current -> current.withRuntimeBeans(runtimeBeans));
+    }
+
     public void clear() {
         snapshot.set(SpringIndexSnapshot.empty(null));
     }
@@ -71,13 +79,19 @@ public class SpringBeanIndex {
         List<SpringBean> beans = new ArrayList<>();
         List<SpringInjection> injections = new ArrayList<>();
         List<SpringEndpoint> endpoints = new ArrayList<>();
+        List<JpaEntity> entities = new ArrayList<>();
+        List<JpaRepositoryInfo> repositories = new ArrayList<>();
+        List<SpringPropertyUsage> propertyUsages = new ArrayList<>();
+        List<JavaType> types = new ArrayList<>();
+        SpringInfraModel infra = SpringInfraModel.empty();
         int visited = 0;
 
         for (Path sourceRoot : sourceRootsOf(descriptor)) {
             int remaining = MAX_FILES - visited;
             if (remaining <= 0) {
                 log.warn("Indice Spring interrompido em {} arquivos.", MAX_FILES);
-                return new SpringIndexSnapshot(descriptor.root(), beans, injections, endpoints);
+                return new SpringIndexSnapshot(descriptor.root(), beans, injections, endpoints,
+                        entities, repositories, propertyUsages, types, infra);
             }
             for (Path file : JavaProjectConventions.javaSources(sourceRoot, 0, remaining)) {
                 visited++;
@@ -86,9 +100,15 @@ public class SpringBeanIndex {
                 beans.addAll(parsed.beans());
                 injections.addAll(parsed.injections());
                 endpoints.addAll(parsed.endpoints());
+                entities.addAll(parsed.entities());
+                repositories.addAll(parsed.repositories());
+                propertyUsages.addAll(parsed.propertyUsages());
+                types.addAll(parsed.types());
+                infra = infra.merge(parsed.infra());
             }
         }
-        return new SpringIndexSnapshot(descriptor.root(), beans, injections, endpoints);
+        return new SpringIndexSnapshot(descriptor.root(), beans, injections, endpoints,
+                entities, repositories, propertyUsages, types, infra);
     }
 
     static List<Path> sourceRootsOf(JavaProjectDescriptor descriptor) {

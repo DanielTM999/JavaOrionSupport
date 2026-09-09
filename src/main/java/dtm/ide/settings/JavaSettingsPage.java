@@ -29,6 +29,10 @@ public final class JavaSettingsPage implements PluginSettingsPage {
     private static final List<Integer> JDK_OPTIONS = List.of(8, 11, 17, 21, 25);
 
     private final JavaPluginSettings settings;
+    private final dtm.ide.inspection.InspectionSuppressionStore suppressions;
+    private final java.nio.file.Path projectRoot;
+    private final java.util.Map<String, JCheckBox> hiddenOccurrences =
+            new java.util.LinkedHashMap<>();
     private final Runnable onChanged;
 
     private final JComboBox<LanguageServerMode> languageServerMode =
@@ -66,12 +70,36 @@ public final class JavaSettingsPage implements PluginSettingsPage {
             new JCheckBox(text("field.springCodeLens", "Mostrar contagem de injecoes no editor"));
     private final JCheckBox springLive =
             new JCheckBox(text("field.springLive", "Consultar o Actuator da aplicacao em execucao"));
+    private final JCheckBox springNavigation =
+            new JCheckBox(text("field.springNavigation",
+                    "Navegar de injecoes e qualifiers para o bean"));
+    private final JCheckBox springJpa =
+            new JCheckBox(text("field.springJpa", "Analisar entidades JPA e repositorios"));
+    private final java.util.Map<dtm.ide.inspection.JavaInspection, JCheckBox> inspections =
+            new java.util.LinkedHashMap<>();
+    private final JCheckBox springInfra =
+            new JCheckBox(text("field.springInfra",
+                    "Analisar @Scheduled, eventos, cache e seguranca"));
+    private final JCheckBox springRuntimeBeans =
+            new JCheckBox(text("field.springRuntimeBeans",
+                    "Adotar os beans da aplicacao em execucao (Actuator)"));
+    private final JCheckBox springConfigNavigation =
+            new JCheckBox(text("field.springConfigNavigation",
+                    "Ligar @Value e @ConfigurationProperties aos arquivos de configuracao"));
     private final JTextField springBaseUrl = new JTextField();
 
     private final JPanel panel = new JPanel(new BorderLayout());
 
     public JavaSettingsPage(JavaPluginSettings settings, Runnable onChanged) {
+        this(settings, onChanged, null, null);
+    }
+
+    public JavaSettingsPage(JavaPluginSettings settings, Runnable onChanged,
+                            dtm.ide.inspection.InspectionSuppressionStore suppressions,
+                            java.nio.file.Path projectRoot) {
         this.settings = settings;
+        this.suppressions = suppressions;
+        this.projectRoot = projectRoot;
         this.onChanged = onChanged == null ? () -> {
         } : onChanged;
         buildPanel();
@@ -108,6 +136,20 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         settings.setSpringSupport(springSupport.isSelected());
         settings.setSpringCodeLens(springCodeLens.isSelected());
         settings.setSpringLive(springLive.isSelected());
+        settings.setSpringNavigation(springNavigation.isSelected());
+        settings.setSpringJpa(springJpa.isSelected());
+        settings.setSpringConfigNavigation(springConfigNavigation.isSelected());
+        settings.setSpringRuntimeBeans(springRuntimeBeans.isSelected());
+        settings.setSpringInfra(springInfra.isSelected());
+        inspections.forEach((inspection, box) ->
+                settings.setInspectionDisabled(inspection.id(), !box.isSelected()));
+        if (suppressions != null) {
+            hiddenOccurrences.forEach((key, box) -> {
+                if (!box.isSelected()) {
+                    suppressions.restore(key);
+                }
+            });
+        }
         settings.setSpringBaseUrl(springBaseUrl.getText());
 
         settings.save();
@@ -146,9 +188,17 @@ public final class JavaSettingsPage implements PluginSettingsPage {
                 labeled(text("field.hotReload", "Hot reload:"), hotReloadMode),
                 labeled(text("field.jdtBuildMode", "Erros do projeto:"), jdtBuildMode)));
 
+        content.add(inspectionsSection());
+        content.add(hiddenOccurrencesSection());
+
         content.add(section(text("section.spring", "Spring"),
                 springSupport,
                 springCodeLens,
+                springNavigation,
+                springJpa,
+                springConfigNavigation,
+                springRuntimeBeans,
+                springInfra,
                 springLive,
                 labeled(text("field.springBaseUrl", "URL da aplicacao:"), springBaseUrl)));
 
@@ -157,6 +207,46 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         JScrollPane scroll = new JScrollPane(content);
         scroll.setBorder(null);
         panel.add(scroll, BorderLayout.CENTER);
+    }
+
+    private JPanel inspectionsSection() {
+        for (dtm.ide.inspection.JavaInspection inspection
+                : dtm.ide.inspection.JavaInspection.all()) {
+            JCheckBox box = new JCheckBox(inspectionLabel(inspection));
+            box.setToolTipText(inspection.id());
+            inspections.put(inspection, box);
+        }
+        return section(text("section.inspections", "Inspecoes"),
+                inspections.values().toArray(new JComponent[0]));
+    }
+
+    private JPanel hiddenOccurrencesSection() {
+        if (suppressions == null) {
+            return section(text("section.hiddenOccurrences", "Avisos ocultados"),
+                    new JLabel(text("hidden.unavailable", "Indisponivel sem projeto aberto.")));
+        }
+        java.util.List<dtm.ide.inspection.InspectionSuppressionStore.Entry> entries =
+                suppressions.entriesOf(projectRoot);
+        if (entries.isEmpty()) {
+            return section(text("section.hiddenOccurrences", "Avisos ocultados"),
+                    new JLabel(text("hidden.empty", "Nenhum aviso ocultado neste projeto.")));
+        }
+        java.util.List<JComponent> controls = new java.util.ArrayList<>();
+        for (dtm.ide.inspection.InspectionSuppressionStore.Entry entry : entries) {
+            String label = dtm.ide.inspection.JavaInspection.byId(entry.inspectionId())
+                    .map(dtm.ide.inspection.JavaInspection::label)
+                    .orElse(entry.inspectionId());
+            JCheckBox box = new JCheckBox(label + "  -  " + entry.describe(), true);
+            box.setToolTipText(entry.describe());
+            hiddenOccurrences.put(entry.key(), box);
+            controls.add(box);
+        }
+        return section(text("section.hiddenOccurrences", "Avisos ocultados"),
+                controls.toArray(new JComponent[0]));
+    }
+
+    private String inspectionLabel(dtm.ide.inspection.JavaInspection inspection) {
+        return text("inspection." + inspection.id(), inspection.label());
     }
 
     private JPanel section(String title, JComponent... controls) {
@@ -212,6 +302,13 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         springSupport.setSelected(settings.isSpringSupport());
         springCodeLens.setSelected(settings.isSpringCodeLens());
         springLive.setSelected(settings.isSpringLive());
+        springNavigation.setSelected(settings.isSpringNavigation());
+        springJpa.setSelected(settings.isSpringJpa());
+        springConfigNavigation.setSelected(settings.isSpringConfigNavigation());
+        springRuntimeBeans.setSelected(settings.isSpringRuntimeBeans());
+        springInfra.setSelected(settings.isSpringInfra());
+        inspections.forEach((inspection, box) ->
+                box.setSelected(!settings.isInspectionDisabled(inspection.id())));
         springBaseUrl.setText(settings.getSpringBaseUrl());
 
         updateSpringControls();
@@ -221,6 +318,11 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         boolean enabled = springSupport.isSelected();
         springCodeLens.setEnabled(enabled);
         springLive.setEnabled(enabled);
+        springNavigation.setEnabled(enabled);
+        springJpa.setEnabled(enabled);
+        springConfigNavigation.setEnabled(enabled);
+        springRuntimeBeans.setEnabled(enabled);
+        springInfra.setEnabled(enabled);
         springBaseUrl.setEnabled(enabled);
     }
 }

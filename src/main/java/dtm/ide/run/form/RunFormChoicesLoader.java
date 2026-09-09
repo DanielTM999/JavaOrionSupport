@@ -7,8 +7,10 @@ import dtm.ide.run.BuildTargetSuggestions;
 import dtm.ide.run.JarCandidates;
 import dtm.ide.run.MainClassScanner;
 import dtm.ide.sdk.JdkInstallation;
+import dtm.ide.spring.config.SpringConfigIndex;
 import lombok.extern.slf4j.Slf4j;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -112,7 +114,19 @@ public final class RunFormChoicesLoader {
                 MainClassScanner.scan(descriptor),
                 JarCandidates.find(descriptor, null),
                 BuildTargetSuggestions.targets(model, null, descriptor.isGradle()),
-                BuildTargetSuggestions.profiles(model, descriptor.isMaven()));
+                BuildTargetSuggestions.profiles(model, descriptor.isMaven()),
+                springProfiles(descriptor));
+    }
+
+    private static List<String> springProfiles(JavaProjectDescriptor descriptor) {
+        if (!descriptor.spring()) {
+            return List.of();
+        }
+        List<Path> resourceRoots = new ArrayList<>();
+        for (JavaModule module : descriptor.buildableModules()) {
+            resourceRoots.add(module.root().resolve("src").resolve("main").resolve("resources"));
+        }
+        return SpringConfigIndex.scan(resourceRoots).profiles();
     }
 
     private List<JdkInstallation> jdks(JavaProjectDescriptor descriptor) {

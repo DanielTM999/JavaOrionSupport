@@ -1,6 +1,8 @@
 package dtm.ide.ui;
 
 import dtm.ide.spring.SpringBean;
+import dtm.ide.spring.jpa.JpaEntity;
+import dtm.ide.spring.jpa.JpaRepositoryInfo;
 import dtm.ide.spring.SpringEndpoint;
 import dtm.ide.spring.SpringStereotype;
 import dtm.ide.spring.live.SpringActuatorClient;
@@ -132,6 +134,27 @@ final class SpringExplorerModel {
         }
         String controller = value.substring(0, separator).trim();
         return controller.isBlank() ? FRAMEWORK_GROUP : controller;
+    }
+
+    static List<JpaEntity> filterEntities(List<JpaEntity> entities, String query) {
+        String needle = normalize(query);
+        return entities.stream()
+                .filter(entity -> needle.isEmpty()
+                        || contains(entity.simpleName(), needle)
+                        || contains(entity.effectiveTable(), needle))
+                .sorted(java.util.Comparator.comparing(JpaEntity::simpleName))
+                .toList();
+    }
+
+    static List<JpaRepositoryInfo> filterRepositories(List<JpaRepositoryInfo> repositories,
+                                                      String query) {
+        String needle = normalize(query);
+        return repositories.stream()
+                .filter(repository -> needle.isEmpty()
+                        || contains(repository.simpleName(), needle)
+                        || contains(repository.entitySimpleName(), needle))
+                .sorted(java.util.Comparator.comparing(JpaRepositoryInfo::simpleName))
+                .toList();
     }
 
     private static boolean matchesBean(SpringBean bean, String query) {

@@ -4,6 +4,9 @@ import dtm.di.annotations.Singleton;
 import dtm.ide.api.annotations.PluginReference;
 import dtm.ide.api.context.IdeProjectContext;
 import dtm.ide.api.extension.IdeAdapter;
+import dtm.ide.api.search.GlobalSearchMatch;
+import dtm.ide.api.search.GlobalSearchQuery;
+import dtm.ide.api.search.GlobalSearchResult;
 import dtm.ide.api.extension.PlatformPopupBuilder;
 import dtm.ide.api.extension.menu.IdeMenuBarBuilder;
 import dtm.ide.api.extension.menu.IdeMenuBuilder;
@@ -36,6 +39,7 @@ import dtm.ide.api.project.editor.IdeInlayHintContext;
 import dtm.ide.api.project.editor.IdeRenameContext;
 import dtm.ide.api.project.editor.IdeSemanticTokensContext;
 import dtm.ide.api.project.editor.IdeSignatureHelpContext;
+import dtm.ide.api.project.editor.IdeCompletionTriggerKind;
 import dtm.ide.api.project.editor.IdeWordCaretContext;
 import dtm.ide.api.project.editor.IdeWordClickContext;
 import dtm.ide.api.project.editor.SemanticToken;
@@ -58,6 +62,8 @@ import dtm.ide.build.BuildToolModel;
 import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.deps.DependencyService;
 import dtm.ide.deps.MavenCentralClient;
+import dtm.ide.editor.AutoCompleteIdleTrigger;
+import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
 import dtm.ide.editor.JavaSnippetCompletionProvider;
 import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.editor.JavaFastCompletionProvider;
@@ -70,6 +76,8 @@ import dtm.ide.lsp.JdtLsProvisioner;
 import dtm.ide.lsp.JdtLsService;
 import dtm.ide.lsp.JavaClassFileNavigation;
 import dtm.ide.lsp.LombokAgentResolver;
+import dtm.ide.lsp.LombokSupport;
+import dtm.ide.lsp.LombokSupportStatus;
 import dtm.ide.lsp.UsagesPopup;
 import dtm.ide.debug.JavaAttachTarget;
 import dtm.ide.debug.JavaDebugSession;
@@ -80,6 +88,26 @@ import dtm.ide.spring.SpringBean;
 import dtm.ide.spring.SpringBeanIndex;
 import dtm.ide.spring.SpringDiagnostics;
 import dtm.ide.spring.SpringIndexSnapshot;
+import dtm.ide.spring.SpringAnnotationCompletionProvider;
+import dtm.ide.spring.SpringInjection;
+import dtm.ide.spring.SpringEndpoint;
+import dtm.ide.inspection.DiagnosticRanges;
+import dtm.ide.inspection.InspectionSuppressionStore;
+import dtm.ide.inspection.InspectionSuppressions;
+import dtm.ide.inspection.JavaInspection;
+import dtm.ide.spring.SpringNavigation;
+import dtm.ide.spring.live.SpringActuatorClient;
+import dtm.ide.spring.live.SpringRuntimeBeans;
+import dtm.ide.spring.SpringSearchContributor;
+import dtm.ide.spring.SpringPropertyUsage;
+import dtm.ide.spring.SpringValueDiagnostics;
+import dtm.ide.spring.config.SpringConfigDocument;
+import dtm.ide.spring.config.SpringConfigIndex;
+import dtm.ide.spring.config.SpringConfigProperty;
+import dtm.ide.spring.jpa.JpaRepositoryInfo;
+import dtm.ide.spring.infra.SpringInfraDiagnostics;
+import dtm.ide.spring.jpa.JpaDiagnostics;
+import dtm.ide.spring.jpa.JpqlDiagnostics;
 import dtm.ide.spring.config.SpringConfigMetadata;
 import dtm.ide.spring.config.SpringConfigSupport;
 import dtm.ide.spring.live.SpringActuatorClient;
@@ -95,6 +123,8 @@ import dtm.ide.run.form.RunFormChoicesLoader;
 import dtm.ide.run.form.RunFormContext;
 import dtm.ide.run.DebugPorts;
 import dtm.ide.run.MainClassScanner;
+import dtm.ide.api.project.IdeProjectFileWatcher;
+import dtm.ide.project.JavaFileChangeRouter;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.LanguageLevelEditor;
 import dtm.ide.project.ProjectLayout;
@@ -142,6 +172,7 @@ import dtm.stools.component.panels.editor.code.api.Command;
 import dtm.stools.component.panels.editor.code.api.CommandHandler;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
+import dtm.stools.component.panels.editor.code.api.Position;
 import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.api.TextEdit;
 import dtm.stools.component.panels.editor.code.CodeEditor;
@@ -187,12 +218,14 @@ import java.awt.event.MouseEvent;
 import java.awt.geom.Rectangle2D;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.io.File;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.HashMap;
@@ -223,7 +256,13 @@ import java.util.regex.Pattern;
 @PluginReference(id = "java-ide-adapter")
 public class JavaIdeAdapter extends IdeAdapter {
 
+    private static final String DISABLE_INSPECTION_COMMAND = "java.orion.disableInspection";
+
+    private static final String HIDE_OCCURRENCE_COMMAND = "java.orion.hideInspectionOccurrence";
+
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
+    private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 500;
+    private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final long LEXICAL_USAGE_BUDGET_MS = 1_500;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
     private static final long RENAME_WAIT_BUDGET_MS = 60_000;
@@ -268,6 +307,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicLong lifecycle = new AtomicLong();
     private final AtomicLong wordCaretTicket = new AtomicLong();
     private final AtomicLong navigationTicket = new AtomicLong();
+    private final AtomicLong navigationRequestTicket = new AtomicLong();
     private final AtomicLong hotReloadTicket = new AtomicLong();
     private final AtomicLong debugHoverTicket = new AtomicLong();
     private final AtomicLong debugLineTicket = new AtomicLong();
@@ -288,6 +328,19 @@ public class JavaIdeAdapter extends IdeAdapter {
                 thread.setDaemon(true);
                 return thread;
             });
+    private final ScheduledExecutorService autoCompleteIdleExecutor =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "java-autocomplete-idle");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private final AutoCompleteIdleTrigger autoCompleteIdle = new AutoCompleteIdleTrigger(
+            AUTO_COMPLETE_IDLE_DELAY_MS,
+            (task, delay) -> autoCompleteIdleExecutor.schedule(task, delay, TimeUnit.MILLISECONDS),
+            this::isIdleCompletionEligible,
+            this::isIdleCompletionReady,
+            this::currentIdleCaret,
+            this::fireIdleCompletion);
 
     private static final Color DELETE_ACCENT = new Color(220, 53, 69);
 
@@ -315,6 +368,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private volatile JdtLsService jdtLs;
     private volatile LombokAgentResolver lombokResolver;
+    private final LombokSupport lombokSupport = new LombokSupport(this::onLombokStatusChanged);
     private volatile BuildSystem buildSystem;
     private volatile DependencyService dependencyService;
     private volatile DependencyManagerPanel dependencyPanel;
@@ -347,6 +401,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile SpringExplorerPanel springPanel;
     private volatile String springPanelId;
     private volatile SpringConfigMetadata springMetadata = SpringConfigMetadata.builtIn();
+    private volatile SpringConfigIndex springConfigIndex = SpringConfigIndex.empty();
+    private volatile InspectionSuppressionStore suppressionStore;
+    private volatile JavaFileChangeRouter fileChangeRouter;
+    private volatile IdeProjectFileWatcher projectFileWatcher;
+    private volatile String fileWatcherListenerId;
     private volatile String springBaseUrl = JavaPluginSettings.DEFAULT_SPRING_BASE_URL;
     private volatile JavaPluginSettings settings;
     private volatile JComponent codeActionLamp;
@@ -405,8 +464,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         activeJavaEditor = null;
         selectedRunConfig = null;
         staticRunConfigurations = List.of();
+        unregisterFileWatcher();
         lexicalIndex.clear();
         springIndex.clear();
+        springConfigIndex = SpringConfigIndex.empty();
         springMetadata = SpringConfigMetadata.builtIn();
         lastBuildDiagnostics.clear();
         liveLspProblems.clear();
@@ -426,6 +487,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp != null) {
             stopLanguageServerAsync(lsp);
         }
+        unregisterFileWatcher();
         springIndex.shutdown();
         codeActionDelayExecutor.shutdownNow();
         background.shutdownNow();
@@ -507,6 +569,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             logSlowBind(started, callerThread);
             return;
         }
+        registerFileWatcher();
 
         if (settings().getLanguageServerMode().startsServer()) {
             String loading = text("status.startingLsp",
@@ -707,14 +770,84 @@ public class JavaIdeAdapter extends IdeAdapter {
             return false;
         }
         if (!settings().isLombokSupport()) {
+            lombokSupport.update(LombokSupportStatus.DISABLED, "");
             return lsp.setLombokAgentJar(null);
         }
         try {
-            Path agent = ensureLombokResolver().resolve(current).orElse(null);
-            return lsp.setLombokAgentJar(agent);
+            LombokAgentResolver.Agent agent = ensureLombokResolver()
+                    .resolveAgent(current, resolvedClasspath(lsp, current));
+            if (!agent.declared()) {
+                lombokSupport.update(LombokSupportStatus.NOT_USED, "");
+                return lsp.setLombokAgentJar(null);
+            }
+            if (!agent.isUsable()) {
+                lombokSupport.update(LombokSupportStatus.ERROR, agent.failure());
+                return lsp.setLombokAgentJar(null);
+            }
+            lombokSupport.update(LombokSupportStatus.STARTING,
+                    agent.version() == null ? LombokAgentResolver.TESTED_VERSION : agent.version());
+            return lsp.setLombokAgentJar(agent.jar());
         } catch (Exception e) {
+            lombokSupport.update(LombokSupportStatus.ERROR, rootMessage(e));
             log.warn("Falha ao resolver o agente do Lombok: {}", rootMessage(e));
             return false;
+        }
+    }
+
+    public LombokSupportStatus getLombokSupportStatus() {
+        return lombokSupport.status();
+    }
+
+    public void setLombokSupportListener(LombokSupport.Listener listener) {
+        lombokSupport.setListener(listener == null ? this::onLombokStatusChanged : listener);
+    }
+
+    private List<Path> resolvedClasspath(JdtLsService lsp, JavaProjectDescriptor current) {
+        if (lsp == null || current == null || !lsp.isInteractive()) {
+            return List.of();
+        }
+        return lsp.runtimeClasspath(current.root())
+                .map(classpath -> Arrays.stream(classpath.split(Pattern.quote(File.pathSeparator)))
+                        .filter(entry -> !entry.isBlank())
+                        .map(Path::of)
+                        .toList())
+                .orElse(List.of());
+    }
+
+    private void onLombokStatusChanged(LombokSupportStatus status, String detail) {
+        log.debug("Lombok: estado {} ({})", status, detail);
+        switch (status) {
+            case ACTIVE -> setStatusBarText(text("status.lombokActive", "Java: Lombok ativo")
+                    + (detail == null || detail.isBlank() ? "" : " - " + detail));
+            case ERROR -> notifyLombokFailure(detail);
+            default -> {
+            }
+        }
+    }
+
+    private void notifyLombokFailure(String detail) {
+        String message = text("notification.lombokMessage",
+                "Lombok foi detectado no projeto, mas o agente nao pode ser carregado. "
+                        + "Getters, setters e builders podem aparecer como erro.");
+        setStatusBarText(text("status.lombokError", "Java: Lombok detectado sem agente ativo"));
+        createNotification(NotificationContext.builder()
+                .title(text("notification.lombokTitle", "Lombok indisponivel"))
+                .message(detail == null || detail.isBlank() ? message : message + " (" + detail + ")")
+                .icon(JavaIcons.java(JavaIcons.SMALL))
+                .build());
+    }
+
+    private void refreshLombokStatusAfterServerState(JdtLsService.State state) {
+        LombokSupportStatus current = lombokSupport.status();
+        if (current != LombokSupportStatus.STARTING && current != LombokSupportStatus.ACTIVE) {
+            return;
+        }
+        if (state == JdtLsService.State.READY) {
+            lombokSupport.update(LombokSupportStatus.ACTIVE, lombokSupport.detail());
+            return;
+        }
+        if (state == JdtLsService.State.ERROR) {
+            lombokSupport.update(LombokSupportStatus.ERROR, lombokSupport.detail());
         }
     }
 
@@ -740,6 +873,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private void publishLanguageServerStatus(String message, int percent) {
         JdtLsService lsp = jdtLs;
         JdtLsService.State state = lsp == null ? JdtLsService.State.NOT_STARTED : lsp.getState();
+        refreshLombokStatusAfterServerState(state);
         if (state == JdtLsService.State.STARTING || state == JdtLsService.State.INDEXING) {
             int effectivePercent = percent >= 0 ? Math.max(1, Math.min(99, percent)) : -1;
             lspProgress.set(Math.max(0, effectivePercent));
@@ -860,6 +994,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (BuildFileCompletionProvider.handles(context.filePath())) {
             return settings().isBuildFileCompletion();
         }
+        if (SpringConfigSupport.isConfigFile(context.filePath())) {
+            return settings().isSpringSupport();
+        }
         if (!JavaProjectConventions.isJava(context.filePath())) {
             return false;
         }
@@ -868,9 +1005,38 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (line == null || col <= 0 || col > line.length()) {
             return false;
         }
-        char typed = line.charAt(col - 1);
-        return Character.isJavaIdentifierPart(typed)
-                || getCompletionTriggerCharacters().contains(typed);
+        char previous = line.charAt(col - 1);
+        if (previous == '"') {
+            return isSpringAnnotationLiteral(line, col);
+        }
+        return getCompletionTriggerCharacters().contains(previous);
+    }
+
+    private boolean isIdleCompletionEligible(Path filePath) {
+        return !debugActive.get() && JavaProjectConventions.isJava(filePath);
+    }
+
+    private boolean isIdleCompletionReady() {
+        return !debugActive.get() && !isAutoCompletePopupVisible();
+    }
+
+    private boolean isAutoCompletePopupVisible() {
+        return Boolean.TRUE.equals(
+                invokeEditorBoolean(resolveTextArea(activeJavaEditor), "isAutoCompleteVisible"));
+    }
+
+    private AutoCompleteIdleTrigger.Caret currentIdleCaret() {
+        IdeEditorContext editor = activeJavaEditor;
+        if (editor == null) {
+            return null;
+        }
+        return new AutoCompleteIdleTrigger.Caret(
+                JavaProjectConventions.normalize(editor.filePath()), editor.getCaretOffset());
+    }
+
+    private void fireIdleCompletion() {
+        log.debug("Autocomplete: disparo automatico apos {} ms de pausa", AUTO_COMPLETE_IDLE_DELAY_MS);
+        requestCodeEditorAutocomplete();
     }
 
     @Override
@@ -884,8 +1050,17 @@ public class JavaIdeAdapter extends IdeAdapter {
             return null;
         }
         if (SpringConfigSupport.isConfigFile(context.filePath())) {
+            List<AutoCompleteItem> values = SpringConfigSupport.completeValues(springConfigIndex,
+                    context.filePath(), context.text(), context.caretLine(), context.caretCol());
+            if (!values.isEmpty()) {
+                return values;
+            }
             return SpringConfigSupport.complete(springMetadata, context.filePath(),
                     context.text(), context.caretLine(), context.caretCol());
+        }
+        List<AutoCompleteItem> springAnnotation = springAnnotationCompletion(context);
+        if (springAnnotation != null) {
+            return springAnnotation;
         }
         if (BuildFileCompletionProvider.handles(context.filePath())) {
             return settings().isBuildFileCompletion()
@@ -897,25 +1072,45 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         boolean memberAccess = JavaFastCompletionProvider.isMemberAccess(context);
         JavaProjectDescriptor current = descriptor;
-        List<AutoCompleteItem> lexical = fastCompletion.suggestions(context);
         List<AutoCompleteItem> snippetsLocal = memberAccess ? List.of() : snippets.suggestions(
                 context.prefix(), current != null && current.spring());
-        List<AutoCompleteItem> local = mergeCompletionSuggestions(lexical, snippetsLocal);
-        List<AutoCompleteItem> contextual = List.of();
 
         JdtLsService lsp = jdtLs;
-        if (lsp != null && lsp.isInteractive()) {
-            if (lsp.isReady()) {
-                contextual = lsp.complete(context.filePath(), context.text(),
-                        context.caretLine(), context.caretCol());
-            } else {
-                contextual = filterCompletionSuggestions(
+        if (lsp != null && lsp.isInteractive() && lsp.isReady()) {
+            Character triggerCharacter = completionTriggerCharacter(context.currentLine(),
+                    context.caretCol(), getCompletionTriggerCharacters());
+            JdtLsService.CompletionTrigger trigger =
+                    context.triggerKind() == IdeCompletionTriggerKind.TYPING && triggerCharacter != null
+                            ? JdtLsService.CompletionTrigger.TRIGGER_CHARACTER
+                            : JdtLsService.CompletionTrigger.INVOKED;
+            List<AutoCompleteItem> semantic = lsp.complete(context.filePath(), context.text(),
+                    context.caretLine(), context.caretCol(), trigger, triggerCharacter,
+                    lsp.documentVersion(context.filePath()));
+            if (semantic.isEmpty()) {
+                semantic = filterCompletionSuggestions(
                         lsp.cachedCompletions(context.filePath()), context.prefix());
-                lsp.warmCompletion(context.filePath(), context.text(),
-                        context.caretLine(), context.caretCol());
             }
+            return mergeCompletionSuggestions(semantic, snippetsLocal);
+        }
+
+        List<AutoCompleteItem> lexical = fastCompletion.suggestions(context);
+        List<AutoCompleteItem> local = mergeCompletionSuggestions(lexical, snippetsLocal);
+        List<AutoCompleteItem> contextual = List.of();
+        if (lsp != null && lsp.isInteractive()) {
+            contextual = filterCompletionSuggestions(
+                    lsp.cachedCompletions(context.filePath()), context.prefix());
+            lsp.warmCompletion(context.filePath(), context.text(),
+                    context.caretLine(), context.caretCol());
         }
         return mergeCompletionSuggestions(contextual, local);
+    }
+
+    static Character completionTriggerCharacter(String line, int col, Set<Character> triggers) {
+        if (line == null || col <= 0 || col > line.length() || triggers == null) {
+            return null;
+        }
+        char previous = line.charAt(col - 1);
+        return triggers.contains(previous) ? previous : null;
     }
 
     static List<AutoCompleteItem> filterCompletionSuggestions(List<AutoCompleteItem> source,
@@ -933,23 +1128,47 @@ public class JavaIdeAdapter extends IdeAdapter {
     static List<AutoCompleteItem> mergeCompletionSuggestions(List<AutoCompleteItem> contextual,
                                                               List<AutoCompleteItem> snippets) {
         List<AutoCompleteItem> merged = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        appendUnique(contextual, merged, seen);
-        appendUnique(snippets, merged, seen);
+        Set<String> signatures = new HashSet<>();
+        Set<String> labels = new HashSet<>();
+        appendBySignature(contextual, merged, signatures, labels);
+        appendByLabel(snippets, merged, labels);
         return List.copyOf(merged);
     }
 
-    private static void appendUnique(List<AutoCompleteItem> source,
-                                     List<AutoCompleteItem> target, Set<String> seen) {
+    private static void appendBySignature(List<AutoCompleteItem> source,
+                                          List<AutoCompleteItem> target,
+                                          Set<String> signatures, Set<String> labels) {
+        if (source == null) {
+            return;
+        }
+        for (AutoCompleteItem item : source) {
+            if (item == null || item.label() == null
+                    || !signatures.add(completionSignature(item))) {
+                continue;
+            }
+            labels.add(item.label().toLowerCase(Locale.ROOT));
+            target.add(item);
+        }
+    }
+
+    private static void appendByLabel(List<AutoCompleteItem> source,
+                                      List<AutoCompleteItem> target, Set<String> labels) {
         if (source == null) {
             return;
         }
         for (AutoCompleteItem item : source) {
             if (item != null && item.label() != null
-                    && seen.add(item.label().toLowerCase(Locale.ROOT))) {
+                    && labels.add(item.label().toLowerCase(Locale.ROOT))) {
                 target.add(item);
             }
         }
+    }
+
+    static String completionSignature(AutoCompleteItem item) {
+        return item.label().toLowerCase(Locale.ROOT)
+                + "|" + (item.insertText() == null ? "" : item.insertText())
+                + "|" + (item.detail() == null ? "" : item.detail())
+                + "|" + item.kind();
     }
 
     private static boolean blockedByFollowingText(String line, int caretCol) {
@@ -982,7 +1201,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         List<AutoCompleteItem> contextual = List.of();
         if (lsp != null) {
             contextual = lsp.complete(context.filePath(), context.text(),
-                    context.caretLine(), context.caretCol());
+                    context.caretLine(), context.caretCol(),
+                    JdtLsService.CompletionTrigger.INVOKED, null,
+                    lsp.documentVersion(context.filePath()));
         }
         JavaProjectDescriptor current = descriptor;
         List<AutoCompleteItem> local = memberAccess ? List.of() : snippets.suggestions(prefix,
@@ -1160,7 +1381,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         Path filePath = context.getFilePath();
         if (SpringConfigSupport.isConfigFile(filePath)) {
-            return SpringConfigSupport.validate(springMetadata, filePath, context.getText());
+            return pluginDiagnostics(filePath, context.getText());
         }
         if (!JavaProjectConventions.isJava(filePath)) {
             return null;
@@ -1174,12 +1395,39 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         merged.addAll(lastBuildDiagnostics.getOrDefault(filePath, List.of()));
 
-        JavaProjectDescriptor current = descriptor;
-        if (current != null && current.spring()) {
-            merged.addAll(SpringDiagnostics.analyze(springIndex.snapshot(), filePath,
-                    context.getText()));
+        merged.addAll(pluginDiagnostics(filePath, context.getText()));
+        List<Diagnostic> visible = InspectionSuppressions.filter(merged, context.getText(),
+                settings().getDisabledInspections(), occurrenceFilterFor(filePath));
+        return visible.isEmpty() && (lsp == null || !lsp.isInteractive()) ? null : visible;
+    }
+
+    private List<Diagnostic> pluginDiagnostics(Path filePath, String text) {
+        if (SpringConfigSupport.isConfigFile(filePath)) {
+            return DiagnosticRanges.clamp(InspectionSuppressions.filter(
+                    SpringConfigSupport.validate(springMetadata, filePath, text),
+                    text, settings().getDisabledInspections(), occurrenceFilterFor(filePath)), text);
         }
-        return merged.isEmpty() && (lsp == null || !lsp.isInteractive()) ? null : merged;
+        JavaProjectDescriptor current = descriptor;
+        if (!JavaProjectConventions.isJava(filePath) || current == null || !current.spring()
+                || !settings().isSpringSupport()) {
+            return List.of();
+        }
+        SpringIndexSnapshot snapshot = springIndex.snapshot();
+        List<Diagnostic> plugin = new ArrayList<>(
+                SpringDiagnostics.analyze(snapshot, filePath, text));
+        if (settings().isSpringJpa()) {
+            plugin.addAll(JpaDiagnostics.analyze(snapshot, filePath));
+            plugin.addAll(JpqlDiagnostics.analyze(snapshot, filePath));
+        }
+        if (settings().isSpringConfigNavigation()) {
+            plugin.addAll(SpringValueDiagnostics.analyze(snapshot, springConfigIndex,
+                    springMetadata, filePath));
+        }
+        if (settings().isSpringInfra()) {
+            plugin.addAll(SpringInfraDiagnostics.analyze(snapshot.infra(), filePath));
+        }
+        return DiagnosticRanges.clamp(InspectionSuppressions.filter(plugin, text,
+                settings().getDisabledInspections(), occurrenceFilterFor(filePath)), text);
     }
 
     @Override
@@ -1320,6 +1568,138 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
 
         return List.copyOf(unique.values());
+    }
+
+    private void registerFileWatcher() {
+        if (fileWatcherListenerId != null) {
+            return;
+        }
+        IdeProjectFileWatcher watcher;
+        try {
+            watcher = getProjectFileWatcher();
+        } catch (Exception e) {
+            log.debug("Observador de arquivos indisponivel: {}", e.getMessage());
+            return;
+        }
+        if (watcher == null) {
+            log.debug("Observador de arquivos indisponivel para este projeto");
+            return;
+        }
+        JavaFileChangeRouter router = new JavaFileChangeRouter(this::onWatchedFileChanged,
+                path -> javaEditors.containsKey(JavaProjectConventions.normalize(path)));
+        projectFileWatcher = watcher;
+        fileChangeRouter = router;
+        fileWatcherListenerId = watcher.addFileWatcherListener(router::accept);
+        log.info("Observador de arquivos do Java registrado: {}", fileWatcherListenerId);
+    }
+
+    private void unregisterFileWatcher() {
+        String listenerId = fileWatcherListenerId;
+        IdeProjectFileWatcher watcher = projectFileWatcher;
+        fileWatcherListenerId = null;
+        projectFileWatcher = null;
+        if (listenerId != null && watcher != null) {
+            try {
+                watcher.removeFileWatcherListener(listenerId);
+            } catch (Exception e) {
+                log.debug("Falha ao remover o observador de arquivos: {}", e.getMessage());
+            }
+        }
+        JavaFileChangeRouter router = fileChangeRouter;
+        fileChangeRouter = null;
+        if (router != null) {
+            router.shutdown();
+        }
+    }
+
+    private void onWatchedFileChanged(Path file, JavaFileChangeRouter.FileRole role,
+                                      JavaFileChangeRouter.Change change) {
+        switch (role) {
+            case JAVA -> onWatchedJavaFile(file, change);
+            case SPRING_CONFIG -> onWatchedSpringConfigFile(file, change);
+            case BUILD -> onWatchedBuildFile(file, change);
+        }
+    }
+
+    private void onWatchedJavaFile(Path file, JavaFileChangeRouter.Change change) {
+        if (change == JavaFileChangeRouter.Change.DELETED) {
+            forgetJavaFile(file);
+            return;
+        }
+        String content = JavaProjectConventions.readOrEmpty(file);
+        lexicalIndex.refreshFile(file, content);
+        refreshSpringIndexFor(file);
+
+        JdtLsService lsp = jdtLs;
+        if (lsp != null) {
+            if (change == JavaFileChangeRouter.Change.CREATED) {
+                lsp.pathCreated(file);
+            } else {
+                lsp.pathChanged(file);
+            }
+        }
+        requestRefreshCodeLenses(file);
+    }
+
+    private void onWatchedSpringConfigFile(Path file, JavaFileChangeRouter.Change change) {
+        JavaProjectDescriptor current = descriptor;
+        Path root = projectRoot;
+        if (current == null || root == null || !current.spring()) {
+            return;
+        }
+        loadSpringConfigIndex(lifecycle.get(), root);
+    }
+
+    private void onWatchedBuildFile(Path file, JavaFileChangeRouter.Change change) {
+        if (change == JavaFileChangeRouter.Change.DELETED) {
+            return;
+        }
+        JdtLsService lsp = jdtLs;
+        if (lsp != null) {
+            lsp.pathChanged(file);
+            lsp.projectConfigurationUpdate();
+        }
+    }
+
+    private void refreshSpringIndexFor(Path file) {
+        JavaProjectDescriptor current = descriptor;
+        if (current == null || !current.spring() || !settings().isSpringSupport()) {
+            return;
+        }
+        springIndex.refreshFile(file).thenAccept(snapshot -> {
+            requestRefreshCodeLenses(file);
+            SpringExplorerPanel panel = springPanel;
+            if (panel != null) {
+                panel.reload();
+            }
+        });
+    }
+
+    private void forgetJavaFile(Path file) {
+        lexicalIndex.refreshFile(file, "");
+        JavaProjectDescriptor current = descriptor;
+        if (current != null && current.spring() && settings().isSpringSupport()) {
+            springIndex.refreshFile(file).thenAccept(snapshot -> {
+                SpringExplorerPanel panel = springPanel;
+                if (panel != null) {
+                    panel.reload();
+                }
+            });
+        }
+    }
+
+    @Override
+    public void onPathRenamed(Path oldPath, Path newPath) {
+        if (oldPath != null) {
+            onPathDeleted(oldPath);
+        }
+        if (newPath == null) {
+            return;
+        }
+        JavaFileChangeRouter router = fileChangeRouter;
+        if (router != null) {
+            router.acceptCreated(newPath);
+        }
     }
 
     @Override
@@ -1526,21 +1906,145 @@ public class JavaIdeAdapter extends IdeAdapter {
         SpringIndexSnapshot snapshot = springIndex.snapshot();
 
         for (SpringBean bean : snapshot.beansIn(context.filePath())) {
-            int usages = snapshot.injectionsOf(bean).size();
-            String label = usages == 1
+            List<SpringInjection> usages = snapshot.injectionsOf(bean);
+            String label = usages.size() == 1
                     ? "1 " + text("lens.injection", "injecao")
-                    : usages + " " + text("lens.injections", "injecoes");
+                    : usages.size() + " " + text("lens.injections", "injecoes");
+            List<Location> targets = springLocations(new SpringNavigation.Target(
+                    SpringNavigation.Kind.BEAN, bean.simpleName(), usages.stream()
+                    .map(injection -> new SpringNavigation.Anchor(injection.file(),
+                            injection.line(), injection.memberName()))
+                    .<SpringNavigation.Anchor>toList()));
+            int beanLine = Math.max(0, bean.line() - 1);
 
-            CodeLensItem item = CodeLensItem.builder()
+            lenses.add(CodeLens.inline(beanLine, CodeLensItem.builder()
                     .text(label)
                     .tooltip(text("lens.tooltip", "Ver quem injeta") + " " + bean.simpleName())
                     .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
-                    .onClick(event -> openSpringExplorer())
-                    .build();
-
-            lenses.add(CodeLens.inline(Math.max(0, bean.line() - 1), item));
+                    .onClick(event -> openSpringTargets(targets, context, event))
+                    .build()));
         }
+
+        addInjectionLenses(lenses, snapshot, context);
+        addJpaLenses(lenses, snapshot, context);
+        addEndpointLenses(lenses, snapshot, context);
         return lenses;
+    }
+
+    private void addInjectionLenses(List<CodeLens> lenses, SpringIndexSnapshot snapshot,
+                                    IdeCodeLensContext context) {
+        if (!settings().isSpringNavigation()) {
+            return;
+        }
+        for (SpringInjection injection : snapshot.injectionsIn(context.filePath())) {
+            List<SpringBean> candidates = snapshot.candidatesFor(injection);
+            if (candidates.isEmpty()) {
+                continue;
+            }
+            String label = candidates.size() == 1
+                    ? "-> " + candidates.getFirst().simpleName()
+                    : candidates.size() + " " + text("lens.candidates", "candidatos");
+            List<Location> targets = springLocations(new SpringNavigation.Target(
+                    SpringNavigation.Kind.INJECTION, injection.targetSimpleName(),
+                    candidates.stream()
+                            .map(bean -> new SpringNavigation.Anchor(bean.file(), bean.line(),
+                                    bean.simpleName()))
+                            .toList()));
+            lenses.add(CodeLens.inline(Math.max(0, injection.line() - 1), CodeLensItem.builder()
+                    .text(label)
+                    .tooltip(text("lens.beanTarget", "Ir para o bean injetado"))
+                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
+                    .onClick(event -> openSpringTargets(targets, context, event))
+                    .build()));
+        }
+    }
+
+    private void addEndpointLenses(List<CodeLens> lenses, SpringIndexSnapshot snapshot,
+                                   IdeCodeLensContext context) {
+        String baseUrl = springBaseUrl;
+        for (SpringEndpoint endpoint : snapshot.endpoints()) {
+            if (!context.filePath().equals(endpoint.file())) {
+                continue;
+            }
+            String url = endpoint.urlOn(baseUrl);
+            int endpointLine = Math.max(0, endpoint.line() - 1);
+            lenses.add(CodeLens.inline(endpointLine, CodeLensItem.builder()
+                    .text(text("lens.openInBrowser", "abrir"))
+                    .tooltip(url)
+                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
+                    .onClick(event -> openWebBrowser(url))
+                    .build()));
+            lenses.add(CodeLens.inline(endpointLine, CodeLensItem.builder()
+                    .text(text("lens.copyUrl", "copiar URL"))
+                    .tooltip(url)
+                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
+                    .onClick(event -> copyToClipboard(url,
+                            text("status.urlCopied", "Java: URL copiada")))
+                    .build()));
+            lenses.add(CodeLens.inline(endpointLine, CodeLensItem.builder()
+                    .text(text("lens.copyCurl", "copiar cURL"))
+                    .tooltip(url)
+                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
+                    .onClick(event -> copyToClipboard(curlOf(endpoint, url),
+                            text("status.curlCopied", "Java: comando cURL copiado")))
+                    .build()));
+        }
+    }
+
+    private static String curlOf(SpringEndpoint endpoint, String url) {
+        StringBuilder command = new StringBuilder("curl -X ")
+                .append(SpringEndpoint.ANY_METHOD.equals(endpoint.method())
+                        ? "GET" : endpoint.method())
+                .append(" \"").append(url).append('"');
+        if (!endpoint.produces().isEmpty()) {
+            command.append(" -H \"Accept: ").append(endpoint.produces().getFirst()).append('"');
+        }
+        return command.toString();
+    }
+
+    private void copyToClipboard(String value, String status) {
+        try {
+            java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
+                    .setContents(new java.awt.datatransfer.StringSelection(value), null);
+            setStatusBarText(status);
+        } catch (Exception e) {
+            log.debug("Falha ao copiar para a area de transferencia: {}", e.getMessage());
+        }
+    }
+
+    private void addJpaLenses(List<CodeLens> lenses, SpringIndexSnapshot snapshot,
+                              IdeCodeLensContext context) {
+        if (!settings().isSpringJpa()) {
+            return;
+        }
+        for (JpaRepositoryInfo repository : snapshot.repositoriesIn(context.filePath())) {
+            snapshot.entityNamed(repository.entityType()).ifPresent(entity -> {
+                List<Location> targets = springLocations(new SpringNavigation.Target(
+                        SpringNavigation.Kind.ENTITY, entity.simpleName(),
+                        List.of(new SpringNavigation.Anchor(entity.file(), entity.line(),
+                                entity.simpleName()))));
+                lenses.add(CodeLens.inline(Math.max(0, repository.line() - 1),
+                        CodeLensItem.builder()
+                                .text(entity.simpleName() + " (" + entity.effectiveTable() + ")")
+                                .tooltip(text("lens.entityTarget", "Ir para a entidade"))
+                                .cursor(java.awt.Cursor.getPredefinedCursor(
+                                        java.awt.Cursor.HAND_CURSOR))
+                                .onClick(event -> openSpringTargets(targets, context, event))
+                                .build()));
+            });
+        }
+    }
+
+    private void openSpringTargets(List<Location> targets, IdeCodeLensContext context,
+                                   CodeLensClickEvent event) {
+        if (targets.isEmpty()) {
+            openSpringExplorer();
+            return;
+        }
+        MouseEvent mouse = event == null ? null : event.mouseEvent();
+        Component invoker = mouse == null ? null : mouse.getComponent();
+        Point screen = mouse == null ? null : mouse.getLocationOnScreen();
+        showUsagesPopup(targets, context.filePath(), context.text(), invoker, screen);
     }
 
     private void addRunLens(List<CodeLens> lenses, IdeCodeLensContext context) {
@@ -1933,15 +2437,82 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     @Override
+    public GlobalSearchResult search(GlobalSearchQuery query, GlobalSearchResult defaultResult) {
+        JavaProjectDescriptor current = descriptor;
+        if (query == null || current == null || !current.spring()
+                || !settings().isSpringSupport()) {
+            return defaultResult;
+        }
+        List<GlobalSearchMatch> matches =
+                SpringSearchContributor.search(springIndex.snapshot(), query.term());
+        if (matches.isEmpty()) {
+            return defaultResult;
+        }
+        GlobalSearchResult spring = GlobalSearchResult.of(matches);
+        return defaultResult == null ? spring : spring.merge(defaultResult);
+    }
+
+    @Override
     public List<Location> findDefinitions(IdeDefinitionContext context) {
-        return context == null ? null : resolveDefinitions(context.filePath(), context.text(),
+        if (context == null) {
+            return null;
+        }
+        List<Location> configTargets = configKeyUsages(context);
+        if (configTargets != null) {
+            return configTargets;
+        }
+        return resolveDefinitions(context.filePath(), context.text(),
                 context.line(), context.col());
     }
 
     @Override
     public List<Location> findReferences(IdeDefinitionContext context) {
-        return context == null ? null : resolveReferences(context.filePath(), context.text(),
+        if (context == null) {
+            return null;
+        }
+        List<Location> configTargets = configKeyUsages(context);
+        if (configTargets != null) {
+            return configTargets;
+        }
+        return resolveReferences(context.filePath(), context.text(),
                 context.line(), context.col());
+    }
+
+    private List<Location> configKeyUsages(IdeDefinitionContext context) {
+        Path filePath = context.filePath();
+        if (!SpringConfigSupport.isConfigFile(filePath) || !isSpringConfigNavigationEnabled()) {
+            return null;
+        }
+        SpringConfigDocument.Format format =
+                SpringConfigDocument.Format.of(filePath.getFileName().toString());
+        String key = SpringConfigDocument.keyAt(context.text(), context.line(), format);
+        if (key == null || key.isBlank()) {
+            return List.of();
+        }
+        List<SpringNavigation.Anchor> anchors = new ArrayList<>();
+        for (SpringPropertyUsage usage : springIndex.snapshot().usagesOfProperty(key)) {
+            anchors.add(new SpringNavigation.Anchor(usage.file(), usage.line(), usage.key()));
+        }
+        return springLocations(new SpringNavigation.Target(
+                SpringNavigation.Kind.CONFIG_KEY, key, anchors));
+    }
+
+    private boolean isSpringConfigNavigationEnabled() {
+        JavaProjectDescriptor current = descriptor;
+        return current != null && current.spring() && settings().isSpringSupport()
+                && settings().isSpringConfigNavigation();
+    }
+
+    private List<Location> configKeyDefinitions(String key) {
+        if (key == null || key.isBlank() || !isSpringConfigNavigationEnabled()) {
+            return List.of();
+        }
+        List<SpringNavigation.Anchor> anchors = new ArrayList<>();
+        for (SpringConfigIndex.Entry entry : springConfigIndex.definitionsOf(key)) {
+            anchors.add(new SpringNavigation.Anchor(entry.file(), entry.line(), entry.key()));
+        }
+        return springLocations(new SpringNavigation.Target(
+                SpringNavigation.Kind.CONFIG_KEY, key, anchors));
     }
 
     @Override
@@ -2052,9 +2623,125 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<CodeAction> getCodeActions(IdeCodeActionContext context) {
-        JdtLsService lsp = interactiveServerFor(context == null ? null : context.filePath());
-        return lsp == null ? null : lsp.codeActions(context.filePath(), context.text(),
-                context.range(), context.diagnostics());
+        if (context == null) {
+            return null;
+        }
+        List<CodeAction> actions = new ArrayList<>(suppressionActions(context));
+        JdtLsService lsp = interactiveServerFor(context.filePath());
+        List<CodeAction> semantic = lsp == null ? null : lsp.codeActions(context.filePath(),
+                context.text(), context.range(), context.diagnostics());
+        if (semantic != null) {
+            actions.addAll(semantic);
+        }
+        return actions.isEmpty() ? semantic : actions;
+    }
+
+    private List<CodeAction> suppressionActions(IdeCodeActionContext context) {
+        Path filePath = context.filePath();
+        if (filePath == null || !supportsCodeActionLamp(filePath)) {
+            return List.of();
+        }
+        String text = context.text();
+        List<Diagnostic> candidates = new ArrayList<>(pluginDiagnostics(filePath, text));
+        if (context.diagnostics() != null) {
+            for (Diagnostic diagnostic : context.diagnostics()) {
+                if (InspectionSuppressions.suppressible(diagnostic)) {
+                    candidates.add(diagnostic);
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        int fromLine = -1;
+        int toLine = -1;
+        if (context.range() != null && context.range().start() != null) {
+            fromLine = context.range().start().line();
+            toLine = context.range().end() == null ? fromLine : context.range().end().line();
+        }
+        String[] lines = text == null ? new String[0] : text.split("\n", -1);
+
+        List<CodeAction> actions = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Diagnostic diagnostic : candidates) {
+            if (!InspectionSuppressions.suppressible(diagnostic)) {
+                continue;
+            }
+            if (fromLine >= 0 && (diagnostic.startLine() < Math.min(fromLine, toLine)
+                    || diagnostic.startLine() > Math.max(fromLine, toLine))) {
+                continue;
+            }
+            JavaInspection inspection = InspectionSuppressions.inspectionOf(diagnostic).orElse(null);
+            if (inspection == null || !seen.add(inspection.id())) {
+                continue;
+            }
+            String anchor = InspectionSuppressions.anchorAt(lines, diagnostic.startLine());
+            actions.add(CodeAction.command(
+                    text("action.hideHere", "Ocultar este aviso aqui") + ": " + inspection.label(),
+                    new Command(HIDE_OCCURRENCE_COMMAND,
+                            text("action.hideHere", "Ocultar este aviso aqui"),
+                            List.of(inspection.id(),
+                                    filePath.toAbsolutePath().toString(), anchor))));
+            actions.add(CodeAction.command(
+                    text("action.disableInspection", "Ocultar todos os avisos deste tipo")
+                            + ": " + inspection.label(),
+                    new Command(DISABLE_INSPECTION_COMMAND,
+                            text("action.disableInspection", "Ocultar todos os avisos deste tipo"),
+                            List.of(inspection.id()))));
+            actions.add(suppressHereAction(inspection, lines, diagnostic.startLine()));
+        }
+        return List.copyOf(actions);
+    }
+
+    private CodeAction suppressHereAction(JavaInspection inspection, String[] lines, int line) {
+        int anchor = InspectionSuppressions.anchorLineFor(lines, line);
+        String anchorText = anchor >= 0 && anchor < lines.length ? lines[anchor] : "";
+        String insertion = InspectionSuppressions.suppressionFor(anchorText, inspection.id());
+        return CodeAction.quickFix(
+                text("action.suppressHere", "Anotar com @SuppressWarnings"),
+                List.of(TextEdit.insert(new Position(anchor, 0), insertion)));
+    }
+
+    InspectionSuppressionStore suppressions() {
+        InspectionSuppressionStore existing = suppressionStore;
+        if (existing != null) {
+            return existing;
+        }
+        Path directory = null;
+        try {
+            directory = getResource().getResourcePath();
+        } catch (Exception e) {
+            log.debug("Diretorio de recursos indisponivel para as supressoes: {}", e.getMessage());
+        }
+        InspectionSuppressionStore created = new InspectionSuppressionStore(directory);
+        suppressionStore = created;
+        return created;
+    }
+
+    private InspectionSuppressions.OccurrenceFilter occurrenceFilterFor(Path filePath) {
+        InspectionSuppressionStore store = suppressions();
+        Path root = projectRoot;
+        return (inspectionId, anchor) ->
+                store.isSuppressed(root, filePath, inspectionId, anchor);
+    }
+
+    private void hideInspectionOccurrence(String inspectionId, String file, String anchor) {
+        if (inspectionId == null || file == null || anchor == null) {
+            return;
+        }
+        Path target = Path.of(file);
+        suppressions().suppress(projectRoot, target, inspectionId, anchor);
+        setStatusBarText(text("status.occurrenceHidden", "Java: aviso ocultado nesta ocorrencia"));
+        requestRefreshDiagnostics(target);
+    }
+
+    private void disableInspection(String inspectionId) {
+        JavaPluginSettings current = settings();
+        current.setInspectionDisabled(inspectionId, true);
+        current.save();
+        setStatusBarText(text("status.inspectionDisabled", "Java: inspecao desativada")
+                + " - " + inspectionId);
+        javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
     }
 
     @Override
@@ -2122,11 +2809,12 @@ public class JavaIdeAdapter extends IdeAdapter {
     public void onWordClick(IdeWordClickContext context) {
         if (!isCtrlDefinitionClick(context)) return;
         if (!isNavigationAvailable(context.filePath())) return;
+        long ticket = navigationRequestTicket.incrementAndGet();
         background.submit(() -> {
             JavaLocalScope.Scope scope = JavaLocalScope.at(
                     context.text(), context.line(), context.col());
             if (scope != null) {
-                navigateLocalSymbol(context, scope);
+                navigateLocalSymbol(ticket, context, scope);
                 return;
             }
             List<Location> locations = resolveDefinitions(
@@ -2134,30 +2822,46 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (isOwnDeclaration(locations, context)) {
                 List<Location> usages = resolveReferences(
                         context.filePath(), context.text(), context.line(), context.col());
-                SwingUtilities.invokeLater(() -> showNavigationResult(
-                        context.editorContext(), "usages", usages));
+                publishNavigationResult(ticket, context.editorContext(), context.text(),
+                        "usages", usages);
                 return;
             }
-            SwingUtilities.invokeLater(() -> showNavigationResult(
-                    context.editorContext(), "definition", locations));
+            publishNavigationResult(ticket, context.editorContext(), context.text(),
+                    "definition", locations);
         });
     }
 
-    private void navigateLocalSymbol(IdeWordClickContext context, JavaLocalScope.Scope scope) {
+    private void navigateLocalSymbol(long ticket, IdeWordClickContext context,
+                                     JavaLocalScope.Scope scope) {
         if (scope.onDeclaration()) {
             List<Location> usages = resolveReferences(
                     context.filePath(), context.text(), context.line(), context.col());
-            SwingUtilities.invokeLater(() -> showNavigationResult(
-                    context.editorContext(), "usages", usages));
+            publishNavigationResult(ticket, context.editorContext(), context.text(),
+                    "usages", usages);
             return;
         }
-        List<Location> definitions = resolveDefinitions(
-                context.filePath(), context.text(), context.line(), context.col());
-        List<Location> targets = definitions == null || definitions.isEmpty()
-                ? localDeclaration(context.filePath(), scope)
-                : definitions;
-        SwingUtilities.invokeLater(() -> showNavigationResult(
-                context.editorContext(), "definition", targets));
+        publishNavigationResult(ticket, context.editorContext(), context.text(),
+                "definition", localDeclaration(context.filePath(), scope));
+    }
+
+    private void publishNavigationResult(long ticket, IdeEditorContext editorContext,
+                                         String requestedText, String kind,
+                                         List<Location> locations) {
+        if (ticket != navigationRequestTicket.get()) {
+            log.debug("Navegacao {} descartada: requisicao superada", kind);
+            return;
+        }
+        SwingUtilities.invokeLater(() -> {
+            if (ticket != navigationRequestTicket.get()) {
+                return;
+            }
+            if (editorContext != null && requestedText != null
+                    && !requestedText.equals(editorContext.getText())) {
+                log.debug("Navegacao {} descartada: conteudo do editor mudou", kind);
+                return;
+            }
+            showNavigationResult(editorContext, kind, locations);
+        });
     }
 
     private static List<Location> localDeclaration(Path filePath, JavaLocalScope.Scope scope) {
@@ -2243,13 +2947,14 @@ public class JavaIdeAdapter extends IdeAdapter {
         String source = context.getText();
         int line = context.getCaretLine();
         int col = context.getCaretCol();
+        long ticket = navigationRequestTicket.incrementAndGet();
         background.submit(() -> {
             List<Location> locations = switch (kind) {
                 case "implementation" -> resolveImplementations(file, source, line, col);
                 case "usages" -> resolveReferences(file, source, line, col);
                 default -> resolveDefinitions(file, source, line, col);
             };
-            SwingUtilities.invokeLater(() -> showNavigationResult(context, kind, locations));
+            publishNavigationResult(ticket, context, source, kind, locations);
         });
     }
 
@@ -2262,23 +2967,23 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!JavaProjectConventions.isJava(filePath)) {
             return null;
         }
+        long started = System.nanoTime();
         JdtLsService lsp = interactiveServerFor(filePath);
         List<Location> precise = lsp == null ? List.of()
-                : lsp.isReady()
-                        ? lsp.implementations(filePath, text, line, col)
-                        : lsp.implementationsInteractive(filePath, text, line, col);
+                : lsp.implementationsInteractive(filePath, text, line, col);
         if (precise != null && !precise.isEmpty()) {
-            return precise;
-        }
-        if (lsp != null && lsp.isReady()) {
+            logNavigation("implementation", started, "semantico");
             return precise;
         }
         String word = identifierAt(text, line, col);
         List<Location> approximate = word == null ? List.of() : lexicalIndex.definitions(word);
         if (!approximate.isEmpty()) {
             notifyApproximateResult();
+            logNavigation("implementation", started, "aproximado");
+            return approximate;
         }
-        return approximate.isEmpty() ? precise : approximate;
+        logNavigation("implementation", started, "sem destino");
+        return precise;
     }
 
     private void showNavigationResult(IdeEditorContext context, String kind,
@@ -2312,11 +3017,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         long ticket = wordCaretTicket.incrementAndGet();
         SwingUtilities.invokeLater(this::hideCodeActionLamp);
         if (context == null || context.filePath() == null || context.editorContext() == null
-                || !JavaProjectConventions.isJava(context.filePath())) {
-            return;
-        }
-        JdtLsService lsp = jdtLs;
-        if (lsp == null || !lsp.isInteractive()) {
+                || !supportsCodeActionLamp(context.filePath())) {
             return;
         }
         codeActionDelayExecutor.schedule(
@@ -2328,21 +3029,69 @@ public class JavaIdeAdapter extends IdeAdapter {
                 || !sameCaret(context, context.editorContext())) {
             return;
         }
-        JdtLsService lsp = jdtLs;
-        if (lsp == null) {
+        DiagnosticSeverity severity = lampSeverityAt(context);
+        if (severity == null) {
             return;
         }
-        Diagnostic diagnostic = lsp.diagnosticAt(
-                context.filePath(), context.line(), context.col());
-        if (diagnostic == null) {
-            return;
-        }
-        boolean error = diagnostic.severity() == DiagnosticSeverity.ERROR;
         SwingUtilities.invokeLater(() -> {
             if (ticket == wordCaretTicket.get() && sameCaret(context, context.editorContext())) {
-                showCodeActionLamp(context, error);
+                showCodeActionLamp(context, severity);
             }
         });
+    }
+
+    private boolean supportsCodeActionLamp(Path filePath) {
+        return JavaProjectConventions.isJava(filePath)
+                || SpringConfigSupport.isConfigFile(filePath);
+    }
+
+    private DiagnosticSeverity lampSeverityAt(IdeWordCaretContext context) {
+        DiagnosticSeverity strongest = null;
+        JdtLsService lsp = jdtLs;
+        if (lsp != null && JavaProjectConventions.isJava(context.filePath())) {
+            Diagnostic fromServer = lsp.diagnosticAt(
+                    context.filePath(), context.line(), context.col());
+            if (fromServer != null) {
+                strongest = fromServer.severity();
+            }
+        }
+        for (Diagnostic diagnostic : pluginDiagnosticsAt(context.filePath(), context.text(),
+                context.line())) {
+            if (InspectionSuppressions.suppressible(diagnostic)) {
+                strongest = strongest(strongest, diagnostic.severity());
+            }
+        }
+        return strongest;
+    }
+
+    private List<Diagnostic> pluginDiagnosticsAt(Path filePath, String text, int line) {
+        List<Diagnostic> atLine = new ArrayList<>();
+        for (Diagnostic diagnostic : pluginDiagnostics(filePath, text)) {
+            if (diagnostic.startLine() == line) {
+                atLine.add(diagnostic);
+            }
+        }
+        return atLine;
+    }
+
+    private static DiagnosticSeverity strongest(DiagnosticSeverity current,
+                                                DiagnosticSeverity candidate) {
+        if (current == null) {
+            return candidate;
+        }
+        if (candidate == null) {
+            return current;
+        }
+        return rank(candidate) > rank(current) ? candidate : current;
+    }
+
+    private static int rank(DiagnosticSeverity severity) {
+        return switch (severity) {
+            case ERROR -> 3;
+            case WARNING -> 2;
+            case INFO -> 1;
+            case HINT -> 0;
+        };
     }
 
     private static boolean sameCaret(IdeWordCaretContext context, IdeEditorContext editor) {
@@ -2354,7 +3103,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 && Objects.equals(editor.getText(), context.text());
     }
 
-    private void showCodeActionLamp(IdeWordCaretContext context, boolean error) {
+    private void showCodeActionLamp(IdeWordCaretContext context, DiagnosticSeverity severity) {
         Component editor = resolveEditorComponent(context.editorContext());
         if (editor == null || !editor.isShowing()) {
             return;
@@ -2364,7 +3113,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         hideCodeActionLamp();
-        CodeActionLamp lamp = new CodeActionLamp(loadCodeActionLampIcon(error));
+        CodeActionLamp lamp = new CodeActionLamp(loadCodeActionLampIcon(severity));
         lamp.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent event) {
@@ -2384,12 +3133,20 @@ public class JavaIdeAdapter extends IdeAdapter {
         codeActionLampLayer = layer;
     }
 
-    private Icon loadCodeActionLampIcon(boolean error) {
-        String path = error ? "imgs/codeActionLampRed.svg" : "imgs/codeActionLampYellow.svg";
+    private Icon loadCodeActionLampIcon(DiagnosticSeverity severity) {
+        String path = switch (severity) {
+            case ERROR -> "imgs/codeActionLampRed.svg";
+            case WARNING -> "imgs/codeActionLampYellow.svg";
+            default -> "imgs/codeActionLampGreen.svg";
+        };
+        String fallback = switch (severity) {
+            case ERROR -> "OptionPane.errorIcon";
+            case WARNING -> "OptionPane.warningIcon";
+            default -> "OptionPane.informationIcon";
+        };
         return ImageUtils.getIconByResource(JavaIdeAdapter.class, path)
                 .map(icon -> ImageUtils.resizeIcon(icon, 18, 18))
-                .orElseGet(() -> UIManager.getIcon(
-                        error ? "OptionPane.errorIcon" : "OptionPane.warningIcon"));
+                .orElseGet(() -> UIManager.getIcon(fallback));
     }
 
     private static Point codeActionLampLocation(Component editor, IdeWordCaretContext context,
@@ -2451,14 +3208,29 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         invokeEditorMethod(textArea, "setGhostTextEnabled", boolean.class, true);
-        invokeEditorMethod(textArea, "setGhostTextCaretIdleDelay", int.class, 220);
+        invokeEditorMethod(textArea, "setGhostTextActivationMode",
+                GhostTextActivationMode.class, GhostTextActivationMode.CARET_IDLE);
+        invokeEditorMethod(textArea, "setGhostTextCaretIdleDelay", int.class,
+                GHOST_TEXT_IDLE_DELAY_MS);
     }
 
-    private void triggerGhostText(IdeEditorContext context) {
-        Object textArea = resolveTextArea(context);
-        if (textArea != null) {
-            invokeEditorMethod(textArea, "triggerGhostText", null, null);
+    private static Boolean invokeEditorBoolean(Object target, String name) {
+        if (target == null) {
+            return null;
         }
+        for (Class<?> type = target.getClass(); type != null && type != Object.class;
+             type = type.getSuperclass()) {
+            try {
+                Method method = type.getDeclaredMethod(name);
+                method.setAccessible(true);
+                Object value = method.invoke(target);
+                return value instanceof Boolean result ? result : null;
+            } catch (NoSuchMethodException ignored) {
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static void invokeEditorMethod(Object target, String name, Class<?> parameterType,
@@ -2556,6 +3328,9 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         javaEditors.put(JavaProjectConventions.normalize(editorContext.filePath()), editorContext);
+        if (activeJavaEditor == null) {
+            activeJavaEditor = editorContext;
+        }
         if (lsp != null) {
             lsp.openDocument(editorContext.filePath(), editorContext.getText());
         }
@@ -2564,6 +3339,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onEditorSelected(IdeEditorContext editorContext) {
+        autoCompleteIdle.cancel();
         activeJavaEditor = editorContext != null && JavaProjectConventions.isJava(editorContext.filePath())
                 ? editorContext : null;
         if (debugActive.get()) {
@@ -2658,8 +3434,22 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void handleCodeActionCommand(Command command) {
-        if (command == null || !JdtLsService.APPLY_CODE_ACTION_COMMAND.equals(command.id())
-                || command.arguments() == null || command.arguments().isEmpty()) {
+        if (command == null || command.arguments() == null || command.arguments().isEmpty()) {
+            return;
+        }
+        if (DISABLE_INSPECTION_COMMAND.equals(command.id())) {
+            disableInspection(String.valueOf(command.arguments().getFirst()));
+            return;
+        }
+        if (HIDE_OCCURRENCE_COMMAND.equals(command.id())) {
+            List<Object> arguments = command.arguments();
+            if (arguments.size() >= 3) {
+                hideInspectionOccurrence(String.valueOf(arguments.get(0)),
+                        String.valueOf(arguments.get(1)), String.valueOf(arguments.get(2)));
+            }
+            return;
+        }
+        if (!JdtLsService.APPLY_CODE_ACTION_COMMAND.equals(command.id())) {
             return;
         }
         String rawAction = String.valueOf(command.arguments().getFirst());
@@ -2963,19 +3753,34 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     @Override
+    public void onCodeEditorInsertText(IdeEditorContext editorContext, int offset, String inserted) {
+        if (editorContext == null) {
+            autoCompleteIdle.cancel();
+            return;
+        }
+        autoCompleteIdle.typed(JavaProjectConventions.normalize(editorContext.filePath()),
+                offset, inserted);
+    }
+
+    @Override
+    public void onCodeEditorDeleteText(IdeEditorContext editorContext, int offset, String removed) {
+        autoCompleteIdle.cancel();
+    }
+
+    @Override
     public void onCodeEditorTextChanged(IdeEditorContext editorContext) {
         JdtLsService lsp = jdtLs;
         if (editorContext != null && JavaProjectConventions.isJava(editorContext.filePath())) {
             if (lsp != null) {
                 lsp.changeDocument(editorContext.filePath(), editorContext.getText());
             }
-            SwingUtilities.invokeLater(() -> triggerGhostText(editorContext));
             refreshRunButtonsForCurrentFile();
         }
     }
 
     @Override
     public void onEditorClose(Path filePath) {
+        autoCompleteIdle.cancel();
         IdeEditorContext active = activeJavaEditor;
         if (active != null && Objects.equals(JavaProjectConventions.normalize(active.filePath()),
                 JavaProjectConventions.normalize(filePath))) {
@@ -3080,42 +3885,146 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!JavaProjectConventions.isJava(filePath)) {
             return null;
         }
+        long started = System.nanoTime();
+        SpringNavigation.Target springTarget = springTargetAt(filePath, text, line, col);
+        if (springTarget != null && springTarget.kind() == SpringNavigation.Kind.CONFIG_KEY) {
+            List<Location> keys = configKeyDefinitions(springTarget.token());
+            if (!keys.isEmpty()) {
+                logNavigation("definition", started, "spring-config");
+                return keys;
+            }
+        }
+        if (springTarget != null && springTarget.kind() != SpringNavigation.Kind.INJECTION) {
+            List<Location> anchors = springLocations(springTarget);
+            if (!anchors.isEmpty()) {
+                logNavigation("definition", started, "spring");
+                return anchors;
+            }
+        }
+        JavaLocalScope.Scope scope = JavaLocalScope.at(text, line, col);
+        if (scope != null && !scope.onDeclaration()) {
+            List<Location> local = localDeclaration(filePath, scope);
+            logNavigation("definition", started, "escopo local");
+            return local;
+        }
         JdtLsService lsp = interactiveServerFor(filePath);
         List<Location> precise = lsp == null ? List.of()
-                : lsp.isReady()
-                        ? lsp.definitions(filePath, text, line, col)
-                        : lsp.definitionsInteractive(filePath, text, line, col);
+                : lsp.definitionsInteractive(filePath, text, line, col);
         if (precise != null && !precise.isEmpty()) {
-            return precise;
+            logNavigation("definition", started, "semantico");
+            return withSpringImplementations(precise, springTarget);
         }
-        if (lsp != null && lsp.isReady()) {
-            return precise;
+        List<Location> springOnly = springLocations(springTarget);
+        if (!springOnly.isEmpty()) {
+            logNavigation("definition", started, "spring");
+            return springOnly;
         }
         String word = identifierAt(text, line, col);
         List<Location> approximate = word == null ? List.of() : lexicalIndex.definitions(word);
         if (!approximate.isEmpty()) {
             notifyApproximateResult();
+            logNavigation("definition", started, "aproximado");
+            return approximate;
         }
-        return approximate.isEmpty() ? precise : approximate;
+        logNavigation("definition", started, "sem destino");
+        return precise;
+    }
+
+    private boolean isSpringAnnotationLiteral(String line, int col) {
+        return isSpringNavigationEnabled()
+                && SpringAnnotationCompletionProvider.opensAnnotationLiteral(line, col);
+    }
+
+    private List<AutoCompleteItem> springAnnotationCompletion(IdeCompletionContext context) {
+        if (!isSpringNavigationEnabled()
+                || !JavaProjectConventions.isJava(context.filePath())) {
+            return null;
+        }
+        return SpringAnnotationCompletionProvider.suggestions(springIndex.snapshot(),
+                context.filePath(), context.currentLine(), context.caretCol(),
+                context.caretLine());
+    }
+
+    private SpringNavigation.Target springTargetAt(Path filePath, String text, int line, int col) {
+        if (!isSpringNavigationEnabled()) {
+            return null;
+        }
+        return SpringNavigation.definitions(springIndex.snapshot(), filePath, text, line, col)
+                .orElse(null);
+    }
+
+    private List<Location> springReferences(Path filePath, int line) {
+        if (!isSpringNavigationEnabled()) {
+            return List.of();
+        }
+        return SpringNavigation.references(springIndex.snapshot(), filePath, line)
+                .map(JavaIdeAdapter::springLocations)
+                .orElse(List.of());
+    }
+
+    private boolean isSpringNavigationEnabled() {
+        JavaProjectDescriptor current = descriptor;
+        return current != null && current.spring() && settings().isSpringSupport()
+                && settings().isSpringNavigation();
+    }
+
+    private List<Location> withSpringImplementations(List<Location> precise,
+                                                     SpringNavigation.Target target) {
+        List<Location> extra = springLocations(target);
+        if (extra.isEmpty()) {
+            return precise;
+        }
+        List<Location> merged = new ArrayList<>(precise);
+        for (Location location : extra) {
+            if (!merged.contains(location)) {
+                merged.add(location);
+            }
+        }
+        return merged;
+    }
+
+    private static List<Location> springLocations(SpringNavigation.Target target) {
+        if (target == null || target.isEmpty()) {
+            return List.of();
+        }
+        List<Location> locations = new ArrayList<>();
+        for (SpringNavigation.Anchor anchor : target.anchors()) {
+            if (anchor.file() == null) {
+                continue;
+            }
+            int editorLine = Math.max(0, anchor.line() - 1);
+            locations.add(Location.of(anchor.file().toUri().toString(),
+                    Range.of(editorLine, 0, editorLine, 0)));
+        }
+        return List.copyOf(locations);
+    }
+
+    private void logNavigation(String operation, long startedNanos, String source) {
+        log.debug("Navegacao {} resolvida por {} em {} ms", operation, source,
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
     }
 
     private List<Location> resolveReferences(Path filePath, String text, int line, int col) {
         if (!JavaProjectConventions.isJava(filePath)) {
             return null;
         }
+        long started = System.nanoTime();
+        List<Location> springUsages = springReferences(filePath, line);
+        if (!springUsages.isEmpty()) {
+            logNavigation("usages", started, "spring");
+            return springUsages;
+        }
         JavaLocalScope.Scope scope = JavaLocalScope.at(text, line, col);
+        if (scope != null) {
+            List<Location> local = localUsages(filePath, scope, List.of());
+            logNavigation("usages", started, "escopo local");
+            return local;
+        }
         JdtLsService lsp = interactiveServerFor(filePath);
         List<Location> precise = lsp == null ? List.of()
-                : lsp.isReady()
-                        ? lsp.references(filePath, text, line, col)
-                        : lsp.referencesInteractive(filePath, text, line, col);
-        if (scope != null) {
-            return localUsages(filePath, scope, precise);
-        }
+                : lsp.referencesInteractive(filePath, text, line, col);
         if (precise != null && !precise.isEmpty()) {
-            return precise;
-        }
-        if (lsp != null && lsp.isReady()) {
+            logNavigation("usages", started, "semantico");
             return precise;
         }
         String word = identifierAt(text, line, col);
@@ -3123,8 +4032,11 @@ public class JavaIdeAdapter extends IdeAdapter {
                 : lexicalIndex.usages(word, LEXICAL_USAGE_BUDGET_MS);
         if (!approximate.isEmpty()) {
             notifyApproximateResult();
+            logNavigation("usages", started, "aproximado");
+            return approximate;
         }
-        return approximate.isEmpty() ? precise : approximate;
+        logNavigation("usages", started, "sem destino");
+        return precise;
     }
 
     private static List<Location> localUsages(Path filePath, JavaLocalScope.Scope scope,
@@ -3174,7 +4086,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (state == JdtLsService.State.STARTING || state == JdtLsService.State.INDEXING) {
             setStatusBarText(text("status.approximateResult",
                     "Java: resultado aproximado - indexacao em andamento"));
+            return;
         }
+        setStatusBarText(text("status.approximateNavigation",
+                "Java: resultado aproximado"));
     }
 
     static String identifierAt(String text, int line, int col) {
@@ -3407,6 +4322,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         try {
             Files.createDirectories(directory);
             Files.writeString(file, JavaFileTemplates.render(kind, packageName, typed));
+            JavaFileChangeRouter router = fileChangeRouter;
+            if (router != null) {
+                router.acceptCreated(file);
+            }
             requestProjectTreeViewRefresh();
             requestOpenFile(file);
         } catch (Exception e) {
@@ -4883,6 +5802,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (!current(ticket, root)) {
                 return;
             }
+            springMetadata = springMetadata.withProjectProperties(projectConfigProperties());
             snapshot.beansIn(root).forEach(bean -> requestRefreshCodeLenses(bean.file()));
             SwingUtilities.invokeLater(() -> {
                 if (!current(ticket, root)) {
@@ -4897,6 +5817,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             });
         });
         loadSpringMetadata(ticket, root);
+        loadSpringConfigIndex(ticket, root);
         SwingUtilities.invokeLater(() -> {
             if (current(ticket, root)) {
                 setupSpringPanel();
@@ -4913,7 +5834,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             List<Path> classpath = new ArrayList<>();
             for (JavaModule module : springConfigModules(current)) {
-                build.resolveRuntimeClasspath(module).ifPresent(entries -> {
+                runtimeClasspathOf(build, module).ifPresent(entries -> {
                     for (String entry : entries.split(java.io.File.pathSeparator)) {
                         if (!entry.isBlank()) {
                             classpath.add(Path.of(entry));
@@ -4932,9 +5853,52 @@ public class JavaIdeAdapter extends IdeAdapter {
                 log.info("Nenhum metadado de configuracao do Spring encontrado no classpath");
                 return;
             }
-            springMetadata = metadata;
+            springMetadata = metadata.withProjectProperties(projectConfigProperties());
             log.info("Catalogo de configuracao do Spring carregado de {} entrada(s): {} chave(s)",
                     classpath.size(), metadata.size());
+        });
+    }
+
+    private List<SpringConfigProperty> projectConfigProperties() {
+        List<SpringConfigProperty> properties = new ArrayList<>();
+        for (SpringPropertyUsage usage : springIndex.snapshot().propertyUsages()) {
+            if (usage.isPrefix() && !usage.key().isBlank()) {
+                properties.add(SpringConfigProperty.of(usage.key(), "",
+                        SpringBean.simpleNameOf(usage.ownerType())));
+            }
+        }
+        return properties;
+    }
+
+    private java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module) {
+        JdtLsService lsp = jdtLs;
+        if (lsp != null && lsp.isReady()) {
+            java.util.Optional<String> fromServer = lsp.runtimeClasspath(module.root());
+            if (fromServer.isPresent() && !fromServer.get().isBlank()) {
+                return fromServer;
+            }
+        }
+        return build.resolveRuntimeClasspath(module);
+    }
+
+    private void loadSpringConfigIndex(long ticket, Path root) {
+        background.submit(() -> {
+            JavaProjectDescriptor current = descriptor;
+            if (current == null || !current(ticket, root)) {
+                return;
+            }
+            List<Path> resourceRoots = new ArrayList<>();
+            for (JavaModule module : springConfigModules(current)) {
+                resourceRoots.add(module.root().resolve("src").resolve("main").resolve("resources"));
+                resourceRoots.add(module.root().resolve("src").resolve("test").resolve("resources"));
+            }
+            SpringConfigIndex index = SpringConfigIndex.scan(resourceRoots);
+            if (!current(ticket, root)) {
+                return;
+            }
+            springConfigIndex = index;
+            log.info("Indice de configuracao do Spring: {} chave(s) em {} raiz(es)",
+                    index.entries().size(), resourceRoots.size());
         });
     }
 
@@ -5019,6 +5983,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                                 actuator.beans(baseUrl),
                                 actuator.environment(baseUrl),
                                 actuator.mappings(baseUrl));
+                        adoptRuntimeBeans(data.beans());
                     }
                 } catch (Exception e) {
                     log.debug("Falha ao consultar o Actuator: {}", e.getMessage());
@@ -5033,6 +5998,15 @@ public class JavaIdeAdapter extends IdeAdapter {
             JavaProjectDescriptor current = descriptor;
             springIndex.rebuild(current).thenRun(() -> SwingUtilities.invokeLater(onDone));
         }
+    }
+
+    private void adoptRuntimeBeans(List<SpringActuatorClient.LiveBean> liveBeans) {
+        if (!settings().isSpringRuntimeBeans()) {
+            return;
+        }
+        List<SpringBean> runtime = SpringRuntimeBeans.from(liveBeans, springIndex.snapshot());
+        springIndex.applyRuntimeBeans(runtime);
+        log.info("Beans de runtime adotados do Actuator: {}", runtime.size());
     }
 
     public void openSpringExplorer() {
@@ -5323,6 +6297,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         setStatusBarText(text("status.syncPending",
                 "Java: o arquivo de build mudou - sincronize o projeto"));
+        Path root = projectRoot;
+        JdtLsService lsp = jdtLs;
+        if (root != null && lsp != null) {
+            background.submit(() -> restartWhenLombokAgentChanged(lsp,
+                    JavaProjectConventions.describe(root)));
+        }
         createNotification(NotificationContext.builder()
                 .title(text("notification.syncTitle", "Build alterado"))
                 .message(text("notification.syncMessage",
@@ -5595,7 +6575,8 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<PluginSettingsPage> getSettingsPages() {
-        return List.of(new JavaSettingsPage(ensureSettings(), this::applySettings));
+        return List.of(new JavaSettingsPage(ensureSettings(), this::applySettings,
+                suppressions(), projectRoot));
     }
 
     private synchronized JavaPluginSettings ensureSettings() {
@@ -5625,23 +6606,44 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (root != null) {
             requestRefreshCodeLenses(root);
         }
-        applyBuildModeChange(current.getJdtBuildMode(), root);
+        if (!applyBuildModeChange(current.getJdtBuildMode(), root)) {
+            applyLombokSettingChange(root);
+        }
     }
 
-    private void applyBuildModeChange(JdtBuildMode mode, Path root) {
+    private boolean applyBuildModeChange(JdtBuildMode mode, Path root) {
         if (mode == appliedBuildMode) {
-            return;
+            return false;
         }
         appliedBuildMode = mode;
         JdtLsService lsp = jdtLs;
         if (root == null || lsp == null) {
-            return;
+            return false;
         }
         background.submit(() -> {
             lsp.stop();
             hideProgress(LSP_PROGRESS_ID);
             resolveProjectJdk(lifecycle.incrementAndGet(), root);
         });
+        return true;
+    }
+
+    private void applyLombokSettingChange(Path root) {
+        JdtLsService lsp = jdtLs;
+        if (root == null || lsp == null) {
+            return;
+        }
+        background.submit(() -> restartWhenLombokAgentChanged(lsp, descriptor));
+    }
+
+    private void restartWhenLombokAgentChanged(JdtLsService lsp, JavaProjectDescriptor current) {
+        if (current == null || !applyLombokAgent(lsp, current)) {
+            return;
+        }
+        log.info("Agente do Lombok mudou; reiniciando o IntelliSense Java");
+        setStatusBarText(text("status.lombokRestart",
+                "Java: Lombok mudou - reiniciando o IntelliSense"));
+        clearCaches();
     }
 
     private JavaPluginSettings settings() {

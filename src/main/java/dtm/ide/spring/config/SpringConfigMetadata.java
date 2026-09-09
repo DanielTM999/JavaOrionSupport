@@ -84,11 +84,9 @@ public final class SpringConfigMetadata {
     private static int readJar(Path jar, Map<String, SpringConfigProperty> index) {
         int scanned = 0;
         try (ZipFile zip = new ZipFile(jar.toFile())) {
-            Enumeration<? extends ZipEntry> entries = zip.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                String name = entry.getName();
-                if (!METADATA_ENTRY.equals(name) && !ADDITIONAL_METADATA_ENTRY.equals(name)) {
+            for (String name : List.of(METADATA_ENTRY, ADDITIONAL_METADATA_ENTRY)) {
+                ZipEntry entry = zip.getEntry(name);
+                if (entry == null) {
                     continue;
                 }
                 try (InputStream in = zip.getInputStream(entry)) {
@@ -156,6 +154,17 @@ public final class SpringConfigMetadata {
 
     public int size() {
         return properties.size();
+    }
+
+    public SpringConfigMetadata withProjectProperties(List<SpringConfigProperty> projectProperties) {
+        if (projectProperties == null || projectProperties.isEmpty()) {
+            return this;
+        }
+        Map<String, SpringConfigProperty> merged = new LinkedHashMap<>(properties);
+        for (SpringConfigProperty property : projectProperties) {
+            merged.putIfAbsent(property.name(), property);
+        }
+        return new SpringConfigMetadata(merged, fromClasspath);
     }
 
     public Optional<SpringConfigProperty> find(String key) {

@@ -13,7 +13,8 @@ public record RunFormChoices(
         List<MainClassScanner.MainClass> mainClasses,
         List<Path> jars,
         List<String> buildTargets,
-        List<String> mavenProfiles
+        List<String> mavenProfiles,
+        List<String> springProfiles
 ) {
 
     public RunFormChoices {
@@ -23,10 +24,18 @@ public record RunFormChoices(
         jars = jars == null ? List.of() : List.copyOf(jars);
         buildTargets = buildTargets == null ? List.of() : List.copyOf(buildTargets);
         mavenProfiles = mavenProfiles == null ? List.of() : List.copyOf(mavenProfiles);
+        springProfiles = springProfiles == null ? List.of() : List.copyOf(springProfiles);
+    }
+
+    public RunFormChoices(List<String> modules, Map<String, String> jdks,
+                          List<MainClassScanner.MainClass> mainClasses, List<Path> jars,
+                          List<String> buildTargets, List<String> mavenProfiles) {
+        this(modules, jdks, mainClasses, jars, buildTargets, mavenProfiles, List.of());
     }
 
     public static RunFormChoices empty() {
-        return new RunFormChoices(List.of(), Map.of(), List.of(), List.of(), List.of(), List.of());
+        return new RunFormChoices(List.of(), Map.of(), List.of(), List.of(), List.of(),
+                List.of(), List.of());
     }
 
     public List<String> mainClassNames() {

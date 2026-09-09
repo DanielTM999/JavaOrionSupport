@@ -25,9 +25,7 @@ final class LspClientCapabilities {
                 "dynamicRegistration", false,
                 "completionItem", Map.of(
                         "snippetSupport", true,
-                        "documentationFormat", List.of("markdown", "plaintext"),
-                        "resolveSupport", Map.of("properties",
-                                List.of("documentation", "detail", "additionalTextEdits"))),
+                        "documentationFormat", List.of("markdown", "plaintext")),
                 "contextSupport", true));
 
         textDocument.put("hover", Map.of(
@@ -79,6 +77,9 @@ final class LspClientCapabilities {
         workspace.put("applyEdit", true);
         workspace.put("configuration", true);
         workspace.put("workspaceFolders", true);
+        workspace.put("didChangeWatchedFiles", Map.of(
+                "dynamicRegistration", false,
+                "relativePatternSupport", false));
         workspace.put("codeLens", Map.of("refreshSupport", true));
         workspace.put("executeCommand", Map.of("dynamicRegistration", false));
         workspace.put("symbol", Map.of("dynamicRegistration", false));

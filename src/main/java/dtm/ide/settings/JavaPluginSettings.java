@@ -28,6 +28,12 @@ public final class JavaPluginSettings {
     private static final String KEY_SPRING_SUPPORT = "springSupport";
     private static final String KEY_SPRING_CODE_LENS = "springCodeLens";
     private static final String KEY_SPRING_LIVE = "springLive";
+    private static final String KEY_SPRING_NAVIGATION = "springNavigation";
+    private static final String KEY_SPRING_JPA = "springJpa";
+    private static final String KEY_SPRING_CONFIG_NAVIGATION = "springConfigNavigation";
+    private static final String KEY_SPRING_RUNTIME_BEANS = "springRuntimeBeans";
+    private static final String KEY_SPRING_INFRA = "springInfra";
+    private static final String KEY_DISABLED_INSPECTIONS = "disabledInspections";
     private static final String KEY_SPRING_BASE_URL = "springBaseUrl";
     private static final String KEY_SAFE_DELETE = "safeDelete";
     private static final String KEY_JDT_BUILD_MODE = "jdtBuildMode";
@@ -51,6 +57,12 @@ public final class JavaPluginSettings {
     private boolean springSupport = true;
     private boolean springCodeLens = true;
     private boolean springLive = true;
+    private boolean springNavigation = true;
+    private boolean springJpa = true;
+    private boolean springConfigNavigation = true;
+    private boolean springRuntimeBeans = true;
+    private boolean springInfra = true;
+    private java.util.Set<String> disabledInspections = new java.util.LinkedHashSet<>();
     private String springBaseUrl = DEFAULT_SPRING_BASE_URL;
     private boolean safeDelete = true;
     private JdtBuildMode jdtBuildMode = JdtBuildMode.PROJECT_BUILD;
@@ -174,6 +186,17 @@ public final class JavaPluginSettings {
         this.buildFileCompletion = value;
     }
 
+    private static java.util.Set<String> splitInspections(String raw) {
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+        for (String part : raw == null ? new String[0] : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                ids.add(trimmed);
+            }
+        }
+        return ids;
+    }
+
     private static List<String> splitMarkers(String raw) {
         List<String> markers = new ArrayList<>();
         for (String part : raw == null ? new String[0] : raw.split(",")) {
@@ -201,6 +224,70 @@ public final class JavaPluginSettings {
         this.springLive = value;
     }
 
+    public boolean isSpringNavigation() {
+        return springNavigation;
+    }
+
+    public void setSpringNavigation(boolean value) {
+        this.springNavigation = value;
+    }
+
+    public boolean isSpringJpa() {
+        return springJpa;
+    }
+
+    public void setSpringJpa(boolean value) {
+        this.springJpa = value;
+    }
+
+    public java.util.Set<String> getDisabledInspections() {
+        return java.util.Set.copyOf(disabledInspections);
+    }
+
+    public boolean isInspectionDisabled(String inspectionId) {
+        return inspectionId != null && disabledInspections.contains(inspectionId);
+    }
+
+    public void setInspectionDisabled(String inspectionId, boolean disabled) {
+        if (inspectionId == null || inspectionId.isBlank()) {
+            return;
+        }
+        if (disabled) {
+            disabledInspections.add(inspectionId);
+        } else {
+            disabledInspections.remove(inspectionId);
+        }
+    }
+
+    public void setDisabledInspections(java.util.Collection<String> ids) {
+        disabledInspections = ids == null
+                ? new java.util.LinkedHashSet<>() : new java.util.LinkedHashSet<>(ids);
+    }
+
+    public boolean isSpringInfra() {
+        return springInfra;
+    }
+
+    public void setSpringInfra(boolean value) {
+        this.springInfra = value;
+    }
+
+    public boolean isSpringRuntimeBeans() {
+        return springRuntimeBeans;
+    }
+
+    public void setSpringRuntimeBeans(boolean value) {
+        this.springRuntimeBeans = value;
+    }
+
+    public boolean isSpringConfigNavigation() {
+        return springConfigNavigation;
+    }
+
+    public void setSpringConfigNavigation(boolean value) {
+        this.springConfigNavigation = value;
+    }
+
     public String getSpringBaseUrl() {
         return springBaseUrl;
     }
@@ -224,6 +311,12 @@ public final class JavaPluginSettings {
         springSupport = true;
         springCodeLens = true;
         springLive = true;
+        springNavigation = true;
+        springJpa = true;
+        springConfigNavigation = true;
+        springRuntimeBeans = true;
+        springInfra = true;
+        disabledInspections = new java.util.LinkedHashSet<>();
         springBaseUrl = DEFAULT_SPRING_BASE_URL;
         safeDelete = true;
         jdtBuildMode = JdtBuildMode.PROJECT_BUILD;
@@ -260,6 +353,12 @@ public final class JavaPluginSettings {
         buildFileCompletion = bool(properties, KEY_BUILD_FILE_COMPLETION, true);
         springCodeLens = bool(properties, KEY_SPRING_CODE_LENS, true);
         springLive = bool(properties, KEY_SPRING_LIVE, true);
+        springNavigation = bool(properties, KEY_SPRING_NAVIGATION, true);
+        springJpa = bool(properties, KEY_SPRING_JPA, true);
+        springConfigNavigation = bool(properties, KEY_SPRING_CONFIG_NAVIGATION, true);
+        springRuntimeBeans = bool(properties, KEY_SPRING_RUNTIME_BEANS, true);
+        springInfra = bool(properties, KEY_SPRING_INFRA, true);
+        disabledInspections = splitInspections(properties.getProperty(KEY_DISABLED_INSPECTIONS));
         springBaseUrl = properties.getProperty(KEY_SPRING_BASE_URL, DEFAULT_SPRING_BASE_URL);
     }
 
@@ -284,6 +383,13 @@ public final class JavaPluginSettings {
         properties.setProperty(KEY_BUILD_FILE_COMPLETION, Boolean.toString(buildFileCompletion));
         properties.setProperty(KEY_SPRING_CODE_LENS, Boolean.toString(springCodeLens));
         properties.setProperty(KEY_SPRING_LIVE, Boolean.toString(springLive));
+        properties.setProperty(KEY_SPRING_NAVIGATION, Boolean.toString(springNavigation));
+        properties.setProperty(KEY_SPRING_JPA, Boolean.toString(springJpa));
+        properties.setProperty(KEY_SPRING_CONFIG_NAVIGATION,
+                Boolean.toString(springConfigNavigation));
+        properties.setProperty(KEY_SPRING_RUNTIME_BEANS, Boolean.toString(springRuntimeBeans));
+        properties.setProperty(KEY_SPRING_INFRA, Boolean.toString(springInfra));
+        properties.setProperty(KEY_DISABLED_INSPECTIONS, String.join(",", disabledInspections));
         properties.setProperty(KEY_SPRING_BASE_URL, springBaseUrl);
 
         try {

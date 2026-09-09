@@ -14,8 +14,15 @@ public record SpringBean(
         List<String> profiles,
         boolean primary,
         String qualifier,
-        boolean conditional
+        boolean conditional,
+        SpringBeanTraits traits,
+        Origin origin
 ) {
+
+    public enum Origin {
+        SOURCE,
+        RUNTIME
+    }
 
     public SpringBean {
         name = name == null ? "" : name.trim();
@@ -24,7 +31,32 @@ public record SpringBean(
         supertypes = supertypes == null ? List.of() : List.copyOf(supertypes);
         profiles = profiles == null ? List.of() : List.copyOf(profiles);
         qualifier = qualifier == null ? "" : qualifier.trim();
+        traits = traits == null ? SpringBeanTraits.none() : traits;
+        origin = origin == null ? Origin.SOURCE : origin;
         line = Math.max(1, line);
+    }
+
+    public SpringBean(String name, String type, String simpleName, SpringStereotype stereotype,
+                      Path file, int line, List<String> supertypes, List<String> profiles,
+                      boolean primary, String qualifier, boolean conditional,
+                      SpringBeanTraits traits) {
+        this(name, type, simpleName, stereotype, file, line, supertypes, profiles, primary,
+                qualifier, conditional, traits, Origin.SOURCE);
+    }
+
+    public SpringBean(String name, String type, String simpleName, SpringStereotype stereotype,
+                      Path file, int line, List<String> supertypes, List<String> profiles,
+                      boolean primary, String qualifier, boolean conditional) {
+        this(name, type, simpleName, stereotype, file, line, supertypes, profiles, primary,
+                qualifier, conditional, SpringBeanTraits.none(), Origin.SOURCE);
+    }
+
+    public boolean fromRuntime() {
+        return origin == Origin.RUNTIME;
+    }
+
+    public boolean navigable() {
+        return file != null;
     }
 
     public static String defaultBeanName(String simpleName) {
@@ -52,6 +84,13 @@ public record SpringBean(
 
     public boolean hasQualifier() {
         return !qualifier.isBlank();
+    }
+
+    public boolean matchesQualifier(String requested) {
+        if (requested == null || requested.isBlank()) {
+            return false;
+        }
+        return requested.equals(qualifier) || requested.equals(name);
     }
 
     public boolean isProfileSpecific() {

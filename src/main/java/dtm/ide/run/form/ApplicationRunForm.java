@@ -100,6 +100,9 @@ public final class ApplicationRunForm extends RunConfigurationFormBase {
         String selected = RunFormUi.valueOf(mainClass);
         RunFormUi.fill(mainClass, choices.mainClassNames(), selected);
         mainClass.setSelectedItem(selected);
+        if (springBoot && !choices.springProfiles().isEmpty()) {
+            springProfiles.setPlaceholder(String.join(", ", choices.springProfiles()));
+        }
     }
 
     @Override

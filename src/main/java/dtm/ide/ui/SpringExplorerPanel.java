@@ -3,6 +3,10 @@ package dtm.ide.ui;
 import dtm.ide.spring.SpringBean;
 import dtm.ide.spring.SpringEndpoint;
 import dtm.ide.spring.SpringIndexSnapshot;
+import dtm.ide.spring.jpa.JpaEntity;
+import dtm.ide.spring.jpa.JpaField;
+import dtm.ide.spring.jpa.JpaQueryMethod;
+import dtm.ide.spring.jpa.JpaRepositoryInfo;
 import dtm.ide.spring.SpringInjection;
 import dtm.ide.spring.SpringStereotype;
 import dtm.ide.spring.live.SpringActuatorClient;
@@ -91,12 +95,13 @@ public final class SpringExplorerPanel extends JPanel {
         }
     }
 
-    private enum Tab { BEANS, ENDPOINTS, LIVE }
+    private enum Tab { BEANS, ENDPOINTS, JPA, LIVE }
 
     private enum LiveTab { BEANS, PROPERTIES, MAPPINGS }
 
     private static final String CARD_BEANS = "beans";
     private static final String CARD_ENDPOINTS = "endpoints";
+    private static final String CARD_JPA = "jpa";
     private static final String CARD_LIVE = "live";
     private static final String CARD_EMPTY = "empty";
     private static final String CARD_CONTENT = "content";
@@ -113,9 +118,11 @@ public final class SpringExplorerPanel extends JPanel {
     private final TreeView<Object> beansTree = new TreeView<>();
     private final TreeView<Object> endpointTree = new TreeView<>();
     private final TreeView<Object> liveMappingTree = new TreeView<>();
+    private final TreeView<Object> jpaTree = new TreeView<>();
     private final CollectionPane beansList;
     private final CollectionPane endpointList;
     private final CollectionPane mappingList;
+    private final CollectionPane jpaList;
 
     private final CardLayout beanDetailCards = new CardLayout();
     private final JPanel beanDetailBody = new JPanel(beanDetailCards);
@@ -164,6 +171,7 @@ public final class SpringExplorerPanel extends JPanel {
 
         beansList = new CollectionPane(scroll(beansTree), JavaIcons.spring(UiTokens.scale(30)));
         endpointList = new CollectionPane(scroll(endpointTree), JavaIcons.spring(UiTokens.scale(30)));
+        jpaList = new CollectionPane(scroll(jpaTree), JavaIcons.spring(UiTokens.scale(30)));
         mappingList = new CollectionPane(scroll(liveMappingTree), JavaIcons.spring(UiTokens.scale(30)));
         liveBeansList = new CollectionPane(tableScroll(liveBeanTable),
                 JavaIcons.spring(UiTokens.scale(30)));
@@ -180,6 +188,7 @@ public final class SpringExplorerPanel extends JPanel {
         content.setOpaque(false);
         content.add(beansTab(), CARD_BEANS);
         content.add(endpointsTab(), CARD_ENDPOINTS);
+        content.add(jpaTab(), CARD_JPA);
         content.add(liveTab(), CARD_LIVE);
 
         add(toolbar(), BorderLayout.NORTH);
@@ -195,6 +204,7 @@ public final class SpringExplorerPanel extends JPanel {
         beansTree.setFocusable(true);
         endpointTree.setFocusable(true);
         liveMappingTree.setFocusable(true);
+        jpaTree.setFocusable(true);
         contentCards.show(content, CARD_BEANS);
         reload();
     }
@@ -202,6 +212,7 @@ public final class SpringExplorerPanel extends JPanel {
     private ToolBarPanel toolbar() {
         tabs.addSegment(text("tab.beans", "Beans"), Tab.BEANS)
                 .addSegment(text("tab.endpoints", "Endpoints"), Tab.ENDPOINTS)
+                .addSegment(text("tab.jpa", "JPA"), Tab.JPA)
                 .addSegment(text("tab.live", "Ao vivo"), Tab.LIVE)
                 .setAnimated(true)
                 .setArc(UiTokens.radius(UiTokens.Radius.SM))
@@ -264,6 +275,11 @@ public final class SpringExplorerPanel extends JPanel {
                 .setDividerThickness(UiTokens.space(2)).setCollapseOnDoubleClick(true);
         split.setResizeWeight(0.53);
         return split;
+    }
+
+    private JComponent jpaTab() {
+        return card(text("jpa.card.title", "Modelo de persistencia"),
+                text("jpa.card.subtitle", "Entidades, campos e repositorios do projeto"), jpaList);
     }
 
     private JComponent liveTab() {
@@ -332,6 +348,8 @@ public final class SpringExplorerPanel extends JPanel {
         beansTree.onTreeEvent(EventTreeView.NODE_ACTIVATE, event -> openSelectedBean());
         endpointTree.onTreeEvent(EventTreeView.NODE_DOUBLE_CLICK, event -> openSelectedEndpoint());
         endpointTree.onTreeEvent(EventTreeView.NODE_ACTIVATE, event -> openSelectedEndpoint());
+        jpaTree.onTreeEvent(EventTreeView.NODE_DOUBLE_CLICK, event -> openSelectedJpaNode());
+        jpaTree.onTreeEvent(EventTreeView.NODE_ACTIVATE, event -> openSelectedJpaNode());
         openSourceButton.addActionListener(event -> openSelectedEndpoint());
         openInBrowserButton.addActionListener(event -> {
             SpringEndpoint endpoint = selectedEndpoint;
@@ -350,6 +368,7 @@ public final class SpringExplorerPanel extends JPanel {
         snapshot = next == null ? SpringIndexSnapshot.empty(null) : next;
         rebuildBeans();
         rebuildEndpoints();
+        rebuildJpa();
         rebuildAllLiveViews();
         updateOverallStatus();
     }
@@ -360,11 +379,13 @@ public final class SpringExplorerPanel extends JPanel {
         contentCards.show(content, switch (selected) {
             case BEANS -> CARD_BEANS;
             case ENDPOINTS -> CARD_ENDPOINTS;
+            case JPA -> CARD_JPA;
             case LIVE -> CARD_LIVE;
         });
         filter.setPlaceholder(switch (selected) {
             case BEANS -> text("filter.beans", "Filtrar beans...");
             case ENDPOINTS -> text("filter.endpoints", "Filtrar rotas ou controladores...");
+            case JPA -> text("filter.jpa", "Filtrar entidades, tabelas ou repositorios...");
             case LIVE -> liveFilterPlaceholder();
         });
         clearContextFilter();
@@ -372,6 +393,7 @@ public final class SpringExplorerPanel extends JPanel {
         TreeView<Object> selectedTree = switch (selected) {
             case BEANS -> beansTree;
             case ENDPOINTS -> endpointTree;
+            case JPA -> jpaTree;
             case LIVE -> selectedLiveTab() == LiveTab.MAPPINGS ? liveMappingTree : null;
         };
         if (selectedTree != null) {
@@ -417,6 +439,8 @@ public final class SpringExplorerPanel extends JPanel {
         Tab selected = tabs.getSelectedValue();
         if (selected == Tab.ENDPOINTS) {
             rebuildEndpoints();
+        } else if (selected == Tab.JPA) {
+            rebuildJpa();
         } else if (selected == Tab.LIVE) {
             rebuildLiveView();
         } else {
@@ -501,6 +525,102 @@ public final class SpringExplorerPanel extends JPanel {
                         : text("empty.filtered.description", "Tente outro termo de busca."));
         if (visible == 0) {
             clearEndpointDetails();
+        }
+    }
+
+    private void rebuildJpa() {
+        Set<String> expansion = jpaTree.snapshotExpansion();
+        TreeNode<Object> root = UiSupport.treeNode(null, "spring-jpa-root");
+        List<JpaEntity> entities =
+                SpringExplorerModel.filterEntities(snapshot.entities(), filter.getText());
+        List<JpaRepositoryInfo> repositories =
+                SpringExplorerModel.filterRepositories(snapshot.repositories(), filter.getText());
+        int visible = 0;
+
+        if (!entities.isEmpty()) {
+            TreeNode<Object> group = UiSupport.treeNode(null, "jpa-entities");
+            group.setLabel(text("jpa.entities", "Entidades") + "   " + entities.size());
+            group.setIcon(JavaIcons.spring(JavaIcons.SMALL));
+            group.setForeground(UiTokens.muted());
+            for (JpaEntity entity : entities) {
+                TreeNode<Object> node = UiSupport.treeNode(new JpaEntityNode(entity),
+                        "jpa-entity|" + entity.type());
+                node.setLabel(entity.simpleName() + "   " + entity.effectiveTable());
+                node.setIcon(JavaIcons.java(JavaIcons.SMALL));
+                node.setTooltip(entity.type());
+                for (JpaField field : entity.fields()) {
+                    TreeNode<Object> child = UiSupport.treeNode(new JpaFieldNode(entity, field),
+                            "jpa-field|" + entity.type() + "|" + field.name());
+                    child.setLabel(fieldLabel(field));
+                    child.setForeground(UiTokens.muted());
+                    node.addChild(child);
+                }
+                group.addChild(node);
+                visible++;
+            }
+            root.addChild(group);
+        }
+
+        if (!repositories.isEmpty()) {
+            TreeNode<Object> group = UiSupport.treeNode(null, "jpa-repositories");
+            group.setLabel(text("jpa.repositories", "Repositorios") + "   " + repositories.size());
+            group.setIcon(JavaIcons.spring(JavaIcons.SMALL));
+            group.setForeground(UiTokens.muted());
+            for (JpaRepositoryInfo repository : repositories) {
+                TreeNode<Object> node = UiSupport.treeNode(new JpaRepositoryNode(repository),
+                        "jpa-repository|" + repository.type());
+                node.setLabel(repository.simpleName() + "   " + repository.entitySimpleName());
+                node.setIcon(JavaIcons.java(JavaIcons.SMALL));
+                node.setTooltip(repository.type());
+                for (JpaQueryMethod method : repository.methods()) {
+                    TreeNode<Object> child = UiSupport.treeNode(
+                            new JpaMethodNode(repository, method),
+                            "jpa-method|" + repository.type() + "|" + method.name());
+                    child.setLabel(method.name() + "()");
+                    child.setForeground(UiTokens.muted());
+                    node.addChild(child);
+                }
+                group.addChild(node);
+                visible++;
+            }
+            root.addChild(group);
+        }
+
+        jpaTree.setRoot(root);
+        restoreExpansion(jpaTree, expansion);
+        jpaList.show(visible > 0,
+                filter.getText().isBlank()
+                        ? text("jpa.empty", "Nenhuma entidade JPA encontrada")
+                        : text("empty.filtered.title", "Nenhum resultado"),
+                filter.getText().isBlank()
+                        ? text("jpa.empty.description",
+                                "Anote uma classe com @Entity ou crie um repositorio Spring Data.")
+                        : text("empty.filtered.description", "Tente outro termo de busca."));
+    }
+
+    private static String fieldLabel(JpaField field) {
+        StringBuilder label = new StringBuilder(field.name())
+                .append("   ")
+                .append(field.effectiveColumn());
+        if (field.id()) {
+            label.append("   @Id");
+        }
+        if (field.relation() != JpaField.Relation.NONE) {
+            label.append("   ").append(field.relation().name().toLowerCase(java.util.Locale.ROOT));
+        }
+        return label.toString();
+    }
+
+    private void openSelectedJpaNode() {
+        Object data = selectedTreeData(jpaTree);
+        if (data instanceof JpaEntityNode node) {
+            host.openFile(node.entity().file(), node.entity().line());
+        } else if (data instanceof JpaFieldNode node) {
+            host.openFile(node.entity().file(), node.field().line());
+        } else if (data instanceof JpaRepositoryNode node) {
+            host.openFile(node.repository().file(), node.repository().line());
+        } else if (data instanceof JpaMethodNode node) {
+            host.openFile(node.repository().file(), node.method().line());
         }
     }
 
@@ -969,6 +1089,18 @@ public final class SpringExplorerPanel extends JPanel {
     }
 
     private record MappingGroupNode(SpringExplorerModel.MappingGroup group) {
+    }
+
+    private record JpaEntityNode(JpaEntity entity) {
+    }
+
+    private record JpaFieldNode(JpaEntity entity, JpaField field) {
+    }
+
+    private record JpaRepositoryNode(JpaRepositoryInfo repository) {
+    }
+
+    private record JpaMethodNode(JpaRepositoryInfo repository, JpaQueryMethod method) {
     }
 
     private record MappingNode(SpringActuatorClient.LiveMapping mapping) {

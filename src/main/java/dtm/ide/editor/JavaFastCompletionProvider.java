@@ -23,7 +23,10 @@ public final class JavaFastCompletionProvider {
             "(?m)^[ \\t]*(?:(?:public|protected|private|static|final|abstract|default|"
                     + "synchronized|native|strictfp)\\s+)*(?:<[^>]+>\\s*)?"
                     + "[A-Za-z_$][\\w$.,<>? \\[\\]]*\\s+([A-Za-z_$][\\w$]*)\\s*\\(");
-    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_$][\\w$]*");
+    private static final Pattern DECLARATION = Pattern.compile(
+            "(?<![\\w$.])((?:[A-Za-z_$][\\w$]*\\s*\\.\\s*)*[A-Za-z_$][\\w$]*"
+                    + "(?:\\s*<[^<>;{}()]*>)?(?:\\s*\\[\\s*\\])*)\\s+([A-Za-z_$][\\w$]*)"
+                    + "\\s*(?=[=;,)])");
 
     private static final Set<String> KEYWORDS = Set.of(
             "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char",
@@ -34,6 +37,9 @@ public final class JavaFastCompletionProvider {
             "static", "strictfp", "super", "switch", "synchronized", "this", "throw",
             "throws", "transient", "true", "try", "var", "void", "volatile", "while",
             "yield", "permits", "non-sealed");
+
+    private static final Set<String> DECLARABLE_KEYWORD_TYPES = Set.of(
+            "boolean", "byte", "char", "double", "float", "int", "long", "short", "var");
 
     private static final List<String> COMMON_TYPES = List.of(
             "String", "Object", "Integer", "Long", "Double", "Boolean", "Character",
@@ -101,7 +107,7 @@ public final class JavaFastCompletionProvider {
             addMembers(candidates, type);
             addMembers(candidates, "Object");
             if ("this".equals(receiver) || type == null) {
-                symbolsOf(context.text(), "arquivo atual").stream()
+                declarationsOf(context.text(), "arquivo atual").stream()
                         .filter(symbol -> symbol.kind() == AutoCompleteItem.Kind.METHOD)
                         .forEach(symbol -> candidates.putIfAbsent(key(symbol), symbol));
             }
@@ -110,7 +116,10 @@ public final class JavaFastCompletionProvider {
                     new Symbol(value, AutoCompleteItem.Kind.KEYWORD, "palavra-chave Java")));
             COMMON_TYPES.forEach(value -> put(candidates,
                     new Symbol(value, AutoCompleteItem.Kind.CLASS, "Java")));
-            symbolsOf(context.text(), "arquivo atual").forEach(symbol -> put(candidates, symbol));
+            declarationsOf(context.text(), "arquivo atual")
+                    .forEach(symbol -> put(candidates, symbol));
+            visibleVariables(context.text(), context.prefixOffset(), "visivel no escopo")
+                    .forEach(symbol -> put(candidates, symbol));
             if (projectIndex != null) {
                 projectIndex.projectSymbols().forEach(symbol -> put(candidates,
                         new Symbol(symbol.name(), kindOf(symbol.kind()), symbol.detail())));
@@ -179,7 +188,7 @@ public final class JavaFastCompletionProvider {
         }
     }
 
-    private static List<Symbol> symbolsOf(String source, String detail) {
+    private static List<Symbol> declarationsOf(String source, String detail) {
         if (source == null || source.isBlank()) return List.of();
         String code = structural(source);
         Map<String, Symbol> found = new LinkedHashMap<>();
@@ -199,15 +208,24 @@ public final class JavaFastCompletionProvider {
                 put(found, new Symbol(name, AutoCompleteItem.Kind.METHOD, detail));
             }
         }
-        Matcher identifiers = IDENTIFIER.matcher(code);
-        int count = 0;
-        while (identifiers.find() && count++ < 2_000) {
-            String name = identifiers.group();
-            if (name.length() > 1 && !KEYWORDS.contains(name)) {
-                AutoCompleteItem.Kind kind = Character.isUpperCase(name.charAt(0))
-                        ? AutoCompleteItem.Kind.CLASS : AutoCompleteItem.Kind.VARIABLE;
-                put(found, new Symbol(name, kind, detail));
+        return List.copyOf(found.values());
+    }
+
+    private static List<Symbol> visibleVariables(String source, int caretOffset, String detail) {
+        if (source == null || source.isBlank()) return List.of();
+        String code = structural(source);
+        int limit = caretOffset < 0 ? code.length() : Math.min(caretOffset, code.length());
+        Map<String, Symbol> found = new LinkedHashMap<>();
+        Matcher declarations = DECLARATION.matcher(code.substring(0, limit));
+        while (declarations.find()) {
+            String type = declarations.group(1).replaceAll("\\s+", "");
+            String name = declarations.group(2);
+            if (KEYWORDS.contains(name)
+                    || (KEYWORDS.contains(type) && !DECLARABLE_KEYWORD_TYPES.contains(type))) {
+                continue;
             }
+            put(found, new Symbol(name, AutoCompleteItem.Kind.VARIABLE,
+                    "var".equals(type) ? detail : type));
         }
         return List.copyOf(found.values());
     }

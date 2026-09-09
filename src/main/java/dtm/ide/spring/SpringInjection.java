@@ -9,7 +9,8 @@ public record SpringInjection(
         Kind kind,
         Path file,
         int line,
-        String qualifier
+        String qualifier,
+        java.util.List<String> annotations
 ) {
 
     public enum Kind {
@@ -23,8 +24,14 @@ public record SpringInjection(
         targetType = targetType == null ? "" : targetType.trim();
         memberName = memberName == null ? "" : memberName.trim();
         qualifier = qualifier == null ? "" : qualifier.trim();
+        annotations = annotations == null ? java.util.List.of() : java.util.List.copyOf(annotations);
         kind = kind == null ? Kind.FIELD : kind;
         line = Math.max(1, line);
+    }
+
+    public SpringInjection(String ownerType, String targetType, String memberName, Kind kind,
+                           Path file, int line, String qualifier) {
+        this(ownerType, targetType, memberName, kind, file, line, qualifier, java.util.List.of());
     }
 
     public boolean hasQualifier() {
