@@ -141,6 +141,7 @@ import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.LanguageLevelEditor;
 import dtm.ide.project.ProjectLayout;
 import dtm.ide.project.JavaProjectDescriptor;
+import dtm.ide.project.JavaProjectSources;
 import dtm.ide.project.JdtOutputIsolation;
 import dtm.ide.refactor.JavaSafeDeleteScanner;
 import dtm.ide.sdk.BuildToolProvisioner;
@@ -334,11 +335,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final Map<RunConfigurationKey, RunProcessHandle> runningProcesses =
             new ConcurrentHashMap<>();
     private final Set<Path> debugSteppedFiles = ConcurrentHashMap.newKeySet();
-    private final ExecutorService background = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = new Thread(runnable, "java-orion-support");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ExecutorService background = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("java-orion-support-", 0).factory());
     private final ScheduledExecutorService codeActionDelayExecutor =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "java-code-action-lamp");
@@ -468,6 +466,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         lifecycle.incrementAndGet();
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
+            lsp.resetProjectState();
             background.submit(lsp::stop);
         }
 
@@ -486,6 +485,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         unregisterFileWatcher();
         lexicalIndex.clear();
         springIndex.clear();
+        todoScanner.clear();
+        if (todoPanel != null) {
+            todoPanel.setItems(List.of(), null);
+        }
+        RunFormChoicesLoader choicesLoader = runFormChoicesLoader;
+        if (choicesLoader != null) {
+            choicesLoader.invalidate();
+        }
+        buildToolsSyncPending.set(false);
         springConfigIndex = SpringConfigIndex.empty();
         springMetadata = SpringConfigMetadata.builtIn();
         lastBuildDiagnostics.clear();
@@ -495,6 +503,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         refreshProblemsPanel();
         clearCoverage();
         detachAllCoverageGutters();
+        javaEditors.clear();
         lspProgress.set(0);
         hideProgress(LSP_PROGRESS_ID);
         SwingUtilities.invokeLater(this::hideCodeActionLamp);
@@ -510,13 +519,16 @@ public class JavaIdeAdapter extends IdeAdapter {
             stopLanguageServerAsync(lsp);
         }
         unregisterFileWatcher();
+        autoCompleteIdle.cancel();
         springIndex.shutdown();
+        lexicalIndex.shutdown();
         codeActionDelayExecutor.shutdownNow();
+        autoCompleteIdleExecutor.shutdownNow();
         background.shutdownNow();
     }
 
     private static void stopLanguageServerAsync(JdtLsService lsp) {
-        Thread stopper = new Thread(lsp::stop, "java-orion-support-unload");
+        Thread stopper = new Thread(lsp::shutdown, "java-orion-support-unload");
         stopper.setDaemon(true);
         stopper.start();
     }
@@ -556,12 +568,13 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (!current(ticket, root) || described == null) {
                 return;
             }
-            lexicalIndex.rebuild(described);
+            JavaProjectSources sources = JavaProjectSources.collect(described);
+            lexicalIndex.rebuild(described, sources);
             if (settings().getLanguageServerMode().startsServer()) {
                 ensureLanguageServer();
             }
             resolveProjectJdk(ticket, root);
-            setupSpring(ticket, root);
+            setupSpring(ticket, root, sources);
             SwingUtilities.invokeLater(() -> refreshUiAfterDescribe(ticket, root));
         });
     }
@@ -622,12 +635,13 @@ public class JavaIdeAdapter extends IdeAdapter {
 
                 log.info("Projeto Java vinculado: {} ({}, {} modulo(s), spring={})",
                         root, described.kind().key(), described.modules().size(), described.spring());
-                lexicalIndex.rebuild(described);
+                JavaProjectSources sources = JavaProjectSources.collect(described);
+                lexicalIndex.rebuild(described, sources);
                 if (settings().getLanguageServerMode().startsServer()) {
                     ensureLanguageServer();
                 }
                 resolveProjectJdk(ticket, root);
-                setupSpring(ticket, root);
+                setupSpring(ticket, root, sources);
                 SwingUtilities.invokeLater(() -> refreshUiAfterDescribe(ticket, root));
             } finally {
                 logSlowBind(started, callerThread);
@@ -745,6 +759,11 @@ public class JavaIdeAdapter extends IdeAdapter {
                 log.warn("IntelliSense Java indisponivel", error);
                 setStatusBarText(text("status.lspUnavailable", "Java: IntelliSense indisponivel")
                         + " - " + rootMessage(error));
+                JavaProjectDescriptor activeDescriptor = descriptor;
+                if (activeDescriptor != null && activeDescriptor.spring()
+                        && settings().isSpringSupport()) {
+                    loadSpringMetadata(ticket, root);
+                }
             }
             finishDiagnosticReanalysis(ticket, root, error == null && lsp.isReady());
         });
@@ -918,6 +937,12 @@ public class JavaIdeAdapter extends IdeAdapter {
             hideProgress(LSP_PROGRESS_ID);
             if (languageServerReadyHandled.compareAndSet(false, true)) {
                 refreshJavaEditorsAfterIndexing();
+                Path root = projectRoot;
+                JavaProjectDescriptor current = descriptor;
+                if (root != null && current != null && current.spring()
+                        && settings().isSpringSupport()) {
+                    loadSpringMetadata(lifecycle.get(), root);
+                }
             }
             return;
         }
@@ -1653,11 +1678,15 @@ public class JavaIdeAdapter extends IdeAdapter {
     private void onWatchedJavaFile(Path file, JavaFileChangeRouter.Change change) {
         if (change == JavaFileChangeRouter.Change.DELETED) {
             forgetJavaFile(file);
+            JdtLsService lsp = jdtLs;
+            if (lsp != null) {
+                lsp.pathDeleted(file);
+            }
             return;
         }
         String content = JavaProjectConventions.readOrEmpty(file);
         lexicalIndex.refreshFile(file, content);
-        refreshSpringIndexFor(file);
+        refreshSpringIndexFor(file, content);
 
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
@@ -1680,22 +1709,30 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void onWatchedBuildFile(Path file, JavaFileChangeRouter.Change change) {
-        if (change == JavaFileChangeRouter.Change.DELETED) {
-            return;
-        }
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
-            lsp.pathChanged(file);
+            if (change == JavaFileChangeRouter.Change.DELETED) {
+                lsp.pathDeleted(file);
+            } else {
+                lsp.pathChanged(file);
+            }
             lsp.projectConfigurationUpdate();
         }
+        onBuildFileChanged(file);
     }
 
-    private void refreshSpringIndexFor(Path file) {
+    private void refreshSpringIndexFor(Path file, String content) {
         JavaProjectDescriptor current = descriptor;
-        if (current == null || !current.spring() || !settings().isSpringSupport()) {
+        Path root = projectRoot;
+        long ticket = lifecycle.get();
+        if (current == null || root == null || !current.spring()
+                || !settings().isSpringSupport()) {
             return;
         }
-        springIndex.refreshFile(file).thenAccept(snapshot -> {
+        springIndex.refreshFile(file, content).thenAccept(snapshot -> {
+            if (!current(ticket, root)) {
+                return;
+            }
             requestRefreshCodeLenses(file);
             SpringExplorerPanel panel = springPanel;
             if (panel != null) {
@@ -1706,14 +1743,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void forgetJavaFile(Path file) {
         lexicalIndex.refreshFile(file, "");
+        if (todoScanner.forget(file) && todoPanel != null) {
+            todoPanel.setItems(todoScanner.items(), projectRoot);
+        }
         JavaProjectDescriptor current = descriptor;
         if (current != null && current.spring() && settings().isSpringSupport()) {
-            springIndex.refreshFile(file).thenAccept(snapshot -> {
-                SpringExplorerPanel panel = springPanel;
-                if (panel != null) {
-                    panel.reload();
-                }
-            });
+            refreshSpringIndexFor(file, "");
         }
     }
 
@@ -1737,6 +1772,13 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         Path deleted = path.toAbsolutePath().normalize();
+        if (JavaProjectConventions.isJava(deleted)) {
+            forgetJavaFile(deleted);
+        }
+        if (JavaProjectConventions.isMavenPom(deleted)
+                || JavaProjectConventions.isGradleBuildFile(deleted)) {
+            onBuildFileChanged(deleted);
+        }
         lastBuildDiagnostics.remove(deleted);
         lastBuildProblems = lastBuildProblems.stream()
                 .filter(problem -> problem.file() == null || !problem.file().startsWith(deleted))
@@ -4024,13 +4066,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         lexicalIndex.refreshFile(filePath, content);
         JavaProjectDescriptor current = descriptor;
         if (current != null && current.spring() && JavaProjectConventions.isJava(filePath)) {
-            springIndex.refreshFile(filePath).thenAccept(snapshot -> {
-                requestRefreshCodeLenses(filePath);
-                SpringExplorerPanel panel = springPanel;
-                if (panel != null) {
-                    panel.reload();
-                }
-            });
+            refreshSpringIndexFor(filePath, content);
         }
         if (JavaProjectConventions.isJava(filePath) && debugSession != null
                 && settings().getHotReloadMode() == HotReloadMode.AUTOMATIC) {
@@ -6160,16 +6196,21 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void setupSpring(long ticket, Path root) {
+        setupSpring(ticket, root, null);
+    }
+
+    private void setupSpring(long ticket, Path root, JavaProjectSources sources) {
         JavaProjectDescriptor current = descriptor;
         if (current == null || !current.spring() || !settings().isSpringSupport()) {
             return;
         }
-        springIndex.rebuild(current).thenAccept(snapshot -> {
+        springIndex.rebuild(current, sources).thenAccept(snapshot -> {
             if (!current(ticket, root)) {
                 return;
             }
             springMetadata = springMetadata.withProjectProperties(projectConfigProperties());
-            snapshot.beansIn(root).forEach(bean -> requestRefreshCodeLenses(bean.file()));
+            snapshot.beans().stream().map(SpringBean::file).distinct()
+                    .forEach(this::requestRefreshCodeLenses);
             javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
             SwingUtilities.invokeLater(() -> {
                 if (!current(ticket, root)) {
@@ -6183,7 +6224,9 @@ public class JavaIdeAdapter extends IdeAdapter {
                         + snapshot.endpoints().size() + " endpoint(s)");
             });
         });
-        loadSpringMetadata(ticket, root);
+        if (!settings().getLanguageServerMode().startsServer()) {
+            loadSpringMetadata(ticket, root);
+        }
         loadSpringConfigIndex(ticket, root);
         SwingUtilities.invokeLater(() -> {
             if (current(ticket, root)) {

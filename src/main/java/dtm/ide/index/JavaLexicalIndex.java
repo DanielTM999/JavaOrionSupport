@@ -1,29 +1,33 @@
 package dtm.ide.index;
 
-import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
+import dtm.ide.project.JavaProjectSources;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
 import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.api.SymbolKind;
+import lombok.extern.slf4j.Slf4j;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+@Slf4j
 public final class JavaLexicalIndex {
 
-    private static final int MAX_FILES = 20_000;
     private static final int SIGNATURE_LONGS = 32;
     private static final int SIGNATURE_BITS = SIGNATURE_LONGS * 64;
     private static final int MAX_USAGE_FILES = 4_000;
@@ -56,62 +60,119 @@ public final class JavaLexicalIndex {
         }
     }
 
+    private record IndexedFile(List<Declaration> declarations, FileSignature signature,
+                               Map<String, ProjectSymbol> symbols) {
+    }
+
+    private static final class State {
+        private final Map<Path, IndexedFile> files = new LinkedHashMap<>();
+        private final Map<String, LinkedHashMap<Path, List<Declaration>>> declarations =
+                new LinkedHashMap<>();
+        private final Map<String, LinkedHashMap<Path, ProjectSymbol>> symbols =
+                new LinkedHashMap<>();
+    }
+
     private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "java-lexical-index");
         thread.setDaemon(true);
         return thread;
     });
-    private final AtomicReference<Snapshot> snapshot = new AtomicReference<>(Snapshot.empty());
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
     private final AtomicLong generation = new AtomicLong();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private State state = new State();
 
     public Snapshot snapshot() {
-        return snapshot.get();
+        lock.readLock().lock();
+        try {
+            Map<String, List<Declaration>> declarations = new LinkedHashMap<>();
+            state.declarations.forEach((name, byFile) -> declarations.put(name,
+                    byFile.values().stream().flatMap(List::stream).toList()));
+            List<FileSignature> files = state.files.values().stream()
+                    .map(IndexedFile::signature).toList();
+            return new Snapshot(Map.copyOf(declarations), files, projectSymbolsLocked());
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     public boolean isEmpty() {
-        return snapshot.get().declarations().isEmpty();
+        lock.readLock().lock();
+        try {
+            return state.declarations.isEmpty();
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     public void clear() {
         generation.incrementAndGet();
-        executor.submit(() -> snapshot.set(Snapshot.empty()));
+        submit(() -> replaceState(new State()));
     }
 
     public void rebuild(JavaProjectDescriptor descriptor) {
+        rebuild(descriptor, descriptor == null ? null : JavaProjectSources.collect(descriptor));
+    }
+
+    public void rebuild(JavaProjectDescriptor descriptor, JavaProjectSources sources) {
         long ticket = generation.incrementAndGet();
-        if (descriptor == null) {
-            executor.submit(() -> snapshot.set(Snapshot.empty()));
+        if (descriptor == null || sources == null) {
+            submit(() -> replaceState(new State()));
             return;
         }
-        executor.submit(() -> {
-            Snapshot scanned = scan(descriptor, ticket);
+        submit(() -> {
+            long started = System.nanoTime();
+            State rebuilt = new State();
+            for (JavaProjectSources.Source source : sources.files()) {
+                if (generation.get() != ticket) {
+                    return;
+                }
+                add(rebuilt, source.file(), parse(source.file(), source.content()));
+            }
             if (generation.get() == ticket) {
-                snapshot.set(scanned);
+                replaceState(rebuilt);
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                log.info("Indice Java local: {} arquivo(s), {} ms em {}",
+                        rebuilt.files.size(), elapsedMs, descriptor.root());
             }
         });
     }
 
     public void refreshFile(Path file, String source) {
-        if (!JavaProjectConventions.isJava(file) || file == null) {
+        if (file == null || !JavaProjectConventions.isJava(file)) {
             return;
         }
         Path normalized = file.toAbsolutePath().normalize();
-        executor.submit(() -> snapshot.updateAndGet(current -> merge(current, normalized, source)));
+        submit(() -> {
+            IndexedFile indexed = parse(normalized, source);
+            lock.writeLock().lock();
+            try {
+                remove(state, normalized);
+                add(state, normalized, indexed);
+            } finally {
+                lock.writeLock().unlock();
+            }
+        });
     }
 
     public List<Location> definitions(String name) {
         if (name == null || name.isBlank()) {
             return List.of();
         }
-        List<Declaration> declared = snapshot.get().declarations().get(name);
-        if (declared == null || declared.isEmpty()) {
-            return List.of();
+        lock.readLock().lock();
+        try {
+            Map<Path, List<Declaration>> byFile = state.declarations.get(name);
+            if (byFile == null || byFile.isEmpty()) {
+                return List.of();
+            }
+            List<Location> locations = new ArrayList<>();
+            byFile.values().forEach(declarations -> declarations.forEach(declaration ->
+                    locations.add(Location.of(declaration.file().toUri().toString(),
+                            declaration.range()))));
+            return List.copyOf(locations);
+        } finally {
+            lock.readLock().unlock();
         }
-        List<Location> locations = new ArrayList<>(declared.size());
-        for (Declaration declaration : declared) {
-            locations.add(Location.of(declaration.file().toUri().toString(), declaration.range()));
-        }
-        return List.copyOf(locations);
     }
 
     public List<DocumentSymbol> outline(String source) {
@@ -122,15 +183,21 @@ public final class JavaLexicalIndex {
         if (name == null || name.length() < 2 || JavaLexicalSource.isKeyword(name)) {
             return List.of();
         }
-        Snapshot current = snapshot.get();
-        if (current.files().isEmpty()) {
+        List<FileSignature> signatures;
+        lock.readLock().lock();
+        try {
+            signatures = state.files.values().stream().map(IndexedFile::signature).toList();
+        } finally {
+            lock.readLock().unlock();
+        }
+        if (signatures.isEmpty()) {
             return List.of();
         }
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(1, budgetMs));
         Set<String> target = Set.of(name);
         List<Location> found = new ArrayList<>();
         int visited = 0;
-        for (FileSignature signature : current.files()) {
+        for (FileSignature signature : signatures) {
             if (found.size() >= MAX_USAGES || visited >= MAX_USAGE_FILES
                     || System.nanoTime() > deadline) {
                 break;
@@ -158,6 +225,9 @@ public final class JavaLexicalIndex {
     }
 
     public boolean awaitIdle(long timeoutMs) {
+        if (closed.get()) {
+            return executor.isTerminated() || executor.isShutdown();
+        }
         try {
             executor.submit(() -> {
             }).get(timeoutMs, TimeUnit.MILLISECONDS);
@@ -171,48 +241,51 @@ public final class JavaLexicalIndex {
     }
 
     public Collection<ProjectSymbol> projectSymbols() {
-        return snapshot.get().projectSymbols().values();
-    }
-
-    private Snapshot scan(JavaProjectDescriptor descriptor, long ticket) {
-        Map<String, List<Declaration>> declarations = new LinkedHashMap<>();
-        List<FileSignature> files = new ArrayList<>();
-        Map<String, ProjectSymbol> symbols = new LinkedHashMap<>();
-        int visited = 0;
-
-        outer:
-        for (JavaModule module : descriptor.modules()) {
-            List<Path> roots = new ArrayList<>(module.existingSourceRoots());
-            roots.addAll(module.existingTestRoots());
-            for (Path root : roots) {
-                int remaining = MAX_FILES - visited;
-                if (remaining <= 0 || generation.get() != ticket) {
-                    break outer;
-                }
-                for (Path file : JavaProjectConventions.javaSources(root, 0, remaining)) {
-                    if (generation.get() != ticket) {
-                        break outer;
-                    }
-                    visited++;
-                    indexFile(file.toAbsolutePath().normalize(),
-                            JavaProjectConventions.readOrEmpty(file), declarations, files, symbols);
-                }
-            }
+        lock.readLock().lock();
+        try {
+            return projectSymbolsLocked().values();
+        } finally {
+            lock.readLock().unlock();
         }
-        return freeze(declarations, files, symbols);
     }
 
-    private static void indexFile(Path file, String source,
-                                  Map<String, List<Declaration>> declarations,
-                                  List<FileSignature> files,
-                                  Map<String, ProjectSymbol> symbols) {
-        if (source == null || source.isBlank()) {
+    public void shutdown() {
+        if (closed.compareAndSet(false, true)) {
+            generation.incrementAndGet();
+            executor.shutdownNow();
+        }
+    }
+
+    private void submit(Runnable task) {
+        if (closed.get()) {
             return;
         }
+        try {
+            executor.submit(task);
+        } catch (RejectedExecutionException ignored) {
+            // Shutdown raced with an editor or watcher callback.
+        }
+    }
+
+    private void replaceState(State replacement) {
+        lock.writeLock().lock();
+        try {
+            state = replacement;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    private static IndexedFile parse(Path file, String source) {
+        if (source == null || source.isBlank()) {
+            return null;
+        }
+        List<Declaration> declarations = new ArrayList<>();
+        Map<String, ProjectSymbol> symbols = new LinkedHashMap<>();
         String detail = file.getFileName() == null ? "" : file.getFileName().toString();
         for (JavaLexicalSource.Declared declared : JavaLexicalSource.declarations(source)) {
-            declarations.computeIfAbsent(declared.name(), key -> new ArrayList<>())
-                    .add(new Declaration(declared.name(), declared.kind(), file, declared.range()));
+            declarations.add(new Declaration(declared.name(), declared.kind(), file,
+                    declared.range()));
             symbols.put(declared.name(),
                     new ProjectSymbol(declared.name(), declared.kind(), detail));
         }
@@ -222,39 +295,62 @@ public final class JavaLexicalIndex {
                         Character.isUpperCase(name.charAt(0))
                                 ? SymbolKind.CLASS : SymbolKind.VARIABLE,
                         detail)));
-        files.add(new FileSignature(file, signatureOf(masked)));
+        return new IndexedFile(List.copyOf(declarations),
+                new FileSignature(file, signatureOf(masked)), Map.copyOf(symbols));
     }
 
-    private static Snapshot freeze(Map<String, List<Declaration>> declarations,
-                                   List<FileSignature> files,
-                                   Map<String, ProjectSymbol> symbols) {
-        Map<String, List<Declaration>> frozen = new LinkedHashMap<>(declarations.size());
-        declarations.forEach((key, value) -> frozen.put(key, List.copyOf(value)));
-        return new Snapshot(Map.copyOf(frozen), List.copyOf(files), Map.copyOf(symbols));
+    private static void add(State target, Path file, IndexedFile indexed) {
+        if (indexed == null) {
+            return;
+        }
+        target.files.put(file, indexed);
+        Map<String, List<Declaration>> byName = new LinkedHashMap<>();
+        for (Declaration declaration : indexed.declarations()) {
+            byName.computeIfAbsent(declaration.name(), ignored -> new ArrayList<>())
+                    .add(declaration);
+        }
+        byName.forEach((name, declarations) -> target.declarations
+                .computeIfAbsent(name, ignored -> new LinkedHashMap<>())
+                .put(file, List.copyOf(declarations)));
+        indexed.symbols().forEach((name, symbol) -> target.symbols
+                .computeIfAbsent(name, ignored -> new LinkedHashMap<>()).put(file, symbol));
     }
 
-    private static Snapshot merge(Snapshot current, Path file, String source) {
-        Map<String, List<Declaration>> declarations = new LinkedHashMap<>();
-        current.declarations().forEach((key, value) -> {
-            List<Declaration> kept = new ArrayList<>(value.size());
-            for (Declaration declaration : value) {
-                if (!declaration.file().equals(file)) {
-                    kept.add(declaration);
-                }
+    private static void remove(State target, Path file) {
+        IndexedFile previous = target.files.remove(file);
+        if (previous == null) {
+            return;
+        }
+        Set<String> declaredNames = new LinkedHashSet<>();
+        previous.declarations().forEach(declaration -> declaredNames.add(declaration.name()));
+        declaredNames.forEach(name -> removeContribution(target.declarations, name, file));
+        previous.symbols().keySet().forEach(name -> removeContribution(target.symbols, name, file));
+    }
+
+    private static <T> void removeContribution(
+            Map<String, LinkedHashMap<Path, T>> index, String name, Path file) {
+        LinkedHashMap<Path, T> byFile = index.get(name);
+        if (byFile == null) {
+            return;
+        }
+        byFile.remove(file);
+        if (byFile.isEmpty()) {
+            index.remove(name);
+        }
+    }
+
+    private Map<String, ProjectSymbol> projectSymbolsLocked() {
+        Map<String, ProjectSymbol> merged = new LinkedHashMap<>();
+        state.symbols.forEach((name, byFile) -> {
+            ProjectSymbol selected = null;
+            for (ProjectSymbol contribution : byFile.values()) {
+                selected = contribution;
             }
-            if (!kept.isEmpty()) {
-                declarations.put(key, kept);
+            if (selected != null) {
+                merged.put(name, selected);
             }
         });
-        List<FileSignature> files = new ArrayList<>(current.files().size() + 1);
-        for (FileSignature signature : current.files()) {
-            if (!signature.file().equals(file)) {
-                files.add(signature);
-            }
-        }
-        Map<String, ProjectSymbol> symbols = new LinkedHashMap<>(current.projectSymbols());
-        indexFile(file, source, declarations, files, symbols);
-        return freeze(declarations, files, symbols);
+        return Map.copyOf(merged);
     }
 
     private static long[] signatureOf(String maskedCode) {
@@ -274,5 +370,4 @@ public final class JavaLexicalIndex {
                 Math.floorMod(first, SIGNATURE_BITS),
                 Math.floorMod(second, SIGNATURE_BITS)};
     }
-
 }

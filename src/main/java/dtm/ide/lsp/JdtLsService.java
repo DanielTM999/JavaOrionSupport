@@ -138,11 +138,8 @@ public class JdtLsService {
     private final JdtLsProvisioner provisioner;
     private final JdtLsExtensionBundles bundles;
     private final Consumer<Path> onDiagnosticsPublished;
-    private final ExecutorService executor = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = new Thread(runnable, "jdtls");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("jdtls-", 0).factory());
 
     private final Map<String, AtomicInteger> documentVersions = new ConcurrentHashMap<>();
     private final Map<String, String> openDocuments = new ConcurrentHashMap<>();
@@ -603,6 +600,21 @@ public class JdtLsService {
             }
         }
         stopProcess();
+    }
+
+    /** Clears document state when the adapter moves to another project. */
+    public void resetProjectState() {
+        openDocuments.clear();
+        documentVersions.clear();
+        syncedDocuments.clear();
+        clearNavigationCache(null);
+    }
+
+    /** Permanently releases this service. Unlike {@link #stop()}, it cannot be restarted. */
+    public void shutdown() {
+        stop();
+        resetProjectState();
+        executor.shutdownNow();
     }
 
     private void stopProcess() {

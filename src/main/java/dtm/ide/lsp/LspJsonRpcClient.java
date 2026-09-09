@@ -55,11 +55,8 @@ public final class LspJsonRpcClient {
             thread.setDaemon(true);
             return thread;
         });
-        this.requestExecutor = Executors.newCachedThreadPool(runnable -> {
-            Thread thread = new Thread(runnable, threadName + "-requests");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.requestExecutor = Executors.newThreadPerTaskExecutor(
+                Thread.ofVirtual().name(threadName + "-requests-", 0).factory());
         this.writerExecutor = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, threadName + "-writer");
             thread.setDaemon(true);
