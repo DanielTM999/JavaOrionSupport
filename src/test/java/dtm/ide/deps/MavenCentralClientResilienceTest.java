@@ -120,7 +120,7 @@ class MavenCentralClientResilienceTest {
             try (OutputStream output = exchange.getResponseBody()) {
                 output.write(body);
             }
-        }), cooldown, now::get);
+        }), null, cooldown, now::get);
     }
 
     private MavenCentralClient clientThatHangs() throws IOException {
@@ -131,7 +131,7 @@ class MavenCentralClientResilienceTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-        }), Duration.ofSeconds(60), now::get);
+        }), null, Duration.ofSeconds(60), now::get);
     }
 
     private String serve(com.sun.net.httpserver.HttpHandler handler) throws IOException {

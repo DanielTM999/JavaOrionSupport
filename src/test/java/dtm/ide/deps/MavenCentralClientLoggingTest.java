@@ -94,7 +94,7 @@ class MavenCentralClientLoggingTest {
 
     @Test
     void aFailedVersionLookupIsAlsoReported() throws Exception {
-        MavenCentralClient client = new MavenCentralClient(serve(500, "boom"));
+        MavenCentralClient client = new MavenCentralClient(serve(500, "boom"), metadataBase());
 
         assertEquals(List.of(), client.versions("com.acme", "widget"));
         assertEquals(1, warnings().size());
@@ -110,7 +110,7 @@ class MavenCentralClientLoggingTest {
 
     private String serve(int status, String body) throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/solrsearch/select", exchange -> {
+        server.createContext("/", exchange -> {
             byte[] payload = body.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(status, payload.length);
             try (OutputStream output = exchange.getResponseBody()) {
@@ -119,5 +119,9 @@ class MavenCentralClientLoggingTest {
         });
         server.start();
         return "http://127.0.0.1:" + server.getAddress().getPort() + "/solrsearch/select";
+    }
+
+    private String metadataBase() {
+        return "http://127.0.0.1:" + server.getAddress().getPort() + "/maven2";
     }
 }

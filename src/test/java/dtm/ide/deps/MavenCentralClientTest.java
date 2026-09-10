@@ -37,7 +37,7 @@ class MavenCentralClientTest {
 
     @Test
     void pastedCoordinatesBecomeAFieldQuery() {
-        assertEquals("g:\"com.fasterxml.jackson.core\" AND a:\"jackson-databind\"",
+        assertEquals("g:com.fasterxml.jackson.core AND a:jackson-databind",
                 MavenCentralClient.toSolrQuery("com.fasterxml.jackson.core:jackson-databind"));
     }
 
@@ -69,5 +69,25 @@ class MavenCentralClientTest {
         };
 
         assertEquals("1.18.46", client.latestStableVersion("org.projectlombok", "lombok"));
+    }
+
+    @Test
+    void versionsComeFromTheRepositoryMetadataNewestFirst() {
+        List<String> versions = MavenCentralClient.parseVersions("""
+                <metadata>
+                  <versioning>
+                    <latest>1.18.48</latest>
+                    <versions>
+                      <version>1.18.38</version>
+                      <version>1.18.46</version>
+                      <version> 1.18.44 </version>
+                      <version>1.18.48-RC1</version>
+                      <version>1.18.46</version>
+                    </versions>
+                  </versioning>
+                </metadata>
+                """);
+
+        assertEquals(List.of("1.18.48-RC1", "1.18.46", "1.18.44", "1.18.38"), versions);
     }
 }
