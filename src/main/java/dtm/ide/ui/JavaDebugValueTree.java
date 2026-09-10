@@ -41,6 +41,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 public final class JavaDebugValueTree extends JPanel {
 
@@ -59,10 +60,17 @@ public final class JavaDebugValueTree extends JPanel {
             .setAnimated(true).setBlockGap(9);
     private final CardLayout cards = new CardLayout();
     private final JPanel content = new JPanel(cards);
+    private final Executor executor;
     private volatile ChildrenProvider childrenProvider = reference -> List.of();
 
     public JavaDebugValueTree() {
+        this(command -> Thread.startVirtualThread(command));
+    }
+
+    public JavaDebugValueTree(Executor executor) {
         super(new BorderLayout());
+        this.executor = executor == null
+                ? command -> Thread.startVirtualThread(command) : executor;
         setBackground(JavaDebugTheme.content());
         styleTree();
         ScrollPanel scroll = new ScrollPanel(tree).setScrollBarThickness(8)
@@ -224,7 +232,7 @@ public final class JavaDebugValueTree extends JPanel {
             } catch (Exception error) {
                 return List.<JavaDebugSnapshot.Variable>of();
             }
-        }).thenAccept(values -> SwingUtilities.invokeLater(() -> {
+        }, executor).thenAccept(values -> SwingUtilities.invokeLater(() -> {
             node.removeAllChildren();
             values.forEach(value -> node.add(variableNode(value)));
             if (values.isEmpty()) {

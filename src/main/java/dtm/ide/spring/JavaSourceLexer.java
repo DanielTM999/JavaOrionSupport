@@ -199,14 +199,56 @@ public final class JavaSourceLexer {
             }
             start--;
         }
-        String region = source.literal().substring(Math.max(0, start), position);
         List<Annotation> annotations = new ArrayList<>();
-        Matcher matcher = ANNOTATION.matcher(region);
-        while (matcher.find()) {
-            annotations.add(new Annotation(matcher.group(1),
-                    matcher.group(2) == null ? "" : matcher.group(2)));
+        String literal = source.literal();
+        int cursor = Math.max(0, start);
+        int limit = Math.min(position, code.length());
+        while (cursor < limit) {
+            int at = code.indexOf('@', cursor);
+            if (at < 0 || at >= limit) {
+                break;
+            }
+            int nameStart = at + 1;
+            int nameEnd = nameStart;
+            while (nameEnd < limit) {
+                char c = code.charAt(nameEnd);
+                if (!Character.isJavaIdentifierPart(c) && c != '.') {
+                    break;
+                }
+                nameEnd++;
+            }
+            if (nameEnd == nameStart) {
+                cursor = at + 1;
+                continue;
+            }
+            int next = nameEnd;
+            while (next < limit && Character.isWhitespace(code.charAt(next))) {
+                next++;
+            }
+            String arguments = "";
+            if (next < limit && code.charAt(next) == '(') {
+                int close = matchingParenthesis(code, next, limit);
+                arguments = literal.substring(next + 1, close);
+                cursor = Math.min(limit, close + 1);
+            } else {
+                cursor = nameEnd;
+            }
+            annotations.add(new Annotation(literal.substring(nameStart, nameEnd), arguments));
         }
         return annotations;
+    }
+
+    private static int matchingParenthesis(String code, int open, int limit) {
+        int depth = 0;
+        for (int i = open; i < limit; i++) {
+            char c = code.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')' && --depth == 0) {
+                return i;
+            }
+        }
+        return limit;
     }
 
     public static boolean hasAnnotation(List<Annotation> annotations, String simpleName) {
@@ -233,11 +275,73 @@ public final class JavaSourceLexer {
     }
 
     public static String firstStringLiteral(String arguments) {
-        if (arguments == null || arguments.isBlank()) {
+        List<String> literals = stringLiterals(arguments);
+        return literals.isEmpty() ? "" : literals.getFirst();
+    }
+
+    public static String concatenatedStringLiterals(String expression) {
+        if (expression == null || expression.isBlank()) {
             return "";
         }
-        Matcher matcher = STRING_LITERAL.matcher(arguments);
-        return matcher.find() ? matcher.group(1) : "";
+        StringBuilder value = new StringBuilder();
+        int cursor = 0;
+        boolean literalSeen = false;
+        boolean expectsLiteral = true;
+        while (cursor < expression.length()) {
+            char current = expression.charAt(cursor);
+            if (Character.isWhitespace(current)) {
+                cursor++;
+                continue;
+            }
+            if (expression.startsWith("//", cursor)) {
+                int newline = expression.indexOf('\n', cursor + 2);
+                cursor = newline < 0 ? expression.length() : newline + 1;
+                continue;
+            }
+            if (expression.startsWith("/*", cursor)) {
+                int close = expression.indexOf("*/", cursor + 2);
+                if (close < 0) {
+                    return "";
+                }
+                cursor = close + 2;
+                continue;
+            }
+            if (current == '(' || current == ')') {
+                cursor++;
+                continue;
+            }
+            if (current == '+') {
+                if (expectsLiteral || !literalSeen) {
+                    return "";
+                }
+                expectsLiteral = true;
+                cursor++;
+                continue;
+            }
+            if (current != '"' || !expectsLiteral) {
+                return "";
+            }
+            int end;
+            int delimiter;
+            if (expression.startsWith("\"\"\"", cursor)) {
+                end = textBlockEnd(expression, cursor);
+                delimiter = 3;
+            } else {
+                end = stringLiteralEnd(expression, cursor);
+                delimiter = 1;
+            }
+            boolean closed = end >= cursor + delimiter * 2 && end <= expression.length()
+                    && expression.substring(end - delimiter, end)
+                    .equals(delimiter == 3 ? "\"\"\"" : "\"");
+            if (!closed) {
+                return "";
+            }
+            value.append(expression, cursor + delimiter, end - delimiter);
+            literalSeen = true;
+            expectsLiteral = false;
+            cursor = end;
+        }
+        return literalSeen && !expectsLiteral ? value.toString() : "";
     }
 
     public static List<String> stringLiterals(String arguments) {
@@ -245,11 +349,59 @@ public final class JavaSourceLexer {
             return List.of();
         }
         List<String> values = new ArrayList<>();
-        Matcher matcher = STRING_LITERAL.matcher(arguments);
-        while (matcher.find()) {
-            values.add(matcher.group(1));
+        int cursor = 0;
+        while (cursor < arguments.length()) {
+            int quote = arguments.indexOf('"', cursor);
+            if (quote < 0) {
+                break;
+            }
+            if (arguments.startsWith("\"\"\"", quote)) {
+                int close = textBlockEnd(arguments, quote);
+                boolean closed = close >= quote + 6 && close <= arguments.length()
+                        && arguments.startsWith("\"\"\"", close - 3);
+                int contentEnd = closed ? close - 3 : arguments.length();
+                values.add(arguments.substring(quote + 3, contentEnd));
+                cursor = Math.max(quote + 3, close);
+                continue;
+            }
+            int close = stringLiteralEnd(arguments, quote);
+            int contentEnd = close > quote && close <= arguments.length()
+                    && arguments.charAt(close - 1) == '"' ? close - 1 : close;
+            values.add(arguments.substring(quote + 1, Math.max(quote + 1, contentEnd)));
+            cursor = Math.max(quote + 1, close);
         }
-        return values;
+        return List.copyOf(values);
+    }
+
+    private static int textBlockEnd(String source, int at) {
+        int cursor = at + 3;
+        while (cursor < source.length()) {
+            if (source.charAt(cursor) == '\\') {
+                cursor = Math.min(source.length(), cursor + 2);
+            } else if (source.startsWith("\"\"\"", cursor)) {
+                return cursor + 3;
+            } else {
+                cursor++;
+            }
+        }
+        return source.length();
+    }
+
+    private static int stringLiteralEnd(String source, int at) {
+        int cursor = at + 1;
+        while (cursor < source.length()) {
+            char c = source.charAt(cursor);
+            if (c == '\\' && cursor + 1 < source.length()) {
+                cursor += 2;
+            } else if (c == '"') {
+                return cursor + 1;
+            } else if (c == '\n' || c == '\r') {
+                return cursor;
+            } else {
+                cursor++;
+            }
+        }
+        return cursor;
     }
 
     public static String namedArgument(String arguments, String name) {
@@ -260,13 +412,64 @@ public final class JavaSourceLexer {
         if (arguments == null || arguments.isBlank()) {
             return "";
         }
-        Matcher matcher = Pattern.compile("\\b" + Pattern.quote(name) + "\\s*=").matcher(arguments);
+        String searchable = maskLiteralsAndComments(arguments);
+        Matcher matcher = Pattern.compile("\\b" + Pattern.quote(name) + "\\s*=")
+                .matcher(searchable);
         if (!matcher.find()) {
             return "";
         }
-        String rest = arguments.substring(matcher.end());
-        Matcher next = Pattern.compile("\\b[A-Za-z_]\\w*\\s*=").matcher(rest);
-        return next.find() ? rest.substring(0, next.start()) : rest;
+        Matcher next = Pattern.compile("\\b[A-Za-z_]\\w*\\s*=")
+                .matcher(searchable.substring(matcher.end()));
+        int end = next.find() ? matcher.end() + next.start() : arguments.length();
+        return arguments.substring(matcher.end(), end);
+    }
+
+    public static String firstArgumentRegion(String arguments) {
+        if (arguments == null || arguments.isBlank()) {
+            return "";
+        }
+        String searchable = maskLiteralsAndComments(arguments);
+        int depth = 0;
+        for (int index = 0; index < searchable.length(); index++) {
+            char current = searchable.charAt(index);
+            if (current == '(' || current == '[' || current == '{') {
+                depth++;
+            } else if (current == ')' || current == ']' || current == '}') {
+                depth = Math.max(0, depth - 1);
+            } else if (current == ',' && depth == 0) {
+                return arguments.substring(0, index);
+            }
+        }
+        return arguments;
+    }
+
+    private static String maskLiteralsAndComments(String source) {
+        char[] masked = source.toCharArray();
+        int cursor = 0;
+        while (cursor < source.length()) {
+            int end;
+            if (source.startsWith("//", cursor)) {
+                int newline = source.indexOf('\n', cursor + 2);
+                end = newline < 0 ? source.length() : newline;
+            } else if (source.startsWith("/*", cursor)) {
+                int close = source.indexOf("*/", cursor + 2);
+                end = close < 0 ? source.length() : close + 2;
+            } else if (source.startsWith("\"\"\"", cursor)) {
+                end = textBlockEnd(source, cursor);
+            } else if (source.charAt(cursor) == '"') {
+                end = stringLiteralEnd(source, cursor);
+            } else {
+                cursor++;
+                continue;
+            }
+            for (int i = cursor; i < end; i++) {
+                if (masked[i] != '\n' && masked[i] != '\r') {
+                    masked[i] = ' ';
+                }
+            }
+            cursor = Math.max(cursor + 1, end);
+        }
+        return new String(masked);
     }
 
     public static List<Parameter> parseParameters(String rawParameters) {

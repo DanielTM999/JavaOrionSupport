@@ -68,12 +68,34 @@ public class DependencyService {
                 : GradleDependencyEditor.setVersion(content, coordinate, version));
     }
 
+    public boolean updateVersion(JavaModule module, ManagedDependency dependency, String version) {
+        if (dependency == null || dependency.declared() == null || !dependency.versionEditable()) {
+            return false;
+        }
+        return switch (dependency.versionOrigin()) {
+            case DIRECT -> updateVersion(module, dependency.declared(), version);
+            case LOCAL_PROPERTY -> rewrite(dependency.sourceFile(), content ->
+                    PomEditor.setProperty(content, dependency.propertyName(), version));
+            case LOCAL_MANAGEMENT -> rewrite(dependency.sourceFile(), content ->
+                    PomEditor.setManagedVersion(content, dependency.declared(), version));
+            case EXTERNAL_MANAGEMENT, UNRESOLVED -> false;
+        };
+    }
+
     private boolean rewrite(JavaModule module, java.util.function.UnaryOperator<String> transform) {
         Optional<Path> buildFile = buildFileOf(module);
         if (buildFile.isEmpty()) {
             return false;
         }
-        Path file = buildFile.get();
+        return rewrite(buildFile.get(), transform);
+    }
+
+    private boolean rewrite(Path file, java.util.function.UnaryOperator<String> transform) {
+        if (file == null || descriptor == null
+                || !file.toAbsolutePath().normalize().startsWith(descriptor.root())
+                || !Files.isRegularFile(file)) {
+            return false;
+        }
         try {
             String original = Files.readString(file);
             String updated = transform.apply(original);

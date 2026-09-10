@@ -25,6 +25,10 @@ Execute a suíte antes de começar para confirmar que o ambiente está correto:
 mvn test
 ```
 
+A execução também gera um relatório informativo de cobertura do próprio plugin em
+`target/site/jacoco/index.html`. Não há limite mínimo bloqueando o build; o relatório serve para
+orientar testes novos e localizar áreas pouco exercitadas.
+
 ## Build local
 
 Para compilar e gerar o plugin sem modificar a instalação local da Orion:
@@ -44,6 +48,13 @@ Para validar somente a compilação ou executar um teste específico:
 ```powershell
 mvn -DskipTests compile
 mvn "-Dtest=NomeDaClasseTest" test
+```
+
+O perfil opcional `jdtls-integration` exercita um JDT LS já provisionado, incluindo inicialização,
+edição, fechamento de documento, parada e reinicialização do servidor:
+
+```powershell
+mvn -Pjdtls-integration test
 ```
 
 ## Teste manual na Orion
@@ -122,6 +133,11 @@ Ao executar processos externos:
 - encaminhe a saída progressivamente;
 - respeite cancelamento e timeout;
 - converta erros estruturados em diagnósticos navegáveis quando houver arquivo e linha.
+
+Em JDKs recentes, a abertura do PTY pode imprimir um aviso de acesso nativo proveniente de
+JNA/pty4j. Enquanto ele for apenas aviso, não acrescente flags ao build do plugin. Para testes
+manuais em uma JDK que efetivamente bloqueie a chamada, inicie a Orion com
+`--enable-native-access=ALL-UNNAMED` e registre a versão exata da JDK e do pty4j no relatório.
 
 ## Testes
 

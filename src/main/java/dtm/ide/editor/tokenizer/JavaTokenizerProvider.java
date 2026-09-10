@@ -46,6 +46,9 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
     @Override
     public Collection<Token> tokenize(TokenizeChange change,
                                       TokenClassifierCodeEditorProvider classifier) {
+        if (change != null && queryAnnotationChanged(change)) {
+            return tokenize(change.newText(), classifier);
+        }
         return IncrementalTokenization.retokenizeFromSafeLine(change, classifier, this::tokenize);
     }
 
@@ -53,6 +56,7 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
     public Collection<Token> tokenize(String text, TokenClassifierCodeEditorProvider classifier) {
         String source = text == null ? "" : text;
         List<Token> tokens = new ArrayList<>(Math.max(16, source.length() / 4));
+        JpaQueryLiteralScanner.Scan queryLiterals = JpaQueryLiteralScanner.scan(source);
 
         int i = 0;
         while (i < source.length()) {
@@ -83,11 +87,22 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
             } else if (source.startsWith("\"\"\"", i)) {
                 int start = i;
                 i = textBlockEnd(source, i);
-                tokens.add(token(source, start, i, TOKEN_TEXT_BLOCK));
+                JpaQueryLiteralScanner.QueryLiteral query = queryLiterals.literalAt(start);
+                if (query == null) {
+                    tokens.add(token(source, start, i, TOKEN_TEXT_BLOCK));
+                } else {
+                    addQueryTokens(tokens, source, query, TOKEN_TEXT_BLOCK);
+                }
             } else if (c == '"' || c == '\'') {
                 int start = i;
                 i = stringEnd(source, i, c);
-                tokens.add(token(source, start, i, TokenType.STRING));
+                JpaQueryLiteralScanner.QueryLiteral query = c == '"'
+                        ? queryLiterals.literalAt(start) : null;
+                if (query == null) {
+                    tokens.add(token(source, start, i, TokenType.STRING));
+                } else {
+                    addQueryTokens(tokens, source, query, TokenType.STRING);
+                }
             } else if (c == '@' && i + 1 < source.length() && isIdentifierStart(source.charAt(i + 1))) {
                 int start = i;
                 i = annotationEnd(source, i);
@@ -110,6 +125,32 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
             }
         }
         return tokens;
+    }
+
+    private static boolean queryAnnotationChanged(TokenizeChange change) {
+        String oldText = change.oldText() == null ? "" : change.oldText();
+        String newText = change.newText() == null ? "" : change.newText();
+        int start = Math.max(0, change.changeOffset());
+        int oldEnd = Math.min(oldText.length(), start + Math.max(0, change.removedLength()));
+        int newEnd = Math.min(newText.length(), start
+                + (change.insertedText() == null ? 0 : change.insertedText().length()));
+        return JpaQueryLiteralScanner.scan(oldText).intersects(start, oldEnd)
+                || JpaQueryLiteralScanner.scan(newText).intersects(start, newEnd);
+    }
+
+    private static void addQueryTokens(List<Token> tokens, String source,
+                                       JpaQueryLiteralScanner.QueryLiteral query,
+                                       String delimiterType) {
+        if (query.contentStart() >= query.contentEnd()) {
+            tokens.add(token(source, query.start(), query.end(), delimiterType));
+            return;
+        }
+        tokens.add(token(source, query.start(), query.contentStart(), delimiterType));
+        tokens.addAll(JpaQueryTokenizer.tokenize(source, query.contentStart(), query.contentEnd(),
+                query.nativeSql()));
+        if (query.contentEnd() < query.end()) {
+            tokens.add(token(source, query.contentEnd(), query.end(), delimiterType));
+        }
     }
 
     private static String classifyWord(String source, int start, int end, String word,

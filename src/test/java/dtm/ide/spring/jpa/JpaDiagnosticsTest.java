@@ -111,7 +111,21 @@ class JpaDiagnosticsTest {
                     @Query("select c from Cliente c")
                     List<Cliente> findByQualquerCoisa();
                 }
-                """).isEmpty());
+        """).isEmpty());
+    }
+
+    @Test
+    void skipsDerivedValidationForAQueryInATextBlock() {
+        String repository = String.join("\n",
+                "package com.example;",
+                "public interface ClienteRepository extends JpaRepository<Cliente, Long> {",
+                "    @Query(\"\"\"",
+                "        select c from Cliente c where c.nome = :nome",
+                "        \"\"\")",
+                "    List<Cliente> findByNomeCompleto(@Param(\"nome\") String nome);",
+                "}");
+
+        assertTrue(analyze(repository).isEmpty());
     }
 
     @Test

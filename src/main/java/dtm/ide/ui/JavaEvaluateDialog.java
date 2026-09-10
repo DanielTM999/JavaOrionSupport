@@ -15,6 +15,7 @@ import java.awt.Cursor;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 public final class JavaEvaluateDialog extends JPanel {
 
@@ -28,15 +29,27 @@ public final class JavaEvaluateDialog extends JPanel {
     private final JButton addWatch = new JButton("Add Watch");
     private final JLabel status = new JLabel(" ");
     private final JProgressBar progress = new JProgressBar();
-    private final JavaDebugValueTree result = new JavaDebugValueTree();
+    private final JavaDebugValueTree result;
+    private final Executor executor;
     private final Evaluator evaluator;
     private final java.util.function.Consumer<String> watchConsumer;
 
     public JavaEvaluateDialog(String initialExpression, Evaluator evaluator,
                               JavaDebugValueTree.ChildrenProvider childrenProvider,
                               java.util.function.Consumer<String> watchConsumer) {
+        this(initialExpression, evaluator, childrenProvider, watchConsumer,
+                command -> Thread.startVirtualThread(command));
+    }
+
+    public JavaEvaluateDialog(String initialExpression, Evaluator evaluator,
+                              JavaDebugValueTree.ChildrenProvider childrenProvider,
+                              java.util.function.Consumer<String> watchConsumer,
+                              Executor executor) {
         super(new BorderLayout());
         this.evaluator = evaluator;
+        this.executor = executor == null
+                ? command -> Thread.startVirtualThread(command) : executor;
+        this.result = new JavaDebugValueTree(this.executor);
         this.watchConsumer = watchConsumer == null ? value -> { } : watchConsumer;
         result.bindChildrenProvider(childrenProvider);
         JPanel root = new JPanel(new BorderLayout(8, 8));
@@ -117,7 +130,7 @@ public final class JavaEvaluateDialog extends JPanel {
             } catch (Exception error) {
                 return new Evaluation(null, error);
             }
-        }).thenAccept(answer -> SwingUtilities.invokeLater(() -> {
+        }, executor).thenAccept(answer -> SwingUtilities.invokeLater(() -> {
             evaluate.setEnabled(true);
             addWatch.setEnabled(true);
             progress.setVisible(false);

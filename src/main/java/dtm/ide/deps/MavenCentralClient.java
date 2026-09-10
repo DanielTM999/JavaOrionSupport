@@ -16,18 +16,61 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 @Slf4j
-public final class MavenCentralClient {
+public class MavenCentralClient {
 
     private static final String SEARCH_URL = "https://search.maven.org/solrsearch/select";
-    private static final Duration TIMEOUT = Duration.ofSeconds(20);
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
+    private static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration MIN_REQUEST_TIMEOUT = Duration.ofSeconds(1);
+    private static final Duration MAX_REQUEST_TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration DEFAULT_COOLDOWN = Duration.ofSeconds(60);
     private static final int DEFAULT_ROWS = 30;
     private static final int VERSION_ROWS = 60;
 
     private final ObjectMapper mapper = new ObjectMapper();
     private volatile HttpClient http;
     private final Map<String, List<String>> versionCache = new ConcurrentHashMap<>();
+    private final String searchUrl;
+    private final long cooldownMillis;
+    private final LongSupplier clock;
+    private final AtomicLong openUntil = new AtomicLong();
+    private volatile Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT;
+
+    public MavenCentralClient() {
+        this(SEARCH_URL);
+    }
+
+    MavenCentralClient(String searchUrl) {
+        this(searchUrl, DEFAULT_COOLDOWN, System::currentTimeMillis);
+    }
+
+    MavenCentralClient(String searchUrl, Duration cooldown, LongSupplier clock) {
+        this.searchUrl = searchUrl == null || searchUrl.isBlank() ? SEARCH_URL : searchUrl;
+        this.cooldownMillis = cooldown == null ? DEFAULT_COOLDOWN.toMillis() : cooldown.toMillis();
+        this.clock = clock == null ? System::currentTimeMillis : clock;
+    }
+
+    public void setRequestTimeout(Duration timeout) {
+        if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+            requestTimeout = DEFAULT_REQUEST_TIMEOUT;
+            return;
+        }
+        if (timeout.compareTo(MIN_REQUEST_TIMEOUT) < 0) {
+            requestTimeout = MIN_REQUEST_TIMEOUT;
+        } else if (timeout.compareTo(MAX_REQUEST_TIMEOUT) > 0) {
+            requestTimeout = MAX_REQUEST_TIMEOUT;
+        } else {
+            requestTimeout = timeout;
+        }
+    }
+
+    public boolean isCoolingDown() {
+        return clock.getAsLong() < openUntil.get();
+    }
 
     public record SearchResult(DependencyCoordinate coordinate, int versionCount, long lastUpdated) {
     }
@@ -41,7 +84,7 @@ public final class MavenCentralClient {
             return Optional.of(List.of());
         }
         String solrQuery = toSolrQuery(query.trim());
-        JsonNode docs = get(SEARCH_URL + "?q=" + encode(solrQuery)
+        JsonNode docs = get(searchUrl + "?q=" + encode(solrQuery)
                 + "&rows=" + DEFAULT_ROWS + "&wt=json");
         if (docs == null) {
             return Optional.empty();
@@ -71,7 +114,7 @@ public final class MavenCentralClient {
             return cached;
         }
         String solrQuery = "g:\"" + groupId + "\" AND a:\"" + artifactId + "\"";
-        JsonNode docs = get(SEARCH_URL + "?q=" + encode(solrQuery)
+        JsonNode docs = get(searchUrl + "?q=" + encode(solrQuery)
                 + "&core=gav&rows=" + VERSION_ROWS + "&wt=json");
         if (docs == null) {
             return List.of();
@@ -90,7 +133,7 @@ public final class MavenCentralClient {
     public String latestStableVersion(String groupId, String artifactId) {
         return versions(groupId, artifactId).stream()
                 .filter(MavenCentralClient::isStable)
-                .findFirst()
+                .max(MavenVersionOrder::compare)
                 .orElse("");
     }
 
@@ -122,27 +165,55 @@ public final class MavenCentralClient {
     }
 
     private JsonNode get(String url) {
+        if (isCoolingDown()) {
+            log.debug("Maven Central em espera apos falha recente; consulta ignorada: {}", url);
+            return null;
+        }
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                     .header("Accept", "application/json")
                     .header("User-Agent", "JavaOrionSupport/1.0")
-                    .timeout(TIMEOUT)
+                    .timeout(requestTimeout)
                     .GET()
                     .build();
             HttpResponse<String> response = http().send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
-                log.debug("Maven Central respondeu {} para {}", response.statusCode(), url);
+                log.warn("Maven Central respondeu {} para {}", response.statusCode(), url);
+                startCooldown();
                 return null;
             }
             JsonNode docs = mapper.readTree(response.body()).path("response").path("docs");
-            return docs.isArray() ? docs : null;
+            if (!docs.isArray()) {
+                log.warn("Resposta inesperada do Maven Central para {}: sem a lista 'response.docs'",
+                        url);
+                startCooldown();
+                return null;
+            }
+            openUntil.set(0);
+            return docs;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            log.debug("Consulta ao Maven Central interrompida: {}", url);
+            startCooldown();
             return null;
         } catch (Exception e) {
-            log.debug("Falha ao consultar o Maven Central: {}", e.getMessage());
+            log.warn("Falha ao consultar o Maven Central em {}: {}", url, reason(e));
+            startCooldown();
             return null;
         }
+    }
+
+    private void startCooldown() {
+        long until = clock.getAsLong() + cooldownMillis;
+        openUntil.set(until);
+        log.debug("Maven Central em espera por {}ms apos a falha", cooldownMillis);
+    }
+
+    private static String reason(Throwable error) {
+        String message = error.getMessage();
+        return message == null || message.isBlank()
+                ? error.getClass().getSimpleName()
+                : error.getClass().getSimpleName() + ": " + message;
     }
 
     private HttpClient http() {
@@ -152,7 +223,7 @@ public final class MavenCentralClient {
             if (http == null) {
                 http = HttpClient.newBuilder()
                         .followRedirects(HttpClient.Redirect.NORMAL)
-                        .connectTimeout(TIMEOUT)
+                        .connectTimeout(CONNECT_TIMEOUT)
                         .build();
             }
             return http;

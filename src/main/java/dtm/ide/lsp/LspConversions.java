@@ -144,12 +144,13 @@ final class LspConversions {
             return null;
         }
 
-        String insert = label;
+        String fallback = simpleLabel(label);
+        String insert = fallback;
         JsonNode edit = node.get("textEdit");
         if (edit != null && edit.hasNonNull("newText")) {
-            insert = edit.get("newText").asText(label);
+            insert = edit.get("newText").asText(fallback);
         } else if (node.hasNonNull("insertText")) {
-            insert = node.get("insertText").asText(label);
+            insert = node.get("insertText").asText(fallback);
         }
 
         int lspKind = node.path("kind").asInt(1);
@@ -164,11 +165,31 @@ final class LspConversions {
         return new AutoCompleteItem(
                 insert,
                 label,
-                null,
+                labelDetails(node.get("labelDetails")),
                 completionDescription(detail, docs),
                 null,
                 kind,
                 textEdits(node.get("additionalTextEdits")));
+    }
+
+    static String labelDetails(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        String detail = node.path("detail").asText("").trim();
+        String description = node.path("description").asText("").trim();
+        String merged = (detail + " " + description).trim();
+        return merged.isEmpty() ? null : merged;
+    }
+
+    static String simpleLabel(String label) {
+        if (label == null) {
+            return null;
+        }
+        int separator = label.indexOf(" - ");
+        String head = separator < 0 ? label : label.substring(0, separator);
+        int signature = head.indexOf(" : ");
+        return (signature < 0 ? head : head.substring(0, signature)).trim();
     }
 
     static AutoCompleteItem.Kind completionKind(int lspKind, boolean snippet) {

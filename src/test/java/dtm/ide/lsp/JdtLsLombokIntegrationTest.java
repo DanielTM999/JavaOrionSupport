@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -99,6 +100,17 @@ class JdtLsLombokIntegrationTest {
         List<Location> definitions = service.definitionsInteractive(source, text,
                 builderLine, builderColumn);
         assertTrue(!definitions.isEmpty(), "builder() gerado deveria ter destino de navegacao");
+
+        service.closeDocument(source);
+        assertEquals(JdtLsService.ANY_VERSION, service.documentVersion(source));
+        service.stop();
+        assertEquals(JdtLsService.State.STOPPED, service.getState());
+
+        service.start(project, jdk.get(), DownloadProgressListener.NOOP).join();
+        assumeTrue(service.awaitReady(READY_TIMEOUT_MS),
+                "o JDT LS nao reiniciou depois do ciclo de parada");
+        service.openDocument(source, text);
+        assertTrue(service.documentVersion(source) > JdtLsService.ANY_VERSION);
     }
 
     private static int lineOf(String text, String needle) {

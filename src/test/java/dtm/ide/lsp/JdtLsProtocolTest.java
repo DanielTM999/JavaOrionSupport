@@ -160,6 +160,19 @@ class JdtLsProtocolTest {
         assertTrue(elapsedMs < 2_000, "a navegacao esperou " + elapsedMs + " ms");
     }
 
+    @Test
+    void closingASynchronizedDocumentSendsDidCloseAndDropsItsVersion() throws Exception {
+        service.openDocument(FILE, TEXT);
+        drainNotifications();
+
+        service.closeDocument(FILE);
+
+        JsonNode notification = awaitRequest("textDocument/didClose");
+        assertEquals(FILE.toUri().toString(),
+                notification.path("params").path("textDocument").path("uri").asText());
+        assertEquals(JdtLsService.ANY_VERSION, service.documentVersion(FILE));
+    }
+
     private void serve() {
         try {
             while (running) {

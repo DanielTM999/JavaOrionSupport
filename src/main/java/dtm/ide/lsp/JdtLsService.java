@@ -42,7 +42,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -122,6 +121,7 @@ public class JdtLsService {
     private static final long CODE_LENS_RETRY_TIMEOUT_MS = 20_000;
     private static final int MAX_CODE_LENS_RETRIES = 2;
     private static final long CODE_LENS_WORK_REFRESH_COOLDOWN_MS = 2_000;
+    private static final long WARM_UP_TIMEOUT_MS = 8_000;
 
     private static final List<String> TOKEN_TYPES = List.of(
             "namespace", "class", "interface", "enum", "enumMember", "type", "typeParameter",
@@ -141,9 +141,7 @@ public class JdtLsService {
     private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
             Thread.ofVirtual().name("jdtls-", 0).factory());
 
-    private final Map<String, AtomicInteger> documentVersions = new ConcurrentHashMap<>();
-    private final Map<String, String> openDocuments = new ConcurrentHashMap<>();
-    private final Set<String> syncedDocuments = ConcurrentHashMap.newKeySet();
+    private final JdtDocumentStore documents = new JdtDocumentStore();
     private final Map<Path, List<Diagnostic>> diagnosticsByPath = new ConcurrentHashMap<>();
     private final Map<Path, List<JsonNode>> rawDiagnosticsByPath = new ConcurrentHashMap<>();
     private final Map<String, SymbolCache> symbolCache = new ConcurrentHashMap<>();
@@ -181,6 +179,11 @@ public class JdtLsService {
     };
     private volatile Consumer<Path> onDocumentUpgrade = path -> {
     };
+    private volatile Runnable onWarmUpComplete = () -> {
+    };
+    private final AtomicBoolean warmingUp = new AtomicBoolean();
+    private final AtomicBoolean warmUpWorkStarted = new AtomicBoolean();
+    private volatile long warmUpDeadline;
 
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
@@ -320,6 +323,35 @@ public class JdtLsService {
         } : listener;
     }
 
+    public void setWarmUpCompleteListener(Runnable listener) {
+        this.onWarmUpComplete = listener == null ? () -> {
+        } : listener;
+    }
+
+    public boolean isWarmingUp() {
+        if (!warmingUp.get()) {
+            return false;
+        }
+        if (System.nanoTime() - warmUpDeadline >= 0) {
+            finishWarmUp();
+            return false;
+        }
+        return true;
+    }
+
+    private void finishWarmUp() {
+        if (!warmingUp.compareAndSet(true, false)) {
+            return;
+        }
+        executor.submit(() -> {
+            try {
+                onWarmUpComplete.run();
+            } catch (Exception e) {
+                log.debug("Falha ao concluir o aquecimento do JDT LS: {}", rootMessage(e));
+            }
+        });
+    }
+
     public CompletableFuture<Void> start(Path root, JdkInstallation jdk,
                                          DownloadProgressListener progress) {
         if (root == null) {
@@ -387,6 +419,11 @@ public class JdtLsService {
                 return;
             }
             state = State.READY;
+            warmUpDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WARM_UP_TIMEOUT_MS);
+            warmUpWorkStarted.set(false);
+            warmingUp.set(true);
+            CompletableFuture.runAsync(this::finishWarmUp, CompletableFuture.delayedExecutor(
+                    WARM_UP_TIMEOUT_MS, TimeUnit.MILLISECONDS, executor));
             flushOpenDocuments();
             refreshOpenDocuments();
             readyLatch.countDown();
@@ -566,8 +603,10 @@ public class JdtLsService {
                     new InputStreamReader(started.getErrorStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    log.debug("[jdtls] {}", line);
                     String lower = line.toLowerCase(java.util.Locale.ROOT);
+                    if (!isExpectedCancellationNotice(lower)) {
+                        log.debug("[jdtls] {}", line);
+                    }
                     if (lower.contains("initialization failed")
                             || lower.contains("failed to import projects")
                             || lower.contains("overlaps the workspace location")) {
@@ -579,15 +618,24 @@ public class JdtLsService {
                         recoverDocumentSynchronization();
                     }
                 }
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                if (started.isAlive()) {
+                    log.debug("Leitura da saida de erro do JDT LS foi interrompida", error);
+                }
             }
         });
+    }
+
+    private static boolean isExpectedCancellationNotice(String lowerCaseLine) {
+        return lowerCaseLine.contains("handlecancellation")
+                || lowerCaseLine.contains("unmatched cancel notification");
     }
 
     public synchronized void stop() {
         synchronized (processLock) {
             state = State.STOPPED;
         }
+        warmingUp.set(false);
         clearNavigationCache(null);
         serviceReadyLatch.countDown();
         readyLatch.countDown();
@@ -596,7 +644,8 @@ public class JdtLsService {
             try {
                 rpc.request("shutdown", Map.of()).get(2, TimeUnit.SECONDS);
                 rpc.notify("exit", Map.of());
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                log.debug("JDT LS nao confirmou o encerramento dentro do prazo", error);
             }
         }
         stopProcess();
@@ -604,9 +653,7 @@ public class JdtLsService {
 
     /** Clears document state when the adapter moves to another project. */
     public void resetProjectState() {
-        openDocuments.clear();
-        documentVersions.clear();
-        syncedDocuments.clear();
+        documents.clear();
         clearNavigationCache(null);
     }
 
@@ -632,7 +679,7 @@ public class JdtLsService {
         if (running != null) {
             terminateProcessTree(running.toHandle());
         }
-        syncedDocuments.clear();
+        documents.clearSyncState();
         diagnosticsByPath.clear();
         rawDiagnosticsByPath.clear();
         symbolCache.clear();
@@ -658,7 +705,8 @@ public class JdtLsService {
             // Escala abaixo para encerramento forcado.
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        } catch (Exception ignored) {
+        } catch (Exception error) {
+            log.debug("Falha ao aguardar encerramento normal do processo JDT LS", error);
         }
         try (var descendants = handle.descendants()) {
             descendants.filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
@@ -669,7 +717,8 @@ public class JdtLsService {
                 handle.onExit().get(3, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                log.debug("Falha ao aguardar encerramento forcado do processo JDT LS", error);
             }
         }
     }
@@ -853,7 +902,7 @@ public class JdtLsService {
         rpc.onRequest("client/unregisterCapability", params -> Map.of());
         rpc.onRequest("workspace/applyEdit", params -> Map.of("applied", false));
         rpc.onRequest("workspace/codeLens/refresh", params -> {
-            openDocuments.keySet().forEach(uri -> {
+            documents.uris().forEach(uri -> {
                 codeLensCache.remove(uri);
                 Path path = LspConversions.toPath(uri);
                 if (path != null) {
@@ -957,7 +1006,15 @@ public class JdtLsService {
                 buildProgress.onStatus(text, percent);
             }
         }
-        if ("end".equalsIgnoreCase(value.path("kind").asText(""))) {
+        String kind = value.path("kind").asText("");
+        if ("begin".equalsIgnoreCase(kind)) {
+            warmUpWorkStarted.set(true);
+            return;
+        }
+        if ("end".equalsIgnoreCase(kind)) {
+            if (warmUpWorkStarted.compareAndSet(true, false)) {
+                finishWarmUp();
+            }
             refreshCodeLensesAfterWork();
         }
     }
@@ -968,7 +1025,7 @@ public class JdtLsService {
         }
         String uri = LspConversions.toUri(filePath);
         String content = text == null ? "" : text;
-        String previous = openDocuments.put(uri, content);
+        String previous = documents.put(uri, content);
         if (!content.equals(previous)) {
             symbolCache.remove(uri);
             codeLensCache.remove(uri);
@@ -976,12 +1033,10 @@ public class JdtLsService {
             clearNavigationCache(uri);
             cancelInFlightForUri(uri);
         }
-        documentVersions.computeIfAbsent(uri, key -> new AtomicInteger(1));
-
         if (!canSyncDocuments()) {
             return;
         }
-        if (syncedDocuments.add(uri)) {
+        if (documents.markSynced(uri)) {
             sendDidOpen(uri, content);
         } else if (!content.equals(previous)) {
             sendDidChange(uri, previous, content);
@@ -994,10 +1049,10 @@ public class JdtLsService {
         }
         String uri = LspConversions.toUri(filePath);
         String content = text == null ? "" : text;
-        if (content.equals(openDocuments.get(uri))) {
+        if (content.equals(documents.content(uri))) {
             return;
         }
-        String previous = openDocuments.put(uri, content);
+        String previous = documents.put(uri, content);
         symbolCache.remove(uri);
         codeLensCache.remove(uri);
         completionCache.remove(uri);
@@ -1007,7 +1062,7 @@ public class JdtLsService {
         if (!canSyncDocuments()) {
             return;
         }
-        if (syncedDocuments.add(uri)) {
+        if (documents.markSynced(uri)) {
             sendDidOpen(uri, content);
             return;
         }
@@ -1019,8 +1074,8 @@ public class JdtLsService {
             return;
         }
         String uri = LspConversions.toUri(filePath);
-        openDocuments.remove(uri);
-        documentVersions.remove(uri);
+        boolean wasSynced = documents.unmarkSynced(uri);
+        documents.remove(uri);
         diagnosticsByPath.remove(normalizePath(filePath));
         rawDiagnosticsByPath.remove(normalizePath(filePath));
         symbolCache.remove(uri);
@@ -1031,7 +1086,7 @@ public class JdtLsService {
         cancelInFlightForUri(uri);
 
         LspJsonRpcClient rpc = client;
-        if (syncedDocuments.remove(uri) && rpc != null && canSyncDocuments()) {
+        if (wasSynced && rpc != null && canSyncDocuments()) {
             rpc.notify("textDocument/didClose", Map.of("textDocument", Map.of("uri", uri)));
         }
     }
@@ -1056,7 +1111,7 @@ public class JdtLsService {
             return;
         }
         String uri = LspConversions.toUri(target);
-        if (syncedDocuments.contains(uri)) {
+        if (documents.isSynced(uri)) {
             return;
         }
         symbolCache.remove(uri);
@@ -1086,7 +1141,7 @@ public class JdtLsService {
         }
         Path deleted = normalizePath(deletedPath);
         clearNavigationCache(null);
-        List<Path> openBelowDeleted = openDocuments.keySet().stream()
+        List<Path> openBelowDeleted = documents.uris().stream()
                 .map(LspConversions::toPath)
                 .filter(java.util.Objects::nonNull)
                 .map(JdtLsService::normalizePath)
@@ -1123,19 +1178,19 @@ public class JdtLsService {
         changeDocument(filePath, text);
         String uri = LspConversions.toUri(filePath);
         LspJsonRpcClient rpc = client;
-        if (rpc != null && canSyncDocuments() && syncedDocuments.contains(uri)) {
+        if (rpc != null && canSyncDocuments() && documents.isSynced(uri)) {
             rpc.notify("textDocument/didSave", Map.of("textDocument", Map.of("uri", uri)));
         }
     }
 
     private void flushOpenDocuments() {
         Path root = projectRoot;
-        openDocuments.forEach((uri, content) -> {
+        documents.forEach((uri, content) -> {
             Path path = LspConversions.toPath(uri);
             if (root != null && (path == null || !path.startsWith(root))) {
                 return;
             }
-            if (syncedDocuments.add(uri)) {
+            if (documents.markSynced(uri)) {
                 sendDidOpen(uri, content);
             }
         });
@@ -1185,13 +1240,13 @@ public class JdtLsService {
             return;
         }
         log.warn("JDT LS perdeu a posicao de um documento; resincronizando {} buffer(s)",
-                openDocuments.size());
-        openDocuments.forEach((uri, content) -> {
-            if (syncedDocuments.remove(uri)) {
+                documents.size());
+        documents.forEach((uri, content) -> {
+            if (documents.unmarkSynced(uri)) {
                 rpc.notify("textDocument/didClose", Map.of("textDocument", Map.of("uri", uri)));
             }
-            documentVersions.computeIfAbsent(uri, key -> new AtomicInteger()).incrementAndGet();
-            if (syncedDocuments.add(uri)) {
+            documents.incrementVersion(uri);
+            if (documents.markSynced(uri)) {
                 sendDidOpen(uri, content);
             }
             Path path = LspConversions.toPath(uri);
@@ -1209,7 +1264,7 @@ public class JdtLsService {
     }
 
     private void refreshOpenDocuments() {
-        openDocuments.keySet().forEach(uri -> {
+        documents.uris().forEach(uri -> {
             symbolCache.remove(uri);
             codeLensCache.remove(uri);
             completionCache.remove(uri);
@@ -1227,7 +1282,7 @@ public class JdtLsService {
         if (rpc == null) {
             return;
         }
-        int version = documentVersions.computeIfAbsent(uri, key -> new AtomicInteger(1)).get();
+        int version = documents.ensureVersion(uri);
         rpc.notify("textDocument/didOpen", Map.of("textDocument", Map.of(
                 "uri", uri,
                 "languageId", "java",
@@ -1240,9 +1295,7 @@ public class JdtLsService {
         if (rpc == null) {
             return;
         }
-        int version = documentVersions
-                .computeIfAbsent(uri, key -> new AtomicInteger(1))
-                .incrementAndGet();
+        int version = documents.incrementVersion(uri);
         Map<String, Object> change = capabilities.incrementalSync()
                 ? incrementalDocumentChange(previous, content)
                 : Map.of("text", content);
@@ -1310,7 +1363,7 @@ public class JdtLsService {
             return cached.items();
         }
         syncBeforeRequest(filePath, text);
-        int version = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
+        int version = documents.version(uri);
         if (isStaleVersion(expectedVersion, version)) {
             log.debug("Completion descartada antes do envio: versao {} esperada, {} atual",
                     expectedVersion, version);
@@ -1344,8 +1397,8 @@ public class JdtLsService {
             AutoCompleteItem item = LspConversions.completionItem(node);
             if (item != null) completions.add(item);
         }
-        int current = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
-        if (!requestedText.equals(openDocuments.get(uri)) || current != version
+        int current = documents.version(uri);
+        if (!requestedText.equals(documents.content(uri)) || current != version
                 || isStaleVersion(expectedVersion, current)) {
             log.debug("Completion descartada: documento mudou durante a requisicao ({} ms)",
                     elapsedMs);
@@ -1362,8 +1415,7 @@ public class JdtLsService {
         if (filePath == null) {
             return ANY_VERSION;
         }
-        AtomicInteger version = documentVersions.get(LspConversions.toUri(filePath));
-        return version == null ? ANY_VERSION : version.get();
+        return documents.version(LspConversions.toUri(filePath));
     }
 
     static boolean isStaleVersion(int expectedVersion, int currentVersion) {
@@ -1430,7 +1482,7 @@ public class JdtLsService {
         }
         String uri = LspConversions.toUri(filePath);
         syncBeforeRequest(filePath, text);
-        int version = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
+        int version = documents.version(uri);
         String key = method + "|" + uri + "|" + version + "|" + line + "|" + col;
         List<Location> cached = navigationCache.get(key);
         if (cached != null) {
@@ -1450,7 +1502,7 @@ public class JdtLsService {
                     method, elapsedMs, timeout);
             return List.of();
         }
-        int current = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
+        int current = documents.version(uri);
         if (current != version) {
             log.debug("Navegacao {} descartada: documento mudou durante a requisicao ({} ms)",
                     method, elapsedMs);
@@ -1661,15 +1713,15 @@ public class JdtLsService {
             return cached.symbols();
         }
         syncBeforeRequest(filePath, text);
-        int version = documentVersions.getOrDefault(uri, new AtomicInteger()).get();
+        int version = documents.version(uri);
         String key = "symbols|" + uri + "|" + version;
         JsonNode result = interactive
                 ? requestCoalescedInteractive("textDocument/documentSymbol",
                         Map.of("textDocument", documentId(filePath)), INTERACTIVE_TIMEOUT_MS, key)
-                : requestCoalesced("textDocument/documentSymbol",
+                : requestCoalescedBackground("textDocument/documentSymbol",
                         Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS, key);
         List<DocumentSymbol> symbols = List.copyOf(LspConversions.documentSymbols(result));
-        if (requestedText.equals(openDocuments.get(uri))) {
+        if (requestedText.equals(documents.content(uri))) {
             symbolCache.put(uri, new SymbolCache(requestedText, symbols));
             return symbols;
         }
@@ -2030,7 +2082,7 @@ public class JdtLsService {
                         "start", Map.of("line", Math.max(0, firstLine), "character", 0),
                         "end", Map.of("line", Math.max(0, lastLine), "character", 0)));
 
-        JsonNode result = request("textDocument/inlayHint", params, REQUEST_TIMEOUT_MS);
+        JsonNode result = requestBackground("textDocument/inlayHint", params, REQUEST_TIMEOUT_MS);
         if (result == null || !result.isArray() || !isCurrentText(filePath, text)) {
             return List.of();
         }
@@ -2055,7 +2107,7 @@ public class JdtLsService {
             return cached.lenses();
         }
         syncBeforeRequest(filePath, text);
-        JsonNode result = request("textDocument/codeLens",
+        JsonNode result = requestBackground("textDocument/codeLens",
                 Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS * 2);
         if (result == null || !result.isArray()) {
             return List.of();
@@ -2103,7 +2155,7 @@ public class JdtLsService {
                 lenses.add(lens);
             }
         }
-        if (!requestedText.equals(openDocuments.get(uri))) {
+        if (!requestedText.equals(documents.content(uri))) {
             pending.values().forEach(future -> future.cancel(false));
             return List.of();
         }
@@ -2160,7 +2212,7 @@ public class JdtLsService {
     private void onCodeLensResolveSettled(String uri, Path filePath, String text) {
         codeLensRetries.computeIfPresent(uri, (key, current) ->
                 current.text().equals(text) ? current.settled() : current);
-        if (!isReady() || !text.equals(openDocuments.get(uri))) {
+        if (!isReady() || !text.equals(documents.content(uri))) {
             return;
         }
         codeLensCache.remove(uri);
@@ -2177,7 +2229,7 @@ public class JdtLsService {
                 || !lastCodeLensWorkRefresh.compareAndSet(previous, now)) {
             return;
         }
-        openDocuments.keySet().forEach(uri -> {
+        documents.uris().forEach(uri -> {
             if (codeLensCache.containsKey(uri)) {
                 return;
             }
@@ -2203,7 +2255,7 @@ public class JdtLsService {
             return List.of();
         }
         syncBeforeRequest(filePath, text);
-        JsonNode result = request("textDocument/semanticTokens/full",
+        JsonNode result = requestBackground("textDocument/semanticTokens/full",
                 Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS);
         if (result == null || !isCurrentText(filePath, text)) {
             return List.of();
@@ -2353,6 +2405,10 @@ public class JdtLsService {
         return request(method, params, timeoutMs, true);
     }
 
+    private JsonNode requestBackground(String method, Object params, long timeoutMs) {
+        return isWarmingUp() ? null : request(method, params, timeoutMs, false);
+    }
+
     private JsonNode request(String method, Object params, long timeoutMs, boolean interactive) {
         LspJsonRpcClient rpc = client;
         if (rpc == null || (interactive ? !isInteractive() : !isReady())) {
@@ -2379,6 +2435,11 @@ public class JdtLsService {
     private JsonNode requestCoalescedInteractive(String method, Object params, long timeoutMs,
                                                  String key) {
         return requestCoalesced(method, params, timeoutMs, key, true);
+    }
+
+    private JsonNode requestCoalescedBackground(String method, Object params, long timeoutMs,
+                                                String key) {
+        return isWarmingUp() ? null : requestCoalesced(method, params, timeoutMs, key, false);
     }
 
     private JsonNode requestCoalesced(String method, Object params, long timeoutMs, String key,
@@ -2437,7 +2498,7 @@ public class JdtLsService {
 
     private boolean isCurrentText(Path filePath, String text) {
         return filePath != null && (text == null ? "" : text)
-                .equals(openDocuments.get(LspConversions.toUri(filePath)));
+                .equals(documents.content(LspConversions.toUri(filePath)));
     }
 
     private static Map<String, Object> positionParams(Path filePath, int line, int col) {

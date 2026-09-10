@@ -52,7 +52,23 @@ class JpqlDiagnosticsTest {
                     @Query("select c from Cliente c where c.nome = :nome")
                     List<Cliente> buscar(@Param("nome") String nome);
                 }
-                """).isEmpty());
+        """).isEmpty());
+    }
+
+    @Test
+    void acceptsAValidMultilineQueryWithAFunctionAndNamedParameter() {
+        String repository = String.join("\n",
+                "package com.example;",
+                "public interface ClienteRepository extends JpaRepository<Cliente, Long> {",
+                "    @Query(\"\"\"",
+                "        select count(c)",
+                "        from Cliente c",
+                "        where c.nome = :nome",
+                "        \"\"\")",
+                "    long contar(@Param(\"nome\") String nome);",
+                "}");
+
+        assertTrue(analyze(repository).isEmpty());
     }
 
     @Test

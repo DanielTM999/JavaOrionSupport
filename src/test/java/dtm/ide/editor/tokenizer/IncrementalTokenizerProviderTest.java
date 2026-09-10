@@ -32,6 +32,21 @@ class IncrementalTokenizerProviderTest {
     }
 
     @Test
+    void javaEditInsideAQueryTextBlockMatchesAFullTokenization() {
+        JavaTokenizerProvider tokenizer = new JavaTokenizerProvider();
+        String oldText = String.join("\n",
+                "package demo;",
+                "@Query(\"\"\"",
+                "    select c from Cliente c",
+                "    where c.nome = :nome",
+                "    \"\"\")",
+                "List<Cliente> buscar(String nome);");
+        int offset = oldText.indexOf("c.nome");
+
+        assertIncrementalEdit(tokenizer, oldText, offset, "c.nome".length(), "c.email", false);
+    }
+
+    @Test
     void gradleEditMatchesAFullTokenization() {
         GradleTokenizerProvider tokenizer = new GradleTokenizerProvider();
         String oldText = "plugins {\n    id(\"java\")\n}\n\ndependencies {\n"

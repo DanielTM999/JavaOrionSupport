@@ -12,7 +12,9 @@ import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JSpinner;
 import javax.swing.JTextField;
+import javax.swing.SpinnerNumberModel;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
@@ -91,6 +93,14 @@ public final class JavaSettingsPage implements PluginSettingsPage {
                     "Ligar @Value e @ConfigurationProperties aos arquivos de configuracao"));
     private final JTextField springBaseUrl = new JTextField();
 
+    private final JCheckBox dependencySearchLocalOnly =
+            new JCheckBox(text("field.dependencySearchLocalOnly",
+                    "Buscar dependencias somente no repositorio Maven local"));
+    private final JSpinner dependencySearchTimeout = new JSpinner(new SpinnerNumberModel(
+            JavaPluginSettings.DEFAULT_DEPENDENCY_SEARCH_TIMEOUT,
+            JavaPluginSettings.MIN_DEPENDENCY_SEARCH_TIMEOUT,
+            JavaPluginSettings.MAX_DEPENDENCY_SEARCH_TIMEOUT, 1));
+
     private final JPanel panel = new JPanel(new BorderLayout());
 
     public JavaSettingsPage(JavaPluginSettings settings, Runnable onChanged) {
@@ -155,6 +165,8 @@ public final class JavaSettingsPage implements PluginSettingsPage {
             });
         }
         settings.setSpringBaseUrl(springBaseUrl.getText());
+        settings.setDependencySearchLocalOnly(dependencySearchLocalOnly.isSelected());
+        settings.setDependencySearchTimeoutSeconds((Integer) dependencySearchTimeout.getValue());
 
         settings.save();
         onChanged.run();
@@ -192,6 +204,13 @@ public final class JavaSettingsPage implements PluginSettingsPage {
                 coverageGutter,
                 labeled(text("field.hotReload", "Hot reload:"), hotReloadMode),
                 labeled(text("field.jdtBuildMode", "Erros do projeto:"), jdtBuildMode)));
+
+        content.add(section(text("section.dependencies", "Dependencias"),
+                dependencySearchLocalOnly,
+                labeled(text("field.dependencySearchTimeout",
+                        "Tempo limite da busca web (s):"), dependencySearchTimeout)));
+
+        dependencySearchLocalOnly.addActionListener(event -> updateDependencyControls());
 
         content.add(inspectionsSection());
         content.add(hiddenOccurrencesSection());
@@ -317,7 +336,15 @@ public final class JavaSettingsPage implements PluginSettingsPage {
                 box.setSelected(!settings.isInspectionDisabled(inspection.id())));
         springBaseUrl.setText(settings.getSpringBaseUrl());
 
+        dependencySearchLocalOnly.setSelected(settings.isDependencySearchLocalOnly());
+        dependencySearchTimeout.setValue(settings.getDependencySearchTimeoutSeconds());
+
         updateSpringControls();
+        updateDependencyControls();
+    }
+
+    private void updateDependencyControls() {
+        dependencySearchTimeout.setEnabled(!dependencySearchLocalOnly.isSelected());
     }
 
     private void updateSpringControls() {

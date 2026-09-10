@@ -16,7 +16,6 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
-import java.awt.GridBagLayout;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
@@ -29,13 +28,20 @@ final class PackageRowRenderer extends JPanel implements ListCellRenderer<Packag
     private static final String HOVER_ROW = "dtm.ide.hoverRow";
 
     record Row(DependencyCoordinate coordinate, String title, String meta,
-               String badge, BadgeLabel.Tone tone) {
+               String badge, BadgeLabel.Tone tone,
+               String secondaryBadge, BadgeLabel.Tone secondaryTone) {
+
+        Row(DependencyCoordinate coordinate, String title, String meta,
+            String badge, BadgeLabel.Tone tone) {
+            this(coordinate, title, meta, badge, tone, "", BadgeLabel.Tone.NEUTRAL);
+        }
     }
 
     private final JLabel avatar = new JLabel();
     private final JLabel title = new JLabel();
     private final JLabel meta = new JLabel();
     private final BadgeLabel badge = new BadgeLabel("", BadgeLabel.Tone.NEUTRAL);
+    private final BadgeLabel secondaryBadge = new BadgeLabel("", BadgeLabel.Tone.NEUTRAL);
 
     private boolean selected;
     private boolean hovered;
@@ -55,6 +61,9 @@ final class PackageRowRenderer extends JPanel implements ListCellRenderer<Packag
         badge.setStyle(BadgeLabel.Style.SOFT);
         badge.setSize(BadgeLabel.Size.SM);
         badge.setShowDot(true);
+        secondaryBadge.setStyle(BadgeLabel.Style.SOFT);
+        secondaryBadge.setSize(BadgeLabel.Size.SM);
+        secondaryBadge.setShowDot(true);
 
         JPanel text = new JPanel();
         text.setOpaque(false);
@@ -67,9 +76,12 @@ final class PackageRowRenderer extends JPanel implements ListCellRenderer<Packag
         center.setOpaque(false);
         center.add(text, BorderLayout.CENTER);
 
-        JPanel trailing = new JPanel(new GridBagLayout());
+        JPanel trailing = new JPanel();
+        trailing.setLayout(new BoxLayout(trailing, BoxLayout.X_AXIS));
         trailing.setOpaque(false);
         trailing.add(badge);
+        trailing.add(Box.createHorizontalStrut(UiTokens.space(1)));
+        trailing.add(secondaryBadge);
 
         add(avatar, BorderLayout.WEST);
         add(center, BorderLayout.CENTER);
@@ -154,6 +166,13 @@ final class PackageRowRenderer extends JPanel implements ListCellRenderer<Packag
         if (badge.isVisible()) {
             badge.setText(label);
             badge.setTone(value.tone() == null ? BadgeLabel.Tone.NEUTRAL : value.tone());
+        }
+        String second = value == null ? "" : value.secondaryBadge();
+        secondaryBadge.setVisible(second != null && !second.isBlank());
+        if (secondaryBadge.isVisible()) {
+            secondaryBadge.setText(second);
+            secondaryBadge.setTone(value.secondaryTone() == null
+                    ? BadgeLabel.Tone.NEUTRAL : value.secondaryTone());
         }
         return this;
     }

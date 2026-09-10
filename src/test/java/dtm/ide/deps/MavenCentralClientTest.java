@@ -2,6 +2,8 @@ package dtm.ide.deps;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -55,5 +57,17 @@ class MavenCentralClientTest {
     void incompleteCoordinatesAreTreatedAsText() {
         assertEquals("jackson:", MavenCentralClient.toSolrQuery("jackson:"));
         assertEquals(":jackson", MavenCentralClient.toSolrQuery(":jackson"));
+    }
+
+    @Test
+    void latestStableVersionDoesNotTrustTheOrderReturnedByCentral() {
+        MavenCentralClient client = new MavenCentralClient() {
+            @Override
+            public List<String> versions(String groupId, String artifactId) {
+                return List.of("1.18.38", "1.18.46", "1.18.44", "1.18.48-RC1");
+            }
+        };
+
+        assertEquals("1.18.46", client.latestStableVersion("org.projectlombok", "lombok"));
     }
 }

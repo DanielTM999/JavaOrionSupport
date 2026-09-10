@@ -77,6 +77,61 @@ class JavaTokenizerProviderTest {
     }
 
     @Test
+    void highlightsJpqlInsideAQueryTextBlock() {
+        String source = String.join("\n",
+                "@Query(\"\"\"",
+                "    SELECT count(la)",
+                "    FROM AuditoriaLaudo la",
+                "    WHERE la.laudo.idLaudo = :laudoId",
+                "    \"\"\")",
+                "List<AuditoriaLaudo> buscar(@Param(\"laudoId\") long laudoId);");
+
+        List<Token> tokens = tokens(source);
+
+        assertEquals(JpaQueryTokenizer.TOKEN_KEYWORD, typeOfText(tokens, "SELECT"));
+        assertEquals(JpaQueryTokenizer.TOKEN_FUNCTION, typeOfText(tokens, "count"));
+        assertEquals(JpaQueryTokenizer.TOKEN_ENTITY, typeOfText(tokens, "AuditoriaLaudo"));
+        assertEquals(JpaQueryTokenizer.TOKEN_ALIAS, typeOfText(tokens, "la"));
+        assertEquals(JpaQueryTokenizer.TOKEN_PROPERTY, typeOfText(tokens, "laudo"));
+        assertEquals(JpaQueryTokenizer.TOKEN_PROPERTY, typeOfText(tokens, "idLaudo"));
+        assertEquals(JpaQueryTokenizer.TOKEN_PARAMETER, typeOfText(tokens, ":laudoId"));
+        assertTokenCoverage(source, tokens);
+    }
+
+    @Test
+    void highlightsNativeSqlInsideAQueryString() {
+        String source = "@Query(value = \"SELECT u.id FROM users u WHERE u.id = :id\", "
+                + "nativeQuery = true) List<User> buscar(@Param(\"id\") long id);";
+
+        List<Token> tokens = tokens(source);
+
+        assertEquals(JpaQueryTokenizer.TOKEN_KEYWORD, typeOfText(tokens, "SELECT"));
+        assertEquals(JpaQueryTokenizer.TOKEN_ENTITY, typeOfText(tokens, "users"));
+        assertEquals(JpaQueryTokenizer.TOKEN_ALIAS, typeOfText(tokens, "u"));
+        assertEquals(JpaQueryTokenizer.TOKEN_PROPERTY, typeOfText(tokens, "id"));
+        assertEquals(JpaQueryTokenizer.TOKEN_PARAMETER, typeOfText(tokens, ":id"));
+        assertTokenCoverage(source, tokens);
+    }
+
+    @Test
+    void distinguishesSqlOnlyKeywordsFromJpqlIdentifiers() {
+        List<Token> jpql = tokens("@Query(\"insert into Audit values (1)\")");
+        List<Token> sql = tokens(
+                "@Query(value = \"insert into audit values (1)\", nativeQuery = true)");
+
+        assertEquals(JpaQueryTokenizer.TOKEN_PROPERTY, typeOfText(jpql, "insert"));
+        assertEquals(JpaQueryTokenizer.TOKEN_KEYWORD, typeOfText(sql, "insert"));
+        assertEquals(JpaQueryTokenizer.TOKEN_KEYWORD, typeOfText(sql, "values"));
+    }
+
+    @Test
+    void leavesStringsOutsideQueryUntouched() {
+        String source = "String sql = \"SELECT id FROM users\";";
+
+        assertEquals(TokenType.STRING, typeOfText(tokens(source), "\"SELECT id FROM users\""));
+    }
+
+    @Test
     void handlesEscapedQuotesInsideStrings() {
         List<Token> tokens = tokens("String s = \"a\\\"b\";");
 
@@ -220,5 +275,14 @@ class JavaTokenizerProviderTest {
 
     private static boolean hasText(List<Token> tokens, String text) {
         return tokens.stream().anyMatch(token -> token.getText().equals(text));
+    }
+
+    private static void assertTokenCoverage(String source, List<Token> tokens) {
+        int cursor = 0;
+        for (Token token : tokens) {
+            assertEquals(cursor, token.getStartOffset());
+            cursor = token.getEndOffset();
+        }
+        assertEquals(source.length(), cursor);
     }
 }

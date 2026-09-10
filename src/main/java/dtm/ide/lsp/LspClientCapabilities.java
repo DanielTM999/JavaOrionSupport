@@ -25,6 +25,7 @@ final class LspClientCapabilities {
                 "dynamicRegistration", false,
                 "completionItem", Map.of(
                         "snippetSupport", true,
+                        "labelDetailsSupport", true,
                         "documentationFormat", List.of("markdown", "plaintext")),
                 "contextSupport", true));
 

@@ -12,7 +12,8 @@ public record JpaQueryMethod(
         boolean derived,
         List<String> parameters,
         boolean modifying,
-        boolean nativeQuery
+        boolean nativeQuery,
+        boolean declaredQuery
 ) {
 
     public enum Subject {
@@ -31,15 +32,24 @@ public record JpaQueryMethod(
         parameters = parameters == null ? List.of() : List.copyOf(parameters);
         subject = subject == null ? Subject.CUSTOM : subject;
         line = Math.max(1, line);
+        declaredQuery = declaredQuery || !jpql.isBlank();
     }
 
     public JpaQueryMethod(String name, int line, Subject subject, List<String> conditions,
                           String orderBy, String jpql, boolean derived) {
-        this(name, line, subject, conditions, orderBy, jpql, derived, List.of(), false, false);
+        this(name, line, subject, conditions, orderBy, jpql, derived, List.of(), false, false,
+                !jpql.isBlank());
+    }
+
+    public JpaQueryMethod(String name, int line, Subject subject, List<String> conditions,
+                          String orderBy, String jpql, boolean derived, List<String> parameters,
+                          boolean modifying, boolean nativeQuery) {
+        this(name, line, subject, conditions, orderBy, jpql, derived, parameters, modifying,
+                nativeQuery, !jpql.isBlank());
     }
 
     public boolean hasDeclaredQuery() {
-        return !jpql.isBlank();
+        return declaredQuery;
     }
 
     public boolean validatable() {
@@ -47,6 +57,7 @@ public record JpaQueryMethod(
     }
 
     public boolean validatableQuery() {
-        return hasDeclaredQuery() && !nativeQuery;
+        return hasDeclaredQuery() && !jpql.isBlank() && !nativeQuery
+                && !jpql.contains("#{") && !jpql.contains("${");
     }
 }

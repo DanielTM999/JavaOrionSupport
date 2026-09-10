@@ -49,7 +49,6 @@ import dtm.ide.api.project.editor.NativeEditorType;
 import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
 import dtm.ide.api.theme.EditorTheme;
 import dtm.ide.build.BuildDiagnostic;
-import dtm.ide.build.BuildDiagnosticParser;
 import dtm.ide.build.BuildProgressTracker;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
@@ -58,6 +57,7 @@ import dtm.ide.build.BuildSystem;
 import dtm.ide.build.GradleBuildService;
 import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.build.MavenBuildService;
+import dtm.ide.build.StaticAnalysisReportParser;
 import dtm.ide.build.BuildSystems;
 import dtm.ide.build.BuildToolModel;
 import dtm.ide.coverage.CoverageAgent;
@@ -70,9 +70,11 @@ import dtm.ide.coverage.CoverageReadResult;
 import dtm.ide.coverage.CoverageStore;
 import dtm.ide.coverage.FileCoverage;
 import dtm.ide.coverage.JacocoExecReader;
+import dtm.ide.concurrent.PluginTaskExecutor;
 import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.deps.DependencyService;
 import dtm.ide.deps.MavenCentralClient;
+import dtm.ide.deps.OsvClient;
 import dtm.ide.editor.AutoCompleteIdleTrigger;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
@@ -117,6 +119,7 @@ import dtm.ide.spring.config.SpringConfigDocument;
 import dtm.ide.spring.config.SpringConfigIndex;
 import dtm.ide.spring.config.SpringConfigProperty;
 import dtm.ide.spring.jpa.JpaRepositoryInfo;
+import dtm.ide.spring.jpa.JpaQueryCompletionProvider;
 import dtm.ide.spring.infra.SpringInfraDiagnostics;
 import dtm.ide.spring.jpa.JpaDiagnostics;
 import dtm.ide.spring.jpa.JpqlDiagnostics;
@@ -239,6 +242,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -253,15 +257,11 @@ import java.util.Objects;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -309,9 +309,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final MavenCentralClient mavenCentral = new MavenCentralClient();
     private final SpringBeanIndex springIndex = new SpringBeanIndex();
     private final SpringActuatorClient actuator = new SpringActuatorClient();
-    private final Map<Path, List<Diagnostic>> lastBuildDiagnostics = new ConcurrentHashMap<>();
-    private final Map<Path, List<BuildDiagnostic>> liveLspProblems = new ConcurrentHashMap<>();
-    private volatile List<BuildDiagnostic> lastBuildProblems = List.of();
+    private final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
     private final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -335,23 +333,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final Map<RunConfigurationKey, RunProcessHandle> runningProcesses =
             new ConcurrentHashMap<>();
     private final Set<Path> debugSteppedFiles = ConcurrentHashMap.newKeySet();
-    private final ExecutorService background = Executors.newThreadPerTaskExecutor(
-            Thread.ofVirtual().name("java-orion-support-", 0).factory());
-    private final ScheduledExecutorService codeActionDelayExecutor =
-            Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable, "java-code-action-lamp");
-                thread.setDaemon(true);
-                return thread;
-            });
-    private final ScheduledExecutorService autoCompleteIdleExecutor =
-            Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable, "java-autocomplete-idle");
-                thread.setDaemon(true);
-                return thread;
-            });
+    private final PluginTaskExecutor background =
+            new PluginTaskExecutor("java-orion-support");
     private final AutoCompleteIdleTrigger autoCompleteIdle = new AutoCompleteIdleTrigger(
             AUTO_COMPLETE_IDLE_DELAY_MS,
-            (task, delay) -> autoCompleteIdleExecutor.schedule(task, delay, TimeUnit.MILLISECONDS),
+            (task, delay) -> background.schedule(task, delay, TimeUnit.MILLISECONDS),
             this::isIdleCompletionEligible,
             this::isIdleCompletionReady,
             this::currentIdleCaret,
@@ -386,6 +372,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final LombokSupport lombokSupport = new LombokSupport(this::onLombokStatusChanged);
     private volatile BuildSystem buildSystem;
     private volatile DependencyService dependencyService;
+    private volatile DependencyManagerCoordinator dependencyCoordinator;
     private volatile DependencyManagerPanel dependencyPanel;
     private volatile JavaRunSupport runSupport;
     private final AtomicReference<BuildProgressTracker> runBuildProgress = new AtomicReference<>();
@@ -464,6 +451,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void onProjectClosed(IdeProjectContext context) {
         lifecycle.incrementAndGet();
+        background.cancelPending();
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
             lsp.resetProjectState();
@@ -483,6 +471,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         selectedRunConfig = null;
         staticRunConfigurations = List.of();
         unregisterFileWatcher();
+        DependencyManagerCoordinator coordinator = dependencyCoordinator;
+        if (coordinator != null) {
+            coordinator.resetLocalRepository();
+        }
         lexicalIndex.clear();
         springIndex.clear();
         todoScanner.clear();
@@ -496,9 +488,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         buildToolsSyncPending.set(false);
         springConfigIndex = SpringConfigIndex.empty();
         springMetadata = SpringConfigMetadata.builtIn();
-        lastBuildDiagnostics.clear();
-        liveLspProblems.clear();
-        lastBuildProblems = List.of();
+        problems.clearAll();
         diagnosticReanalysisRunning.set(false);
         refreshProblemsPanel();
         clearCoverage();
@@ -519,12 +509,15 @@ public class JavaIdeAdapter extends IdeAdapter {
             stopLanguageServerAsync(lsp);
         }
         unregisterFileWatcher();
+        DependencyManagerCoordinator coordinator = dependencyCoordinator;
+        dependencyCoordinator = null;
+        if (coordinator != null) {
+            coordinator.close();
+        }
         autoCompleteIdle.cancel();
         springIndex.shutdown();
         lexicalIndex.shutdown();
-        codeActionDelayExecutor.shutdownNow();
-        autoCompleteIdleExecutor.shutdownNow();
-        background.shutdownNow();
+        background.close();
     }
 
     private static void stopLanguageServerAsync(JdtLsService lsp) {
@@ -543,9 +536,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         long ticket = lifecycle.incrementAndGet();
         buildSystem = null;
         dependencyService = null;
-        lastBuildDiagnostics.clear();
-        liveLspProblems.clear();
-        lastBuildProblems = List.of();
+        problems.clearAll();
         refreshProblemsPanel();
         clearCoverage();
         JdtLsService lsp = jdtLs;
@@ -594,9 +585,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         this.projectRoot = nextRoot;
         this.descriptor = null;
         this.staticRunConfigurations = List.of();
-        lastBuildDiagnostics.clear();
-        liveLspProblems.clear();
-        lastBuildProblems = List.of();
+        problems.clearAll();
         refreshProblemsPanel();
         long ticket = lifecycle.incrementAndGet();
         Path root = nextRoot;
@@ -784,6 +773,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         created.setMaxHeap(settings().getLanguageServerMemory());
         created.setStatusListener(this::publishLanguageServerStatus);
         created.setCodeLensRefreshListener(this::requestRefreshCodeLenses);
+        created.setWarmUpCompleteListener(this::refreshJavaEditorsAfterIndexing);
         created.setDocumentUpgradeListener(this::onLanguageServerDocumentUpgrade);
         languageServerReadyHandled.set(false);
         jdtLs = created;
@@ -803,11 +793,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                         diagnostic.startLine() + 1, diagnostic.startCol() + 1,
                         diagnostic.severity(), diagnostic.message(), diagnostic.source()))
                 .toList();
-        if (problems.isEmpty()) {
-            liveLspProblems.remove(normalized);
-        } else {
-            liveLspProblems.put(normalized, problems);
-        }
+        this.problems.publishLive(normalized, problems);
         refreshProblemsPanel();
     }
 
@@ -936,7 +922,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             updateProgress(LSP_PROGRESS_ID, message, 100);
             hideProgress(LSP_PROGRESS_ID);
             if (languageServerReadyHandled.compareAndSet(false, true)) {
-                refreshJavaEditorsAfterIndexing();
                 Path root = projectRoot;
                 JavaProjectDescriptor current = descriptor;
                 if (root != null && current != null && current.spring()
@@ -1061,7 +1046,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         char previous = line.charAt(col - 1);
         if (previous == '"') {
-            return isSpringAnnotationLiteral(line, col);
+            return isJpaQueryLiteral(context) || isSpringAnnotationLiteral(line, col);
         }
         return getCompletionTriggerCharacters().contains(previous);
     }
@@ -1111,6 +1096,10 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             return SpringConfigSupport.complete(springMetadata, context.filePath(),
                     context.text(), context.caretLine(), context.caretCol());
+        }
+        List<AutoCompleteItem> query = jpaQueryCompletion(context);
+        if (query != null) {
+            return query;
         }
         List<AutoCompleteItem> springAnnotation = springAnnotationCompletion(context);
         if (springAnnotation != null) {
@@ -1285,20 +1274,17 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (item == null) {
                 continue;
             }
-            String[] candidates = {item.insertText(), item.label()};
-            for (String candidate : candidates) {
-                String insert = sanitizeSnippetForGhostText(candidate);
-                if (insert == null || insert.isBlank() || insert.length() <= prefix.length()) {
-                    continue;
-                }
-                insert = limitGhostText(insert);
-                if (insert.startsWith(prefix)) {
-                    return insert.substring(prefix.length());
-                }
-                if (insensitive == null && insert.regionMatches(true, 0, prefix, 0,
-                        prefix.length())) {
-                    insensitive = insert.substring(prefix.length());
-                }
+            String insert = sanitizeSnippetForGhostText(item.insertText());
+            if (insert == null || insert.isBlank() || insert.length() <= prefix.length()) {
+                continue;
+            }
+            insert = limitGhostText(insert);
+            if (insert.startsWith(prefix)) {
+                return insert.substring(prefix.length());
+            }
+            if (insensitive == null && insert.regionMatches(true, 0, prefix, 0,
+                    prefix.length())) {
+                insensitive = insert.substring(prefix.length());
             }
         }
         return insensitive;
@@ -1447,7 +1433,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             lsp.changeDocument(filePath, context.getText());
             merged.addAll(lsp.diagnostics(filePath));
         }
-        merged.addAll(lastBuildDiagnostics.getOrDefault(filePath, List.of()));
+        merged.addAll(problems.diagnostics(filePath));
 
         merged.addAll(pluginDiagnostics(filePath, context.getText()));
         List<Diagnostic> visible = InspectionSuppressions.filter(merged, context.getText(),
@@ -1779,11 +1765,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 || JavaProjectConventions.isGradleBuildFile(deleted)) {
             onBuildFileChanged(deleted);
         }
-        lastBuildDiagnostics.remove(deleted);
-        lastBuildProblems = lastBuildProblems.stream()
-                .filter(problem -> problem.file() == null || !problem.file().startsWith(deleted))
-                .toList();
-        liveLspProblems.keySet().removeIf(candidate -> candidate.startsWith(deleted));
+        problems.removeBelow(deleted);
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
             lsp.pathDeleted(deleted);
@@ -1898,7 +1880,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                 if (ticket == debugHoverTicket.get() && isDebugPaused() && value != null) {
                     debugValuePopup().show(value, location);
                 }
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                log.debug("Falha ao avaliar valor sob o cursor durante a depuracao", error);
                 if (ticket == debugHoverTicket.get()) {
                     hideDebugValuePopup();
                 }
@@ -1908,7 +1891,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private synchronized JavaDebugValuePopup debugValuePopup() {
         if (debugValuePopup == null) {
-            debugValuePopup = new JavaDebugValuePopup();
+            debugValuePopup = new JavaDebugValuePopup(background);
         }
         return debugValuePopup;
     }
@@ -2647,7 +2630,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (precise != null && !precise.isEmpty()) {
             return precise;
         }
-        if (lsp != null && lsp.isReady()) {
+        if (lsp != null && lsp.isReady() && !lsp.isWarmingUp()) {
             return precise;
         }
         List<DocumentSymbol> outline = lexicalIndex.outline(context.text());
@@ -3136,7 +3119,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 || !supportsCodeActionLamp(context.filePath())) {
             return;
         }
-        codeActionDelayExecutor.schedule(
+        background.schedule(
                 () -> showCodeActionLampIfCaretStayed(context, ticket), 250, TimeUnit.MILLISECONDS);
     }
 
@@ -3374,7 +3357,9 @@ public class JavaIdeAdapter extends IdeAdapter {
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 return Files.isRegularFile(execFile);
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                log.debug("Falha ao aguardar estabilizacao do arquivo de cobertura {}",
+                        execFile, error);
                 return Files.isRegularFile(execFile);
             }
         }
@@ -4071,7 +4056,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (JavaProjectConventions.isJava(filePath) && debugSession != null
                 && settings().getHotReloadMode() == HotReloadMode.AUTOMATIC) {
             long ticket = hotReloadTicket.incrementAndGet();
-            codeActionDelayExecutor.schedule(() -> {
+            background.schedule(() -> {
                 if (ticket == hotReloadTicket.get() && debugSession != null) {
                     runHotReload();
                 }
@@ -4153,6 +4138,26 @@ public class JavaIdeAdapter extends IdeAdapter {
     private boolean isSpringAnnotationLiteral(String line, int col) {
         return isSpringNavigationEnabled()
                 && SpringAnnotationCompletionProvider.opensAnnotationLiteral(line, col);
+    }
+
+    private boolean isJpaQueryLiteral(IdeCompletionContext context) {
+        return isJpaCompletionEnabled(context)
+                && JpaQueryCompletionProvider.isInsideQuery(context.text(), context.caretOffset());
+    }
+
+    private List<AutoCompleteItem> jpaQueryCompletion(IdeCompletionContext context) {
+        if (!isJpaCompletionEnabled(context)) {
+            return null;
+        }
+        return JpaQueryCompletionProvider.suggestions(springIndex.snapshot(), context.filePath(),
+                context.text(), context.caretOffset());
+    }
+
+    private boolean isJpaCompletionEnabled(IdeCompletionContext context) {
+        JavaProjectDescriptor current = descriptor;
+        return context != null && JavaProjectConventions.isJava(context.filePath())
+                && current != null && current.spring() && settings().isSpringSupport()
+                && settings().isSpringJpa();
     }
 
     private List<AutoCompleteItem> springAnnotationCompletion(IdeCompletionContext context) {
@@ -5164,7 +5169,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                     throw new IllegalStateException("O JDT LS nao abriu uma sessao de debug.");
                 }
                 JavaDebugSession session = new JavaDebugSession(adapterPort, attachTarget,
-                        projectRoot, context.getBreakpoints(), this::publishDebugSnapshot);
+                        projectRoot, context.getBreakpoints(), this::publishDebugSnapshot,
+                        background);
                 debugSession = session;
                 session.start();
             } catch (Exception error) {
@@ -5180,7 +5186,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (existing != null) {
             return existing;
         }
-        JavaDebugPanel created = new JavaDebugPanel(new DebugPanelHost());
+        JavaDebugPanel created = new JavaDebugPanel(new DebugPanelHost(), background);
         debugValuePopup().bindChildrenProvider(reference -> {
             JavaDebugSession session = debugSession;
             return session == null ? List.of() : session.variables(reference);
@@ -5373,7 +5379,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         String initial = selectedDebugExpression(editor);
         JavaEvaluateDialog content = new JavaEvaluateDialog(initial,
                 expression -> session.evaluate(expression, frameId), session::variables,
-                this::addDebugWatch);
+                this::addDebugWatch, background);
         editor.openEditorDialog(text("debug.evaluate.title", "Evaluate Expression"),
                 content, false, null);
         content.open();
@@ -5475,7 +5481,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         IdeEditorContext editor = getEditor(file, true);
         if (editor == null) {
             if (attempt < 10) {
-                codeActionDelayExecutor.schedule(() -> SwingUtilities.invokeLater(
+                background.schedule(() -> SwingUtilities.invokeLater(
                         () -> applyDebugLine(file, line, ticket, attempt + 1)),
                         60, TimeUnit.MILLISECONDS);
             }
@@ -5672,7 +5678,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void ensureTestPanel() {
         if (testPanel == null) {
-            JavaTestExplorerPanel panel = new JavaTestExplorerPanel(new TestExplorerHost());
+            JavaTestExplorerPanel panel = new JavaTestExplorerPanel(new TestExplorerHost(), background);
             testPanel = panel;
             Icon icon = JavaIcons.test(JavaIcons.SMALL);
             testPanelId = icon == null
@@ -5726,7 +5732,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         long ticket = todoRefreshTicket.incrementAndGet();
-        codeActionDelayExecutor.schedule(() -> {
+        background.schedule(() -> {
             if (ticket != todoRefreshTicket.get()) {
                 return;
             }
@@ -5781,13 +5787,12 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         long ticket = problemsRefreshTicket.incrementAndGet();
-        codeActionDelayExecutor.schedule(() -> {
+        background.schedule(() -> {
             if (ticket != problemsRefreshTicket.get()) {
                 return;
             }
-            List<BuildDiagnostic> build = lastBuildProblems;
-            List<BuildDiagnostic> live = liveLspProblems.values().stream()
-                    .flatMap(List::stream).toList();
+            List<BuildDiagnostic> build = problems.buildProblems();
+            List<BuildDiagnostic> live = problems.liveProblems();
             Path root = projectRoot;
             SwingUtilities.invokeLater(() -> {
                 JavaProblemsPanel panel = problemsPanel;
@@ -5815,9 +5820,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void clearBuildProblems() {
-        Set<Path> affected = new LinkedHashSet<>(lastBuildDiagnostics.keySet());
-        lastBuildDiagnostics.clear();
-        lastBuildProblems = List.of();
+        Set<Path> affected = problems.clearBuild();
         affected.forEach(this::requestRefreshDiagnostics);
         refreshProblemsPanel();
     }
@@ -5836,12 +5839,9 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         long ticket = lifecycle.incrementAndGet();
         Set<Path> affected = new LinkedHashSet<>(javaEditors.keySet());
-        affected.addAll(lastBuildDiagnostics.keySet());
-        affected.addAll(liveLspProblems.keySet());
+        affected.addAll(problems.paths());
 
-        lastBuildDiagnostics.clear();
-        lastBuildProblems = List.of();
-        liveLspProblems.clear();
+        problems.clearAll();
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
             lsp.clearDiagnostics();
@@ -5860,7 +5860,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 return;
             }
 
-            liveLspProblems.clear();
+            problems.clearLive();
             languageServerReadyHandled.set(false);
             SwingUtilities.invokeLater(() -> {
                 if (current(ticket, root)) {
@@ -5897,7 +5897,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             buildToolsPanel.reload();
             return;
         }
-        JavaBuildToolsPanel panel = new JavaBuildToolsPanel(new BuildToolsHost());
+        JavaBuildToolsPanel panel = new JavaBuildToolsPanel(new BuildToolsHost(), background);
         buildToolsPanel = panel;
         Icon icon = JavaIcons.buildTool(descriptor, JavaIcons.SMALL);
         buildToolsPanelId = icon == null
@@ -6498,17 +6498,13 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (result == null) {
             return;
         }
-        Set<Path> affected = new LinkedHashSet<>(lastBuildDiagnostics.keySet());
-        lastBuildProblems = !result.diagnostics().isEmpty() || result.successful()
-                ? result.diagnostics()
+        List<BuildDiagnostic> reported = new ArrayList<>(result.diagnostics());
+        reported.addAll(StaticAnalysisReportParser.discover(descriptor));
+        List<BuildDiagnostic> published = !reported.isEmpty() || result.successful()
+                ? List.copyOf(reported)
                 : List.of(new BuildDiagnostic(null, 0, 0, DiagnosticSeverity.ERROR,
                         result.summary(), "build"));
-        lastBuildDiagnostics.clear();
-        BuildDiagnosticParser.byFile(lastBuildProblems).forEach((file, diagnostics) ->
-                lastBuildDiagnostics.put(file, diagnostics.stream()
-                        .map(BuildDiagnostic::toEditorDiagnostic)
-                        .toList()));
-        affected.addAll(lastBuildDiagnostics.keySet());
+        Set<Path> affected = problems.replaceBuild(published);
         affected.forEach(this::requestRefreshDiagnostics);
 
         SwingUtilities.invokeLater(() -> {
@@ -6545,7 +6541,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         DependencyManagerPanel panel = dependencyPanel;
         if (panel == null) {
-            panel = new DependencyManagerPanel(new DependencyManagerHost());
+            panel = new DependencyManagerPanel(dependencyManagerHost());
             dependencyPanel = panel;
         } else {
             panel.reloadModules();
@@ -6554,90 +6550,20 @@ public class JavaIdeAdapter extends IdeAdapter {
         switchToCenterTab(DEPENDENCIES_TAB_ID);
     }
 
-    private final class DependencyManagerHost implements DependencyManagerPanel.Host {
-
-        @Override
-        public List<JavaModule> modules() {
-            JavaProjectDescriptor current = descriptor;
-            if (current == null) {
-                return List.of();
+    private synchronized DependencyManagerCoordinator dependencyManagerHost() {
+        DependencyManagerCoordinator current = dependencyCoordinator;
+        if (current == null) {
+            current = new DependencyManagerCoordinator(background, mavenCentral, new OsvClient(),
+                    () -> descriptor, () -> buildSystem, this::ensureDependencyService,
+                    lifecycle::get, () -> projectRoot, this::current,
+                    this::afterDependencyChange);
+            dependencyCoordinator = current;
+            JavaPluginSettings active = settings;
+            if (active != null) {
+                current.setLocalOnly(active.isDependencySearchLocalOnly());
             }
-            List<JavaModule> buildable = current.buildableModules();
-            if (!buildable.isEmpty()) {
-                return buildable;
-            }
-            JavaModule root = current.rootModule();
-            return root == null ? List.of() : List.of(root);
         }
-
-        @Override
-        public List<DependencyCoordinate> declaredDependencies(JavaModule module) {
-            DependencyService dependencies = ensureDependencyService();
-            return dependencies == null ? List.of() : dependencies.declaredDependencies(module);
-        }
-
-        @Override
-        public void search(String query,
-                           java.util.function.Consumer<DependencyManagerPanel.SearchOutcome> onResult) {
-            background.submit(() -> onResult.accept(mavenCentral.trySearch(query)
-                    .map(DependencyManagerPanel.SearchOutcome::of)
-                    .orElseGet(DependencyManagerPanel.SearchOutcome::failure)));
-        }
-
-        @Override
-        public void versions(DependencyCoordinate coordinate,
-                             java.util.function.Consumer<List<String>> onResult) {
-            background.submit(() -> onResult.accept(
-                    mavenCentral.versions(coordinate.groupId(), coordinate.artifactId())));
-        }
-
-        @Override
-        public void latestVersions(List<DependencyCoordinate> coordinates,
-                                   java.util.function.Consumer<Map<String, String>> onResult) {
-            List<DependencyCoordinate> requested = coordinates == null
-                    ? List.of() : List.copyOf(coordinates);
-            background.submit(() -> {
-                Map<String, String> latest = new LinkedHashMap<>();
-                for (DependencyCoordinate coordinate : requested) {
-                    String version = mavenCentral.latestStableVersion(
-                            coordinate.groupId(), coordinate.artifactId());
-                    if (!version.isBlank()) {
-                        latest.put(coordinate.key(), version);
-                    }
-                }
-                onResult.accept(latest);
-            });
-        }
-
-        @Override
-        public void add(JavaModule module, DependencyCoordinate coordinate,
-                        java.util.function.Consumer<Boolean> onDone) {
-            background.submit(() -> {
-                boolean changed = ensureDependencyService().add(module, coordinate);
-                afterDependencyChange(changed);
-                onDone.accept(changed);
-            });
-        }
-
-        @Override
-        public void remove(JavaModule module, DependencyCoordinate coordinate,
-                           java.util.function.Consumer<Boolean> onDone) {
-            background.submit(() -> {
-                boolean changed = ensureDependencyService().remove(module, coordinate);
-                afterDependencyChange(changed);
-                onDone.accept(changed);
-            });
-        }
-
-        @Override
-        public void updateVersion(JavaModule module, DependencyCoordinate coordinate, String version,
-                                  java.util.function.Consumer<Boolean> onDone) {
-            background.submit(() -> {
-                boolean changed = ensureDependencyService().updateVersion(module, coordinate, version);
-                afterDependencyChange(changed);
-                onDone.accept(changed);
-            });
-        }
+        return current;
     }
 
     private void afterDependencyChange(boolean changed) {
@@ -6778,7 +6704,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             DependencyManagerPanel panel = dependencyPanel;
             if (panel == null) {
-                panel = new DependencyManagerPanel(new DependencyManagerHost());
+                panel = new DependencyManagerPanel(dependencyManagerHost());
                 dependencyPanel = panel;
             }
             return panel;
@@ -7012,6 +6938,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         springBaseUrl = current.getSpringBaseUrl();
+        applyDependencySearchSettings(current);
         Path root = projectRoot;
         if (root != null) {
             requestRefreshCodeLenses(root);
@@ -7019,6 +6946,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         SwingUtilities.invokeLater(this::refreshCoverageGutters);
         if (!applyBuildModeChange(current.getJdtBuildMode(), root)) {
             applyLombokSettingChange(root);
+        }
+    }
+
+    private void applyDependencySearchSettings(JavaPluginSettings current) {
+        mavenCentral.setRequestTimeout(
+                Duration.ofSeconds(current.getDependencySearchTimeoutSeconds()));
+        DependencyManagerCoordinator coordinator = dependencyCoordinator;
+        if (coordinator != null) {
+            coordinator.setLocalOnly(current.isDependencySearchLocalOnly());
         }
     }
 

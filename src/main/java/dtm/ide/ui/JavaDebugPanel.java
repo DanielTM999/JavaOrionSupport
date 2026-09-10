@@ -38,6 +38,7 @@ import java.awt.event.MouseEvent;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
 
 public final class JavaDebugPanel extends JPanel {
 
@@ -72,11 +73,12 @@ public final class JavaDebugPanel extends JPanel {
     }
 
     private final Host host;
+    private final Executor executor;
     private final DefaultListModel<JavaDebugSnapshot.ThreadInfo> threadModel = new DefaultListModel<>();
     private final DefaultListModel<JavaDebugSnapshot.StackFrame> frameModel = new DefaultListModel<>();
     private final JList<JavaDebugSnapshot.ThreadInfo> threads = new JList<>(threadModel);
     private final JList<JavaDebugSnapshot.StackFrame> frames = new JList<>(frameModel);
-    private final JavaDebugValueTree variables = new JavaDebugValueTree();
+    private final JavaDebugValueTree variables;
     private final CopyOnWriteArrayList<String> watchExpressions = new CopyOnWriteArrayList<>();
     private final DefaultTableModel watchModel = new DefaultTableModel(
             new Object[]{"Expression", "Value", "Type"}, 0) {
@@ -107,8 +109,15 @@ public final class JavaDebugPanel extends JPanel {
     private volatile JavaDebugSnapshot snapshot = JavaDebugSnapshot.starting("Debugger idle");
 
     public JavaDebugPanel(Host host) {
+        this(host, command -> Thread.startVirtualThread(command));
+    }
+
+    public JavaDebugPanel(Host host, Executor executor) {
         super(new BorderLayout());
         this.host = host;
+        this.executor = executor == null
+                ? command -> Thread.startVirtualThread(command) : executor;
+        this.variables = new JavaDebugValueTree(this.executor);
         setBackground(JavaDebugTheme.panel());
         variables.bindChildrenProvider(host::variables);
         ToolBarPanel toolbar = new ToolBarPanel().setPaintSurface(true)
@@ -364,7 +373,7 @@ public final class JavaDebugPanel extends JPanel {
             } catch (Exception error) {
                 return List.<JavaDebugSnapshot.Scope>of();
             }
-        }).thenAccept(values -> SwingUtilities.invokeLater(() -> {
+        }, executor).thenAccept(values -> SwingUtilities.invokeLater(() -> {
             variables.setScopes(values);
             refreshWatches(frameId);
         }));
@@ -389,7 +398,7 @@ public final class JavaDebugPanel extends JPanel {
                     return new JavaDebugSnapshot.Variable(expression,
                             "<" + safeMessage(error) + ">", "", 0);
                 }
-            }).thenAccept(value -> SwingUtilities.invokeLater(() -> {
+            }, executor).thenAccept(value -> SwingUtilities.invokeLater(() -> {
                 if (row < watchModel.getRowCount()
                         && expression.equals(watchModel.getValueAt(row, 0))) {
                     watchModel.setValueAt(value == null ? "—" : value.value(), row, 1);

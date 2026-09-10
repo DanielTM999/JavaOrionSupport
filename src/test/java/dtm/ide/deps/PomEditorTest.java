@@ -235,4 +235,60 @@ class PomEditorTest {
         assertEquals(POM_WITH_DEPENDENCIES, removed, "remover deve desfazer exatamente o adicionar");
         assertEquals(once, twice, "adicionar duas vezes deve dar o mesmo arquivo");
     }
+
+    @Test
+    void updatesALocalVersionPropertyWithoutReplacingThePlaceholder() {
+        String pom = """
+                <project>
+                    <properties>
+                        <itext.html.version>6.2.0</itext.html.version>
+                    </properties>
+                    <dependencies>
+                        <dependency>
+                            <groupId>com.itextpdf</groupId>
+                            <artifactId>html2pdf</artifactId>
+                            <version>${itext.html.version}</version>
+                        </dependency>
+                    </dependencies>
+                </project>
+                """;
+
+        assertTrue(PomEditor.hasProperty(pom, "itext.html.version"));
+        String updated = PomEditor.setProperty(pom, "itext.html.version", "6.2.1");
+
+        assertTrue(updated.contains("<itext.html.version>6.2.1</itext.html.version>"));
+        assertTrue(updated.contains("<version>${itext.html.version}</version>"));
+    }
+
+    @Test
+    void readsAndUpdatesOnlyTheDependencyManagementVersion() {
+        String pom = """
+                <project>
+                    <version>1.0.0</version>
+                    <dependencyManagement>
+                        <dependencies>
+                            <dependency>
+                                <groupId>org.slf4j</groupId>
+                                <artifactId>slf4j-api</artifactId>
+                                <version>2.0.16</version>
+                            </dependency>
+                        </dependencies>
+                    </dependencyManagement>
+                    <dependencies>
+                        <dependency>
+                            <groupId>org.slf4j</groupId>
+                            <artifactId>slf4j-api</artifactId>
+                        </dependency>
+                    </dependencies>
+                </project>
+                """;
+        DependencyCoordinate slf4j = DependencyCoordinate.of("org.slf4j", "slf4j-api", "");
+
+        assertEquals("2.0.16", PomEditor.managedVersion(pom, slf4j));
+        String updated = PomEditor.setManagedVersion(pom, slf4j, "2.0.17");
+
+        assertEquals("2.0.17", PomEditor.managedVersion(updated, slf4j));
+        assertTrue(updated.contains("<version>1.0.0</version>"));
+        assertFalse(PomEditor.readDependencies(updated).getFirst().hasVersion());
+    }
 }

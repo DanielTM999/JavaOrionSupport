@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -25,6 +26,7 @@ public final class JavaDebugSession implements AutoCloseable {
     private final JavaAttachTarget attachTarget;
     private final Path projectRoot;
     private final Consumer<JavaDebugSnapshot> listener;
+    private final Executor executor;
     private final Map<Path, Map<Integer, String>> breakpoints = new ConcurrentHashMap<>();
     private final CountDownLatch initialized = new CountDownLatch(1);
     private final AtomicBoolean configured = new AtomicBoolean();
@@ -38,18 +40,27 @@ public final class JavaDebugSession implements AutoCloseable {
                             List<RunBreakpointData> initialBreakpoints,
                             Consumer<JavaDebugSnapshot> listener) {
         this(adapterPort, JavaAttachTarget.local(jdwpPort), projectRoot, initialBreakpoints,
-                listener);
+                listener, command -> Thread.startVirtualThread(command));
     }
 
     public JavaDebugSession(int adapterPort, JavaAttachTarget attachTarget, Path projectRoot,
                             List<RunBreakpointData> initialBreakpoints,
                             Consumer<JavaDebugSnapshot> listener) {
+        this(adapterPort, attachTarget, projectRoot, initialBreakpoints, listener,
+                command -> Thread.startVirtualThread(command));
+    }
+
+    public JavaDebugSession(int adapterPort, JavaAttachTarget attachTarget, Path projectRoot,
+                            List<RunBreakpointData> initialBreakpoints,
+                            Consumer<JavaDebugSnapshot> listener, Executor executor) {
         this.adapterPort = adapterPort;
         this.attachTarget = attachTarget == null
                 ? JavaAttachTarget.local(0) : attachTarget;
         this.projectRoot = projectRoot == null ? null : projectRoot.toAbsolutePath().normalize();
         this.listener = listener == null ? value -> {
         } : listener;
+        this.executor = executor == null
+                ? command -> Thread.startVirtualThread(command) : executor;
         seedBreakpoints(initialBreakpoints);
     }
 
@@ -170,7 +181,7 @@ public final class JavaDebugSession implements AutoCloseable {
             } catch (Exception error) {
                 fail(error);
             }
-        });
+        }, executor);
     }
 
     public CompletableFuture<JsonNode> redefineClasses() {
@@ -298,7 +309,7 @@ public final class JavaDebugSession implements AutoCloseable {
             } catch (Exception error) {
                 fail(error);
             }
-        });
+        }, executor);
     }
 
     private List<JavaDebugSnapshot.Variable> loadFrameVariables(int frameId) throws Exception {

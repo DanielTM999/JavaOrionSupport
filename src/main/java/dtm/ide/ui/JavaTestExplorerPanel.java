@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.Set;
 import java.util.LinkedHashSet;
 import java.util.function.Consumer;
@@ -76,6 +77,7 @@ public final class JavaTestExplorerPanel extends JPanel {
     }
 
     private final Host host;
+    private final Executor executor;
 
     private final TreeView<Object> tree = new TreeView<>();
     private final JTextArea details = new JTextArea();
@@ -115,8 +117,14 @@ public final class JavaTestExplorerPanel extends JPanel {
     private volatile long discoveryTicket;
 
     public JavaTestExplorerPanel(Host host) {
+        this(host, command -> Thread.startVirtualThread(command));
+    }
+
+    public JavaTestExplorerPanel(Host host, Executor executor) {
         super(new BorderLayout(0, UiTokens.space(2)));
         this.host = host;
+        this.executor = executor == null
+                ? command -> Thread.startVirtualThread(command) : executor;
         setBackground(UiTokens.background());
         setBorder(BorderFactory.createEmptyBorder(
                 UiTokens.space(2), UiTokens.space(2), UiTokens.space(2), UiTokens.space(2)));
@@ -232,7 +240,7 @@ public final class JavaTestExplorerPanel extends JPanel {
         refreshButton.setEnabled(false);
         status.setText(text("status.discovering", "Descobrindo testes..."))
                 .setTone(BadgeLabel.Tone.INFO);
-        java.util.concurrent.CompletableFuture.supplyAsync(host::discover)
+        java.util.concurrent.CompletableFuture.supplyAsync(host::discover, executor)
                 .whenComplete((discovered, error) -> SwingUtilities.invokeLater(() -> {
                     if (ticket != discoveryTicket) {
                         return;

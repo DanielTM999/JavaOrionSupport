@@ -5,6 +5,7 @@ import dtm.ide.api.theme.EditorThemeConfig;
 import dtm.ide.editor.tokenizer.ConfigTokenizerProvider;
 import dtm.ide.editor.tokenizer.GradleTokenizerProvider;
 import dtm.ide.editor.tokenizer.JavaTokenizerProvider;
+import dtm.ide.editor.tokenizer.JpaQueryTokenizer;
 import dtm.stools.component.panels.editor.code.prototype.Token;
 import dtm.stools.component.panels.editor.code.prototype.constants.TokenType;
 
@@ -75,6 +76,12 @@ public final class JavaEditorTheme implements EditorTheme {
             case JavaTokenizerProvider.TOKEN_METHOD -> METHOD;
             case JavaTokenizerProvider.TOKEN_JAVADOC -> JAVADOC;
             case JavaTokenizerProvider.TOKEN_TEXT_BLOCK -> STRING;
+            case JpaQueryTokenizer.TOKEN_KEYWORD -> KEYWORD;
+            case JpaQueryTokenizer.TOKEN_ENTITY -> TYPE;
+            case JpaQueryTokenizer.TOKEN_ALIAS -> ANNOTATION;
+            case JpaQueryTokenizer.TOKEN_PROPERTY -> CONFIG_KEY;
+            case JpaQueryTokenizer.TOKEN_FUNCTION -> METHOD;
+            case JpaQueryTokenizer.TOKEN_PARAMETER -> PLACEHOLDER;
             case ConfigTokenizerProvider.TOKEN_KEY -> CONFIG_KEY;
             case ConfigTokenizerProvider.TOKEN_PLACEHOLDER -> PLACEHOLDER;
             case ConfigTokenizerProvider.TOKEN_DOCUMENT_MARKER -> MUTED;

@@ -147,6 +147,25 @@ class LspConversionsTest {
     }
 
     @Test
+    void keepsLabelDetailsAsThePopupDetailColumn() {
+        AutoCompleteItem item = LspConversions.completionItem(json("""
+                {"label":"Data","kind":8,"insertText":"Data",
+                 "labelDetails":{"description":"lombok"}}
+                """));
+
+        assertEquals("Data", item.label());
+        assertEquals("Data", item.insertText());
+        assertEquals("lombok", item.detail());
+    }
+
+    @Test
+    void stripsLegacyPackageSuffixWhenTheLabelIsTheOnlyInsertableText() {
+        assertEquals("Data", LspConversions.completionItem(json("""
+                {"label":"Data - lombok","kind":8}
+                """)).insertText());
+    }
+
+    @Test
     void semanticKindWinsOverSnippetWireFormat() {
         AutoCompleteItem item = LspConversions.completionItem(json("""
                 {"label":"trim()","insertText":"trim(${1:value})","insertTextFormat":2,"kind":2}

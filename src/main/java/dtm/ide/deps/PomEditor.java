@@ -15,6 +15,10 @@ public final class PomEditor {
     private static final Pattern DEPENDENCY_BLOCK = Pattern.compile(
             "(?s)<dependency\\s*>(.*?)</dependency\\s*>");
     private static final Pattern PROJECT_CLOSE = Pattern.compile("</project\\s*>\\s*$");
+    private static final Pattern PROPERTIES_BLOCK = Pattern.compile(
+            "(?s)<properties\\s*>(.*?)</properties\\s*>");
+    private static final Pattern DEPENDENCY_MANAGEMENT_BLOCK = Pattern.compile(
+            "(?s)<dependencyManagement\\s*>(.*?)</dependencyManagement\\s*>");
 
     private static final List<String> FOREIGN_SECTIONS =
             List.of("dependencyManagement", "build", "reporting", "profiles");
@@ -40,6 +44,50 @@ public final class PomEditor {
     public static boolean contains(String pomXml, DependencyCoordinate coordinate) {
         return coordinate != null && readDependencies(pomXml).stream()
                 .anyMatch(existing -> existing.sameArtifact(coordinate));
+    }
+
+    public static boolean hasProperty(String pomXml, String name) {
+        return locateProperty(pomXml, name).isPresent();
+    }
+
+    public static String setProperty(String pomXml, String name, String newValue) {
+        if (pomXml == null || name == null || name.isBlank()
+                || newValue == null || newValue.isBlank()) {
+            return pomXml;
+        }
+        Optional<int[]> bounds = locateProperty(pomXml, name);
+        if (bounds.isEmpty()) {
+            return pomXml;
+        }
+        return pomXml.substring(0, bounds.get()[0]) + newValue
+                + pomXml.substring(bounds.get()[1]);
+    }
+
+    public static String managedVersion(String pomXml, DependencyCoordinate coordinate) {
+        return locateManagedDependency(pomXml, coordinate)
+                .map(bounds -> firstGroup(pomXml.substring(bounds[0], bounds[1]), "version"))
+                .orElse("");
+    }
+
+    public static String setManagedVersion(String pomXml, DependencyCoordinate coordinate,
+                                           String newVersion) {
+        if (pomXml == null || coordinate == null || newVersion == null || newVersion.isBlank()) {
+            return pomXml;
+        }
+        Optional<int[]> bounds = locateManagedDependency(pomXml, coordinate);
+        if (bounds.isEmpty()) {
+            return pomXml;
+        }
+        int start = bounds.get()[0];
+        int end = bounds.get()[1];
+        String block = pomXml.substring(start, end);
+        Matcher version = tagPattern("version").matcher(block);
+        if (!version.find()) {
+            return pomXml;
+        }
+        String updated = block.substring(0, version.start(1)) + newVersion
+                + block.substring(version.end(1));
+        return pomXml.substring(0, start) + updated + pomXml.substring(end);
     }
 
     public static String addDependency(String pomXml, DependencyCoordinate coordinate) {
@@ -186,6 +234,49 @@ public final class PomEditor {
             DependencyCoordinate parsed = parseBlock(dependency.group(1));
             if (parsed != null && parsed.sameArtifact(coordinate)) {
                 return Optional.of(new int[]{offset + dependency.start(), offset + dependency.end()});
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<int[]> locateProperty(String pomXml, String name) {
+        if (pomXml == null || name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        Matcher properties = PROPERTIES_BLOCK.matcher(pomXml);
+        if (!properties.find()) {
+            return Optional.empty();
+        }
+        Pattern property = Pattern.compile("(?s)<" + Pattern.quote(name)
+                + "\\s*>(.*?)</" + Pattern.quote(name) + "\\s*>");
+        Matcher value = property.matcher(properties.group(1));
+        if (!value.find()) {
+            return Optional.empty();
+        }
+        int offset = properties.start(1);
+        return Optional.of(new int[]{offset + value.start(1), offset + value.end(1)});
+    }
+
+    private static Optional<int[]> locateManagedDependency(
+            String pomXml, DependencyCoordinate coordinate) {
+        if (pomXml == null || coordinate == null) {
+            return Optional.empty();
+        }
+        Matcher management = DEPENDENCY_MANAGEMENT_BLOCK.matcher(pomXml);
+        while (management.find()) {
+            int managementOffset = management.start(1);
+            Matcher dependencies = DEPENDENCIES_BLOCK.matcher(management.group(1));
+            if (!dependencies.find()) {
+                continue;
+            }
+            int dependenciesOffset = managementOffset + dependencies.start(1);
+            Matcher dependency = DEPENDENCY_BLOCK.matcher(dependencies.group(1));
+            while (dependency.find()) {
+                DependencyCoordinate parsed = parseBlock(dependency.group(1));
+                if (parsed != null && parsed.sameArtifact(coordinate)) {
+                    return Optional.of(new int[]{dependenciesOffset + dependency.start(),
+                            dependenciesOffset + dependency.end()});
+                }
             }
         }
         return Optional.empty();

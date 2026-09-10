@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 public final class JavaBuildToolsPanel extends JPanel {
 
@@ -91,6 +92,7 @@ public final class JavaBuildToolsPanel extends JPanel {
     }
 
     private final Host host;
+    private final Executor executor;
     private final TreeView<BuildToolModel.Node> tree = new TreeView<>();
     private final MaskedTextField filter = new MaskedTextField();
     private final BadgeLabel toolBadge = badge("Build Tools", BadgeLabel.Tone.PRIMARY);
@@ -123,8 +125,14 @@ public final class JavaBuildToolsPanel extends JPanel {
     private boolean filterRebuildQueued;
 
     public JavaBuildToolsPanel(Host host) {
+        this(host, command -> Thread.startVirtualThread(command));
+    }
+
+    public JavaBuildToolsPanel(Host host, Executor executor) {
         super(new BorderLayout(0, UiTokens.space(2)));
         this.host = host;
+        this.executor = executor == null
+                ? command -> Thread.startVirtualThread(command) : executor;
         setBackground(UiTokens.background());
         setBorder(BorderFactory.createEmptyBorder(
                 UiTokens.space(2), UiTokens.space(2), UiTokens.space(2), UiTokens.space(2)));
@@ -171,7 +179,7 @@ public final class JavaBuildToolsPanel extends JPanel {
         cards.show(body, CARD_LOADING);
         refreshButton.setEnabled(false);
         status.setText(text("status.loading", "Carregando")).setTone(BadgeLabel.Tone.INFO);
-        CompletableFuture.supplyAsync(() -> new LoadedModel(host.load(), host.activeProfiles()))
+        CompletableFuture.supplyAsync(() -> new LoadedModel(host.load(), host.activeProfiles()), executor)
                 .whenComplete((value, error) -> SwingUtilities.invokeLater(() -> {
                     if (ticket != reloadTicket) {
                         return;

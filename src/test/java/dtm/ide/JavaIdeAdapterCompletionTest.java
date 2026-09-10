@@ -32,13 +32,21 @@ class JavaIdeAdapterCompletionTest {
     }
 
     @Test
-    void derivesGhostTextFromInsertTextOrLabelIgnoringCaseAsFallback() {
+    void derivesGhostTextFromInsertTextIgnoringCaseAsFallback() {
         assertEquals("String()", JavaIdeAdapter.ghostTextSuffix(List.of(
                 AutoCompleteItem.snippet("toString", "toString(${1})")), "to"));
         assertEquals("stem", JavaIdeAdapter.ghostTextSuffix(
                 List.of(new AutoCompleteItem("System")), "Sy"));
         assertEquals("stem", JavaIdeAdapter.ghostTextSuffix(
                 List.of(new AutoCompleteItem("System")), "sy"));
+    }
+
+    @Test
+    void neverOffersTheDisplayLabelAsGhostText() {
+        AutoCompleteItem annotation = new AutoCompleteItem("Data", "Data - lombok", "lombok",
+                null, null, AutoCompleteItem.Kind.INTERFACE);
+
+        assertNull(JavaIdeAdapter.ghostTextSuffix(List.of(annotation), "Data"));
     }
 
     @Test

@@ -25,12 +25,14 @@ import java.awt.event.MouseEvent;
 import java.awt.geom.RoundRectangle2D;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class JavaDebugValuePopup {
 
     private static final int WIDTH = 540;
-    private final JavaDebugValueTree tree = new JavaDebugValueTree();
+    private final JavaDebugValueTree tree;
+    private final Executor executor;
     private final Timer hideTimer = new Timer(8_000, event -> hide());
     private final AtomicLong ticket = new AtomicLong();
     private volatile JavaDebugValueTree.ChildrenProvider childrenProvider = reference -> List.of();
@@ -39,6 +41,13 @@ public final class JavaDebugValuePopup {
     private volatile AWTEventListener outsideClickListener;
 
     public JavaDebugValuePopup() {
+        this(command -> Thread.startVirtualThread(command));
+    }
+
+    public JavaDebugValuePopup(Executor executor) {
+        this.executor = executor == null
+                ? command -> Thread.startVirtualThread(command) : executor;
+        this.tree = new JavaDebugValueTree(this.executor);
         hideTimer.setRepeats(false);
     }
 
@@ -63,7 +72,7 @@ public final class JavaDebugValuePopup {
             } catch (Exception error) {
                 return List.<JavaDebugSnapshot.Variable>of();
             }
-        }).thenAccept(values -> SwingUtilities.invokeLater(() ->
+        }, executor).thenAccept(values -> SwingUtilities.invokeLater(() ->
                 showChildren(value, location, currentTicket, values)));
     }
 

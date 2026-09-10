@@ -267,16 +267,21 @@ public final class JpaSourceParser {
             }
             String name = matcher.group(2);
             List<Annotation> annotations = JavaSourceLexer.annotationsBefore(body, matcher.start());
-            String jpql = JavaSourceLexer.firstStringLiteral(
-                    JavaSourceLexer.argumentsOf(annotations, "query"));
-            if (jpql.isBlank()) {
-                jpql = JavaSourceLexer.namedArgument(
-                        JavaSourceLexer.argumentsOf(annotations, "query"), "value");
+            Annotation query = JavaSourceLexer.annotationNamed(annotations, "query");
+            boolean declaredQuery = query != null;
+            String queryArguments = declaredQuery ? query.arguments() : "";
+            String valueRegion = JavaSourceLexer.namedArgumentRegion(queryArguments, "value");
+            String queryExpression = valueRegion.isBlank()
+                    ? JavaSourceLexer.firstArgumentRegion(queryArguments) : valueRegion;
+            queryExpression = queryExpression.strip();
+            if (queryExpression.endsWith(",")) {
+                queryExpression = queryExpression.substring(0, queryExpression.length() - 1);
             }
+            String jpql = JavaSourceLexer.concatenatedStringLiterals(queryExpression);
             JpaDerivedQuery.Parsed parsed = JpaDerivedQuery.parse(name);
-            String queryArguments = JavaSourceLexer.argumentsOf(annotations, "query");
-            boolean nativeQuery = queryArguments.replaceAll("\\s+", "")
-                    .contains("nativeQuery=true");
+            boolean nativeQuery = Pattern.compile("^true\\b").matcher(
+                    JavaSourceLexer.namedArgumentRegion(
+                            queryArguments, "nativeQuery").trim()).find();
             methods.add(new JpaQueryMethod(
                     name,
                     JavaSourceLexer.lineOf(lineStarts, bodyOffset + matcher.start()),
@@ -287,7 +292,8 @@ public final class JpaSourceParser {
                     parsed.derived(),
                     parameterNamesOf(body.literal(), matcher.start(3), matcher.end(3)),
                     JavaSourceLexer.hasAnnotation(annotations, "modifying"),
-                    nativeQuery));
+                    nativeQuery,
+                    declaredQuery));
         }
         return methods;
     }

@@ -116,7 +116,7 @@ construído em milissegundos ao abrir o projeto e atualizado a cada gravação.
 
 ## Testes e cobertura
 
-O Test Explorer descobre testes JUnit 4/5 e TestNG, executa por pacote, classe ou método, repete só
+O Test Explorer descobre testes JUnit 4/5/6 e TestNG, executa por pacote, classe ou método, repete só
 as falhas e abre a linha apontada pela stack trace.
 
 **Rodar com cobertura** executa a mesma suíte com o agente JaCoCo empacotado no plugin — nada é
@@ -150,8 +150,26 @@ inicialização, e não na JVM do servidor.
 
 Busca no Maven Central por nome ou por `grupo:artefato`, mostra as versões publicadas e escreve a
 dependência no `pom.xml` ou no `build.gradle(.kts)` — **preservando a formatação e os comentários do
-arquivo**, porque a escrita é textual e cirúrgica, não uma reserialização. Também remove e atualiza
-para a versão estável mais recente, ignorando snapshots e release candidates.
+arquivo**, porque a escrita é textual e cirúrgica, não uma reserialização. A aba **Instaladas** mostra
+a versão efetivamente resolvida, inclusive quando a declaração usa uma propriedade ou herda do
+`dependencyManagement`. Ao atualizar, o painel preserva esse gerenciamento: altera a propriedade ou
+a entrada local de origem; versões controladas por parent/BOM externo permanecem somente leitura.
+
+A busca combina o Maven Central com o repositório Maven local configurado — inclusive quando ele foi
+movido para fora de `~/.m2`. Artefatos e versões locais recebem um selo próprio, e o índice é atualizado
+automaticamente quando o conteúdo do repositório muda. Em projetos Gradle, versões exclusivamente
+locais exigem `mavenLocal()` nos repositórios do build.
+
+A aba **Saúde** resolve a árvore de dependências, diferencia itens diretos e transitivos, mostra o
+caminho que trouxe cada artefato e sinaliza versões em conflito. Vulnerabilidades conhecidas são
+consultadas no serviço público OSV, sem autenticação. Quando a ferramenta de build, a rede ou o OSV
+não está disponível, o painel preserva os dados locais e apresenta o estado parcial em vez de falhar.
+Cada atualização exibe uma prévia e pede confirmação antes de alterar o arquivo de build.
+
+Consultas JPA declaradas em `@Query` têm realce e conclusão de JPQL ou SQL nativo, com entidades,
+aliases, propriedades, tabelas, colunas e parâmetros. Literais concatenados são compreendidos como
+uma consulta única; constantes e SpEL são deliberadamente tratados de forma conservadora. Para SQL
+nativo, a conclusão é assistiva e não substitui a validação semântica do banco.
 
 ---
 

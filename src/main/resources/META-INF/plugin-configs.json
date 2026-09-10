@@ -4,7 +4,7 @@
   ],
   "pluginCollectionId": "java-orion-support",
   "pluginCollectionName": "Java / Spring Orion Support",
-  "pluginCollectionVersion": "1.0.0",
+  "pluginCollectionVersion": "${project.version}",
   "pluginCollectionDescription": "Suporte ao desenvolvimento Java na Orion IDE: IntelliSense via Eclipse JDT LS, Maven/Gradle/javac, gerenciamento de JDKs, debug DAP, JUnit e suporte completo a Spring (beans, endpoints, configuration properties e Actuator ao vivo)",
   "pluginCollectionAuthor": "DanielTM999",
   "pluginCollectionAuthorEmail": "danielmelo101203@gmail.com",
@@ -16,14 +16,14 @@
       "id": "java-ide-adapter",
       "name": "Java / Spring IDE Adapter",
       "description": "Adapter de projetos Java para a Orion IDE com realce de sintaxe, IntelliSense, build Maven/Gradle, debug e suporte a Spring",
-      "version": "1.0.0",
+      "version": "${project.version}",
       "website": "https://github.com/DanielTM999/JavaOrionSupport"
     },
     {
       "id": "java-project-wizard",
       "name": "Java / Spring Project Wizard",
       "description": "Wizard para criacao de novos projetos Java, incluindo Spring Boot via Initializr",
-      "version": "1.0.0",
+      "version": "${project.version}",
       "website": "https://github.com/DanielTM999/JavaOrionSupport"
     }
   ]

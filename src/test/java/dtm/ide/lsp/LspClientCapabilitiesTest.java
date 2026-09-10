@@ -26,6 +26,18 @@ class LspClientCapabilitiesTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void advertisesLabelDetailsSoTypesDoNotArriveWithThePackageInTheLabel() {
+        Map<String, Object> capabilities = LspClientCapabilities.build(List.of(), List.of());
+        Map<String, Object> textDocument =
+                (Map<String, Object>) capabilities.get("textDocument");
+        Map<String, Object> completion = (Map<String, Object>) textDocument.get("completion");
+        Map<String, Object> completionItem = (Map<String, Object>) completion.get("completionItem");
+
+        assertEquals(true, completionItem.get("labelDetailsSupport"));
+    }
+
+    @Test
     void readsCodeLensProviderFromServerHandshake() throws Exception {
         var result = MAPPER.readTree("""
                 {"capabilities":{"codeLensProvider":{"resolveProvider":true},

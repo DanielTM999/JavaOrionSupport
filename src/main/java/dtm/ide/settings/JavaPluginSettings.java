@@ -38,9 +38,14 @@ public final class JavaPluginSettings {
     private static final String KEY_SPRING_BASE_URL = "springBaseUrl";
     private static final String KEY_SAFE_DELETE = "safeDelete";
     private static final String KEY_JDT_BUILD_MODE = "jdtBuildMode";
+    private static final String KEY_DEPENDENCY_SEARCH_TIMEOUT = "dependencySearchTimeoutSeconds";
+    private static final String KEY_DEPENDENCY_SEARCH_LOCAL_ONLY = "dependencySearchLocalOnly";
 
     public static final String DEFAULT_SPRING_BASE_URL = "http://localhost:8080";
     public static final String DEFAULT_LANGUAGE_SERVER_MEMORY = "2G";
+    public static final int DEFAULT_DEPENDENCY_SEARCH_TIMEOUT = 10;
+    public static final int MIN_DEPENDENCY_SEARCH_TIMEOUT = 1;
+    public static final int MAX_DEPENDENCY_SEARCH_TIMEOUT = 60;
 
     private final Path settingsFile;
 
@@ -68,6 +73,8 @@ public final class JavaPluginSettings {
     private String springBaseUrl = DEFAULT_SPRING_BASE_URL;
     private boolean safeDelete = true;
     private JdtBuildMode jdtBuildMode = JdtBuildMode.PROJECT_BUILD;
+    private int dependencySearchTimeoutSeconds = DEFAULT_DEPENDENCY_SEARCH_TIMEOUT;
+    private boolean dependencySearchLocalOnly;
 
     public JavaPluginSettings(Path settingsDirectory) {
         this.settingsFile = settingsDirectory == null ? null : settingsDirectory.resolve(FILE_NAME);
@@ -306,6 +313,23 @@ public final class JavaPluginSettings {
         this.springBaseUrl = url == null || url.isBlank() ? DEFAULT_SPRING_BASE_URL : url.trim();
     }
 
+    public int getDependencySearchTimeoutSeconds() {
+        return dependencySearchTimeoutSeconds;
+    }
+
+    public void setDependencySearchTimeoutSeconds(int seconds) {
+        this.dependencySearchTimeoutSeconds = Math.clamp(seconds,
+                MIN_DEPENDENCY_SEARCH_TIMEOUT, MAX_DEPENDENCY_SEARCH_TIMEOUT);
+    }
+
+    public boolean isDependencySearchLocalOnly() {
+        return dependencySearchLocalOnly;
+    }
+
+    public void setDependencySearchLocalOnly(boolean value) {
+        this.dependencySearchLocalOnly = value;
+    }
+
     public void restoreDefaults() {
         languageServerMode = LanguageServerMode.AUTO;
         languageServerMemory = DEFAULT_LANGUAGE_SERVER_MEMORY;
@@ -331,6 +355,8 @@ public final class JavaPluginSettings {
         springBaseUrl = DEFAULT_SPRING_BASE_URL;
         safeDelete = true;
         jdtBuildMode = JdtBuildMode.PROJECT_BUILD;
+        dependencySearchTimeoutSeconds = DEFAULT_DEPENDENCY_SEARCH_TIMEOUT;
+        dependencySearchLocalOnly = false;
     }
 
     public void load() {
@@ -372,6 +398,9 @@ public final class JavaPluginSettings {
         springInfra = bool(properties, KEY_SPRING_INFRA, true);
         disabledInspections = splitInspections(properties.getProperty(KEY_DISABLED_INSPECTIONS));
         springBaseUrl = properties.getProperty(KEY_SPRING_BASE_URL, DEFAULT_SPRING_BASE_URL);
+        setDependencySearchTimeoutSeconds(integer(properties, KEY_DEPENDENCY_SEARCH_TIMEOUT,
+                DEFAULT_DEPENDENCY_SEARCH_TIMEOUT));
+        dependencySearchLocalOnly = bool(properties, KEY_DEPENDENCY_SEARCH_LOCAL_ONLY, false);
     }
 
     public void save() {
@@ -403,6 +432,10 @@ public final class JavaPluginSettings {
         properties.setProperty(KEY_SPRING_RUNTIME_BEANS, Boolean.toString(springRuntimeBeans));
         properties.setProperty(KEY_SPRING_INFRA, Boolean.toString(springInfra));
         properties.setProperty(KEY_DISABLED_INSPECTIONS, String.join(",", disabledInspections));
+        properties.setProperty(KEY_DEPENDENCY_SEARCH_TIMEOUT,
+                Integer.toString(dependencySearchTimeoutSeconds));
+        properties.setProperty(KEY_DEPENDENCY_SEARCH_LOCAL_ONLY,
+                Boolean.toString(dependencySearchLocalOnly));
         properties.setProperty(KEY_SPRING_BASE_URL, springBaseUrl);
 
         try {

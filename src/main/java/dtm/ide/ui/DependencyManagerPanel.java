@@ -1,7 +1,15 @@
 package dtm.ide.ui;
 
 import dtm.ide.deps.DependencyCoordinate;
-import dtm.ide.deps.MavenCentralClient;
+import dtm.ide.deps.DependencyHealthSnapshot;
+import dtm.ide.deps.DependencyInventorySnapshot;
+import dtm.ide.deps.DependencySearchResult;
+import dtm.ide.deps.DependencyVersionChoice;
+import dtm.ide.deps.DependencyVulnerability;
+import dtm.ide.deps.DependencyVersionOrigin;
+import dtm.ide.deps.ManagedDependency;
+import dtm.ide.deps.MavenVersionOrder;
+import dtm.ide.deps.ResolvedDependency;
 import dtm.ide.project.JavaModule;
 import dtm.stools.component.feedback.badge.BadgeLabel;
 import dtm.stools.component.inputfields.segmentedfield.SegmentedField;
@@ -26,7 +34,9 @@ import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JPanel;
+import javax.swing.JOptionPane;
 import javax.swing.JSplitPane;
+import javax.swing.JTextArea;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
@@ -58,33 +68,44 @@ public final class DependencyManagerPanel extends JPanel {
 
         List<DependencyCoordinate> declaredDependencies(JavaModule module);
 
-        void search(String query, Consumer<SearchOutcome> onResult);
+        void search(String query, boolean includePreReleases, Consumer<SearchOutcome> onResult);
 
-        void versions(DependencyCoordinate coordinate, Consumer<List<String>> onResult);
+        void versions(DependencyCoordinate coordinate, boolean includePreReleases,
+                      Consumer<List<DependencyVersionChoice>> onResult);
+
+        boolean canInstallLocal(JavaModule module);
+
+        void onLocalRepositoryChanged(Runnable listener);
 
         void latestVersions(List<DependencyCoordinate> coordinates,
                             Consumer<Map<String, String>> onResult);
+
+        void inventory(JavaModule module, List<DependencyCoordinate> declared,
+                       Consumer<DependencyInventorySnapshot> onResult);
+
+        void health(JavaModule module, DependencyInventorySnapshot inventory,
+                    Consumer<DependencyHealthSnapshot> onResult);
 
         void add(JavaModule module, DependencyCoordinate coordinate, Consumer<Boolean> onDone);
 
         void remove(JavaModule module, DependencyCoordinate coordinate, Consumer<Boolean> onDone);
 
-        void updateVersion(JavaModule module, DependencyCoordinate coordinate, String version,
+        void updateVersion(JavaModule module, ManagedDependency dependency, String version,
                            Consumer<Boolean> onDone);
     }
 
-    public record SearchOutcome(List<MavenCentralClient.SearchResult> results, boolean failed) {
+    public enum RemoteStatus { OK, FAILED, SKIPPED }
 
-        public static SearchOutcome of(List<MavenCentralClient.SearchResult> results) {
-            return new SearchOutcome(results == null ? List.of() : results, false);
-        }
+    public record SearchOutcome(List<DependencySearchResult> results, RemoteStatus remote,
+                                boolean localUnavailable) {
 
-        public static SearchOutcome failure() {
-            return new SearchOutcome(List.of(), true);
+        public SearchOutcome {
+            results = results == null ? List.of() : List.copyOf(results);
+            remote = remote == null ? RemoteStatus.OK : remote;
         }
     }
 
-    private enum Tab { BROWSE, INSTALLED, UPDATES }
+    private enum Tab { BROWSE, INSTALLED, UPDATES, HEALTH }
 
     private static final List<String> SCOPES =
             List.of("compile", "test", "provided", "runtime", "annotationProcessor");
@@ -113,9 +134,13 @@ public final class DependencyManagerPanel extends JPanel {
     private final JLabel detailCoordinate = new JLabel();
     private final JLabel detailVersions = new JLabel();
     private final JLabel detailPublished = new JLabel();
-    private final JComboBox<String> versionSelector = new JComboBox<>();
+    private final JLabel detailVersionOrigin = new JLabel();
+    private final JTextArea detailHealth = wrappingText();
+    private final JTextArea detailPath = wrappingText();
+    private final JComboBox<DependencyVersionChoice> versionSelector = new JComboBox<>();
     private final JComboBox<String> scopeSelector = new JComboBox<>(SCOPES.toArray(String[]::new));
     private final JPanel detailBody = new JPanel(new BorderLayout(0, UiTokens.space(2)));
+    private final JPanel editForm = new JPanel();
     private final JLabel detailPlaceholder = new JLabel();
 
     private final JButton addButton =
@@ -130,15 +155,24 @@ public final class DependencyManagerPanel extends JPanel {
     private final BadgeLabel status = new BadgeLabel(" ", BadgeLabel.Tone.NEUTRAL);
     private final Timer searchDebounce = new Timer(SEARCH_DEBOUNCE_MS, event -> runSearch());
 
-    private List<MavenCentralClient.SearchResult> searchResults = List.of();
+    private List<DependencySearchResult> searchResults = List.of();
+    private SearchOutcome lastSearchOutcome =
+            new SearchOutcome(List.of(), RemoteStatus.OK, false);
     private List<DependencyCoordinate> installed = List.of();
     private Map<String, String> latestVersions = Map.of();
     private Map<String, DependencyCoordinate> installedByKey = Map.of();
+    private DependencyInventorySnapshot inventory = DependencyInventorySnapshot.empty();
+    private DependencyHealthSnapshot health = DependencyHealthSnapshot.empty();
+    private boolean inventoryLoaded;
     private boolean updatesLoaded;
+    private boolean healthLoaded;
+    private long searchGeneration;
 
     public DependencyManagerPanel(Host host) {
         super(new BorderLayout(0, UiTokens.space(2)));
         this.host = host;
+        versionSelector.setRenderer(new DependencyVersionChoiceRenderer());
+        host.onLocalRepositoryChanged(() -> onUi(this::onLocalRepositoryChanged));
         int pad = UiTokens.space(2);
         setBorder(BorderFactory.createEmptyBorder(pad, pad, pad, pad));
         setBackground(UiTokens.background());
@@ -166,6 +200,7 @@ public final class DependencyManagerPanel extends JPanel {
         tabs.addSegment(text("tab.browse", "Buscar"), Tab.BROWSE);
         tabs.addSegment(text("tab.installed", "Instaladas"), Tab.INSTALLED);
         tabs.addSegment(text("tab.updates", "Atualizacoes"), Tab.UPDATES);
+        tabs.addSegment(text("tab.health", "Saude"), Tab.HEALTH);
         tabs.setAnimated(true);
         tabs.setArc(UiTokens.radius(UiTokens.Radius.SM));
         tabs.setPreferredHeight(UiTokens.scale(PillButtons.FIELD_HEIGHT));
@@ -209,10 +244,18 @@ public final class DependencyManagerPanel extends JPanel {
     }
 
     private JComponent body() {
-        SplitPanel split = new SplitPanel(JSplitPane.HORIZONTAL_SPLIT, listPane(), detailsPane());
-        split.setResizeWeight(0.62);
+        JComponent list = listPane();
+        JComponent details = detailsPane();
+        list.setMinimumSize(new Dimension(UiTokens.scale(340), UiTokens.scale(240)));
+        details.setMinimumSize(new Dimension(UiTokens.scale(380), UiTokens.scale(240)));
+        SplitPanel split = new SplitPanel(JSplitPane.HORIZONTAL_SPLIT, list, details);
+        split.setResizeWeight(0.50);
+        split.setDividerLocation(0.50);
         split.setDividerThickness(UiTokens.space(2));
+        split.setCollapseOnDoubleClick(true);
+        split.setPreferredSize(new Dimension(UiTokens.scale(900), UiTokens.scale(480)));
         split.setBorder(BorderFactory.createEmptyBorder());
+        SwingUtilities.invokeLater(() -> split.setDividerLocation(0.50));
         return split;
     }
 
@@ -260,6 +303,12 @@ public final class DependencyManagerPanel extends JPanel {
         detailVersions.setForeground(UiTokens.muted());
         detailPublished.setFont(UiTokens.fontSmall());
         detailPublished.setForeground(UiTokens.muted());
+        detailVersionOrigin.setFont(UiTokens.fontSmall());
+        detailVersionOrigin.setForeground(UiTokens.muted());
+        detailHealth.setFont(UiTokens.fontSmall());
+        detailHealth.setForeground(UiTokens.foreground());
+        detailPath.setFont(UiTokens.fontSmall());
+        detailPath.setForeground(UiTokens.muted());
 
         JPanel heading = new JPanel();
         heading.setOpaque(false);
@@ -270,6 +319,10 @@ public final class DependencyManagerPanel extends JPanel {
         heading.add(Box.createVerticalStrut(UiTokens.space(2)));
         heading.add(leftAligned(detailVersions));
         heading.add(leftAligned(detailPublished));
+        heading.add(leftAligned(detailVersionOrigin));
+        heading.add(Box.createVerticalStrut(UiTokens.space(1)));
+        heading.add(leftAligned(detailHealth));
+        heading.add(leftAligned(detailPath));
 
         detailBody.setOpaque(false);
         detailBody.add(heading, BorderLayout.NORTH);
@@ -281,17 +334,33 @@ public final class DependencyManagerPanel extends JPanel {
         detailPlaceholder.setFont(UiTokens.fontSmall());
         detailPlaceholder.setForeground(UiTokens.muted());
 
-        JPanel details = new JPanel(new BorderLayout());
-        details.setOpaque(false);
-        details.setBorder(BorderFactory.createEmptyBorder(
+        JPanel content = new JPanel(new BorderLayout());
+        content.setOpaque(false);
+        content.setBorder(BorderFactory.createEmptyBorder(
                 UiTokens.space(2), UiTokens.space(4), UiTokens.space(2), UiTokens.space(2)));
-        details.add(detailBody, BorderLayout.NORTH);
-        details.add(detailPlaceholder, BorderLayout.CENTER);
-        return details;
+        content.add(detailBody, BorderLayout.NORTH);
+        content.add(detailPlaceholder, BorderLayout.CENTER);
+        ScrollPanel scroll = new ScrollPanel(content);
+        scroll.setScrollBarThickness(UiTokens.scale(9));
+        scroll.setBorder(BorderFactory.createEmptyBorder());
+        return scroll;
+    }
+
+    private static JTextArea wrappingText() {
+        JTextArea area = new JTextArea();
+        area.setEditable(false);
+        area.setFocusable(true);
+        area.setOpaque(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.setBorder(BorderFactory.createEmptyBorder());
+        area.setRows(1);
+        area.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return area;
     }
 
     private JComponent form() {
-        JPanel form = new JPanel();
+        JPanel form = editForm;
         form.setOpaque(false);
         form.setLayout(new BoxLayout(form, BoxLayout.Y_AXIS));
 
@@ -387,11 +456,15 @@ public final class DependencyManagerPanel extends JPanel {
         moduleSelector.addActionListener(event -> reloadInstalled());
         prereleaseCheck.addActionListener(event -> {
             updatesLoaded = false;
-            onRowSelected();
-            if (currentTab() == Tab.UPDATES) {
+            if (currentTab() == Tab.BROWSE) {
+                runSearch();
+            } else if (currentTab() == Tab.UPDATES) {
                 loadUpdates();
+            } else {
+                onRowSelected();
             }
         });
+        versionSelector.addActionListener(event -> refreshAddAvailability());
 
         addButton.addActionListener(event -> addSelected());
         removeButton.addActionListener(event -> removeSelected());
@@ -417,8 +490,16 @@ public final class DependencyManagerPanel extends JPanel {
     private void onTabChanged() {
         searchDebounce.stop();
         applyTabState();
+        if (currentTab() != Tab.BROWSE && !inventoryLoaded) {
+            showCard(CARD_LOADING);
+            setStatus(text("status.resolvingVersions", "Resolvendo versoes efetivas..."),
+                    BadgeLabel.Tone.INFO);
+            return;
+        }
         if (currentTab() == Tab.UPDATES && !updatesLoaded) {
             loadUpdates();
+        } else if (currentTab() == Tab.HEALTH && !healthLoaded) {
+            loadHealth();
         } else {
             refreshRows();
         }
@@ -431,7 +512,8 @@ public final class DependencyManagerPanel extends JPanel {
         updateButton.setVisible(tab == Tab.INSTALLED || tab == Tab.UPDATES);
         updateAllButton.setVisible(tab == Tab.UPDATES);
         scopeSelector.setEnabled(tab == Tab.BROWSE);
-        updateAllButton.setEnabled(tab == Tab.UPDATES && !latestVersions.isEmpty());
+        editForm.setVisible(tab != Tab.HEALTH);
+        updateAllButton.setEnabled(tab == Tab.UPDATES && hasApplicableUpdates());
     }
 
     public void reloadModules() {
@@ -451,35 +533,105 @@ public final class DependencyManagerPanel extends JPanel {
         Map<String, DependencyCoordinate> byKey = new LinkedHashMap<>();
         installed.forEach(coordinate -> byKey.put(coordinate.key(), coordinate));
         installedByKey = byKey;
+        inventory = DependencyInventorySnapshot.empty();
+        inventoryLoaded = module == null;
         updatesLoaded = false;
+        healthLoaded = false;
+        health = DependencyHealthSnapshot.empty();
         refreshRows();
+        if (module != null) {
+            loadInventory(module, List.copyOf(installed));
+        }
+    }
+
+    private void loadInventory(JavaModule module, List<DependencyCoordinate> declared) {
+        if (currentTab() != Tab.BROWSE) {
+            showCard(CARD_LOADING);
+            setStatus(text("status.resolvingVersions", "Resolvendo versoes efetivas..."),
+                    BadgeLabel.Tone.INFO);
+        }
+        host.inventory(module, declared, snapshot -> onUi(() -> {
+            if (!module.equals(selectedModule())) {
+                return;
+            }
+            inventory = snapshot == null
+                    ? new DependencyInventorySnapshot(List.of(), List.of(), true) : snapshot;
+            inventoryLoaded = true;
+            if (currentTab() == Tab.HEALTH) {
+                loadHealth();
+            } else if (currentTab() == Tab.UPDATES) {
+                loadUpdates();
+            } else {
+                refreshRows();
+                if (currentTab() == Tab.INSTALLED) {
+                    setStatus(inventory.resolutionFailed()
+                                    ? text("status.resolutionPartial",
+                                            "Algumas versoes nao puderam ser resolvidas.")
+                                    : text("status.versionsResolved", "Versoes efetivas resolvidas."),
+                            inventory.resolutionFailed()
+                                    ? BadgeLabel.Tone.WARNING : BadgeLabel.Tone.NEUTRAL);
+                }
+            }
+        }));
     }
 
     private void runSearch() {
         String query = searchField.getText();
+        long request = ++searchGeneration;
         if (query == null || query.isBlank()) {
             searchResults = List.of();
             refreshRows();
             return;
         }
         showCard(CARD_LOADING);
-        setStatus(text("status.searching", "Buscando no Maven Central..."),
+        setStatus(text("status.searching", "Buscando dependencias locais e na web..."),
                 BadgeLabel.Tone.INFO);
-        host.search(query, outcome -> onUi(() -> {
-            searchResults = outcome.results();
-            if (outcome.failed()) {
-                setStatus(text("status.searchFailed",
-                        "Nao foi possivel consultar o Maven Central. Verifique a conexao."),
-                        BadgeLabel.Tone.DANGER);
-            } else {
-                setStatus(outcome.results().size() + " "
-                        + text("status.results", "resultado(s)"), BadgeLabel.Tone.NEUTRAL);
+        host.search(query, acceptablePreRelease(), outcome -> onUi(() -> {
+            if (request != searchGeneration) {
+                return;
             }
+            searchResults = outcome.results();
+            lastSearchOutcome = outcome;
+            applySearchStatus(outcome);
             refreshRows();
         }));
     }
 
+    private void applySearchStatus(SearchOutcome outcome) {
+        if (outcome.remote() == RemoteStatus.SKIPPED) {
+            setStatus(text("status.searchLocalOnly",
+                            "Exibindo apenas o repositorio Maven local."),
+                    BadgeLabel.Tone.NEUTRAL);
+        } else if (outcome.remote() == RemoteStatus.FAILED && !outcome.results().isEmpty()) {
+            setStatus(text("status.searchPartial",
+                    "Maven Central indisponivel; exibindo resultados locais."),
+                    BadgeLabel.Tone.WARNING);
+        } else if (outcome.remote() == RemoteStatus.FAILED) {
+            setStatus(text("status.searchFailed",
+                            "Nao foi possivel consultar o Maven Central. Verifique a conexao."),
+                    BadgeLabel.Tone.DANGER);
+        } else if (outcome.localUnavailable()) {
+            setStatus(text("status.localUnavailable",
+                            "Repositorio Maven local indisponivel; exibindo resultados da web."),
+                    BadgeLabel.Tone.WARNING);
+        } else {
+            setStatus(outcome.results().size() + " "
+                    + text("status.results", "resultado(s)"), BadgeLabel.Tone.NEUTRAL);
+        }
+    }
+
+    private void onLocalRepositoryChanged() {
+        if (currentTab() == Tab.BROWSE && searchField.getText() != null
+                && !searchField.getText().isBlank()) {
+            runSearch();
+        }
+    }
+
     private void loadUpdates() {
+        if (!inventoryLoaded) {
+            showCard(CARD_LOADING);
+            return;
+        }
         if (installed.isEmpty()) {
             latestVersions = Map.of();
             updatesLoaded = true;
@@ -488,11 +640,44 @@ public final class DependencyManagerPanel extends JPanel {
         }
         showCard(CARD_LOADING);
         setStatus(text("status.checkingVersions", "Consultando versoes..."), BadgeLabel.Tone.INFO);
-        host.latestVersions(installed, versions -> onUi(() -> {
+        host.latestVersions(inventory.effectiveDeclared(), versions -> onUi(() -> {
             latestVersions = versions == null ? Map.of() : versions;
             updatesLoaded = true;
             refreshRows();
             setStatus(text("status.updatesChecked", "Versoes conferidas."), BadgeLabel.Tone.NEUTRAL);
+        }));
+    }
+
+    private void loadHealth() {
+        JavaModule module = selectedModule();
+        if (module == null) {
+            health = DependencyHealthSnapshot.empty();
+            healthLoaded = true;
+            refreshRows();
+            return;
+        }
+        if (!inventoryLoaded) {
+            showCard(CARD_LOADING);
+            return;
+        }
+        showCard(CARD_LOADING);
+        setStatus(text("status.checkingHealth", "Analisando dependencias..."),
+                BadgeLabel.Tone.INFO);
+        host.health(module, inventory, snapshot -> onUi(() -> {
+            if (!module.equals(selectedModule())) {
+                return;
+            }
+            health = snapshot == null ? DependencyHealthSnapshot.empty() : snapshot;
+            healthLoaded = true;
+            refreshRows();
+            if (health.graphFailed() || health.vulnerabilityLookupFailed()) {
+                setStatus(text("status.healthPartial",
+                        "Analise parcial; verifique a conexao e a ferramenta de build."),
+                        BadgeLabel.Tone.WARNING);
+            } else {
+                setStatus(text("status.healthChecked", "Saude das dependencias verificada."),
+                        BadgeLabel.Tone.NEUTRAL);
+            }
         }));
     }
 
@@ -502,6 +687,7 @@ public final class DependencyManagerPanel extends JPanel {
             case BROWSE -> browseRows();
             case INSTALLED -> installedRows();
             case UPDATES -> updateRows();
+            case HEALTH -> healthRows();
         };
 
         rows.clear();
@@ -520,7 +706,7 @@ public final class DependencyManagerPanel extends JPanel {
 
     private List<PackageRowRenderer.Row> browseRows() {
         List<PackageRowRenderer.Row> built = new ArrayList<>();
-        for (MavenCentralClient.SearchResult result : searchResults) {
+        for (DependencySearchResult result : searchResults) {
             DependencyCoordinate coordinate = result.coordinate();
             DependencyCoordinate declared = installedByKey.get(coordinate.key());
             String meta = coordinate.groupId()
@@ -528,9 +714,12 @@ public final class DependencyManagerPanel extends JPanel {
                     + separator() + result.versionCount() + " "
                     + text("label.versionsShort", "versoes")
                     + publishedSuffix(result.lastUpdated());
+            String primary = result.local() ? text("badge.local", "local")
+                    : declared == null ? "" : text("badge.installed", "instalada");
+            String secondary = result.local() && declared != null
+                    ? text("badge.installed", "instalada") : "";
             built.add(new PackageRowRenderer.Row(coordinate, coordinate.artifactId(), meta,
-                    declared == null ? "" : text("badge.installed", "instalada"),
-                    BadgeLabel.Tone.SUCCESS));
+                    primary, BadgeLabel.Tone.SUCCESS, secondary, BadgeLabel.Tone.NEUTRAL));
         }
         return built;
     }
@@ -538,11 +727,8 @@ public final class DependencyManagerPanel extends JPanel {
     private List<PackageRowRenderer.Row> installedRows() {
         List<PackageRowRenderer.Row> built = new ArrayList<>();
         for (DependencyCoordinate coordinate : filtered(installed)) {
-            String version = coordinate.hasVersion()
-                    ? coordinate.version()
-                    : text("value.inherited", "(herdada)");
             built.add(new PackageRowRenderer.Row(coordinate, coordinate.artifactId(),
-                    coordinate.groupId() + separator() + version,
+                    coordinate.groupId() + separator() + displayVersion(coordinate),
                     coordinate.scope(),
                     coordinate.isTestScope() ? BadgeLabel.Tone.INFO : BadgeLabel.Tone.NEUTRAL));
         }
@@ -552,17 +738,64 @@ public final class DependencyManagerPanel extends JPanel {
     private List<PackageRowRenderer.Row> updateRows() {
         List<PackageRowRenderer.Row> built = new ArrayList<>();
         for (DependencyCoordinate coordinate : filtered(installed)) {
+            ManagedDependency managed = managedOf(coordinate);
+            String current = resolvedVersion(coordinate);
             String latest = latestVersions.get(coordinate.key());
-            if (latest == null || latest.isBlank() || !coordinate.hasVersion()
-                    || latest.equals(coordinate.version())) {
+            if (managed == null || !managed.versionEditable() || current.isBlank()
+                    || !isNewerVersion(latest, current)) {
                 continue;
             }
             built.add(new PackageRowRenderer.Row(coordinate, coordinate.artifactId(),
                     coordinate.groupId() + separator()
-                            + coordinate.version() + "  →  " + latest,
+                            + current + "  →  " + latest,
                     text("badge.updateAvailable", "atualizacao"), BadgeLabel.Tone.WARNING));
         }
         return built;
+    }
+
+    private List<PackageRowRenderer.Row> healthRows() {
+        List<PackageRowRenderer.Row> built = new ArrayList<>();
+        Map<String, ResolvedDependency> unique = new LinkedHashMap<>();
+        for (ResolvedDependency dependency : health.dependencies()) {
+            if (dependency.coordinate() != null) {
+                unique.putIfAbsent(dependency.coordinate().notation(), dependency);
+            }
+        }
+        for (ResolvedDependency dependency : unique.values()) {
+            DependencyCoordinate coordinate = dependency.coordinate();
+            if (!matches(coordinate)) {
+                continue;
+            }
+            List<DependencyVulnerability> vulnerabilities = health.vulnerabilitiesOf(coordinate);
+            String badge;
+            BadgeLabel.Tone tone;
+            if (!vulnerabilities.isEmpty()) {
+                badge = vulnerabilities.size() + " " + text("badge.vulnerabilities", "vulnerabilidade(s)");
+                tone = BadgeLabel.Tone.DANGER;
+            } else if (dependency.conflict()) {
+                badge = text("badge.conflict", "conflito");
+                tone = BadgeLabel.Tone.WARNING;
+            } else if (dependency.transitive()) {
+                badge = text("badge.transitive", "transitiva");
+                tone = BadgeLabel.Tone.INFO;
+            } else {
+                badge = text("badge.direct", "direta");
+                tone = BadgeLabel.Tone.NEUTRAL;
+            }
+            String meta = coordinate.groupId() + separator()
+                    + (coordinate.hasVersion() ? coordinate.version()
+                    : text("value.inherited", "(herdada)"));
+            built.add(new PackageRowRenderer.Row(coordinate, coordinate.artifactId(), meta,
+                    badge, tone));
+        }
+        return built;
+    }
+
+    private boolean matches(DependencyCoordinate coordinate) {
+        String query = searchField.getText();
+        return query == null || query.isBlank()
+                || coordinate.key().toLowerCase(Locale.ROOT)
+                .contains(query.trim().toLowerCase(Locale.ROOT));
     }
 
     private List<DependencyCoordinate> filtered(List<DependencyCoordinate> coordinates) {
@@ -588,7 +821,7 @@ public final class DependencyManagerPanel extends JPanel {
                         ? text("empty.noResults.description",
                                 "Tente outro termo, ou cole a coordenada grupo:artefato.")
                         : text("empty.search.description",
-                                "Digite o nome da biblioteca para consultar o Maven Central."));
+                                "Digite o nome para consultar o repositorio local e o Maven Central."));
             }
             case INSTALLED -> {
                 emptyState.setTitle(text("empty.installed.title", "Nenhuma dependencia declarada"));
@@ -599,6 +832,11 @@ public final class DependencyManagerPanel extends JPanel {
                 emptyState.setTitle(text("empty.updates.title", "Tudo atualizado"));
                 emptyState.setDescription(text("empty.updates.description",
                         "Nenhuma dependencia declarada tem versao estavel mais nova."));
+            }
+            case HEALTH -> {
+                emptyState.setTitle(text("empty.health.title", "Nenhuma dependencia resolvida"));
+                emptyState.setDescription(text("empty.health.description",
+                        "Execute a resolucao novamente ou confira a ferramenta de build."));
             }
         }
     }
@@ -626,13 +864,25 @@ public final class DependencyManagerPanel extends JPanel {
     private void onRowSelected() {
         DependencyCoordinate coordinate = selectedCoordinate();
         boolean hasSelection = coordinate != null;
+        ManagedDependency managed = hasSelection ? managedOf(coordinate) : null;
+        DependencySearchResult searchResult = hasSelection ? searchResultOf(coordinate) : null;
         detailBody.setVisible(hasSelection);
         detailPlaceholder.setVisible(!hasSelection);
         addButton.setEnabled(hasSelection);
         removeButton.setEnabled(hasSelection);
-        updateButton.setEnabled(hasSelection);
+        boolean updateAllowed = hasSelection && (currentTab() == Tab.BROWSE
+                || managed != null && managed.versionEditable());
+        updateButton.setEnabled(updateAllowed);
+        updateButton.setToolTipText(hasSelection && !updateAllowed
+                && (currentTab() == Tab.INSTALLED || currentTab() == Tab.UPDATES)
+                ? text("details.externallyManaged",
+                        "Versao gerenciada por um parent ou BOM externo; altere-a na origem.")
+                : null);
         if (!hasSelection) {
             versionSelector.setModel(new DefaultComboBoxModel<>());
+            detailVersionOrigin.setText("");
+            detailHealth.setText("");
+            detailPath.setText("");
             return;
         }
 
@@ -640,34 +890,132 @@ public final class DependencyManagerPanel extends JPanel {
         detailCoordinate.setText(coordinate.key());
         detailVersions.setText(versionSummary(coordinate));
         detailPublished.setText(publishedSummary(coordinate));
+        detailVersionOrigin.setText(currentTab() == Tab.BROWSE
+                ? localRepositorySummary(searchResult) : versionOriginSummary(managed));
+        updateHealthDetails(coordinate);
         scopeSelector.setSelectedItem(SCOPES.contains(coordinate.scope())
                 ? coordinate.scope() : SCOPES.get(0));
 
-        String current = coordinate.hasVersion() ? coordinate.version() : "";
+        String current = currentTab() == Tab.BROWSE
+                ? safeLiteralVersion(coordinate.version()) : resolvedVersion(coordinate);
+        boolean currentLocal = searchResult != null
+                && searchResult.localVersions().contains(current);
+        boolean currentRemote = searchResult != null && searchResult.remote() && !currentLocal;
         versionSelector.setModel(current.isBlank()
                 ? new DefaultComboBoxModel<>()
-                : new DefaultComboBoxModel<>(new String[]{current}));
-        host.versions(coordinate, versions -> onUi(() -> {
+                : new DefaultComboBoxModel<>(new DependencyVersionChoice[]{
+                        new DependencyVersionChoice(current, currentLocal, currentRemote)}));
+        if (currentTab() == Tab.HEALTH) {
+            return;
+        }
+        host.versions(coordinate, acceptablePreRelease(), versions -> onUi(() -> {
             DependencyCoordinate stillSelected = selectedCoordinate();
             if (stillSelected == null || !stillSelected.sameArtifact(coordinate)) {
                 return;
             }
-            List<String> offered = acceptablePreRelease()
-                    ? versions
-                    : versions.stream().filter(MavenCentralClient::isStable).toList();
+            List<DependencyVersionChoice> offered = currentTab() == Tab.BROWSE
+                    ? versions : versions.stream().filter(DependencyVersionChoice::remote).toList();
             if (offered.isEmpty()) {
+                refreshAddAvailability();
                 return;
             }
-            versionSelector.setModel(new DefaultComboBoxModel<>(offered.toArray(String[]::new)));
+            versionSelector.setModel(new DefaultComboBoxModel<>(
+                    offered.toArray(DependencyVersionChoice[]::new)));
             String preferred = currentTab() == Tab.UPDATES
-                    ? latestVersions.getOrDefault(coordinate.key(), offered.get(0))
-                    : offered.contains(current) ? current : offered.get(0);
-            versionSelector.setSelectedItem(preferred);
+                    ? latestVersions.getOrDefault(coordinate.key(), offered.getFirst().version())
+                    : offered.stream().anyMatch(choice -> choice.version().equals(current))
+                    ? current : offered.getFirst().version();
+            selectVersion(preferred);
+            refreshAddAvailability();
         }));
+        refreshAddAvailability();
+    }
+
+    private void updateHealthDetails(DependencyCoordinate coordinate) {
+        if (currentTab() != Tab.HEALTH) {
+            setWrappedText(detailHealth, "");
+            setWrappedText(detailPath, "");
+            return;
+        }
+        ResolvedDependency resolved = health.dependencies().stream()
+                .filter(dependency -> dependency.coordinate() != null
+                        && dependency.coordinate().notation().equals(coordinate.notation()))
+                .findFirst().orElse(null);
+        List<DependencyVulnerability> vulnerabilities = health.vulnerabilitiesOf(coordinate);
+        if (!vulnerabilities.isEmpty()) {
+            setWrappedText(detailHealth, text("details.vulnerabilities", "Vulnerabilidades:")
+                    + "\n" + vulnerabilities.stream().map(DependencyVulnerability::id)
+                    .distinct().map(id -> "• " + id)
+                    .reduce((left, right) -> left + "\n" + right).orElse(""));
+        } else if (resolved != null && resolved.conflict()) {
+            setWrappedText(detailHealth, text("details.conflict", "Conflito de versao detectado")
+                    + (resolved.requestedVersion().isBlank() ? ""
+                    : ": " + resolved.requestedVersion() + " → " + coordinate.version()));
+        } else {
+            setWrappedText(detailHealth, text("details.noKnownVulnerability",
+                    "Nenhuma vulnerabilidade conhecida encontrada."));
+        }
+        setWrappedText(detailPath, resolved == null || resolved.path().isEmpty() ? ""
+                : text("details.path", "Caminho:") + "\n"
+                + String.join("\n  → ", resolved.path()));
+    }
+
+    private ManagedDependency managedOf(DependencyCoordinate coordinate) {
+        return coordinate == null ? null : inventory.dependency(coordinate.key());
+    }
+
+    private String resolvedVersion(DependencyCoordinate coordinate) {
+        ManagedDependency managed = managedOf(coordinate);
+        if (managed != null && managed.versionResolved()) {
+            return managed.resolvedVersion();
+        }
+        return inventoryLoaded ? safeLiteralVersion(coordinate.version()) : "";
+    }
+
+    private String displayVersion(DependencyCoordinate coordinate) {
+        String version = resolvedVersion(coordinate);
+        if (!version.isBlank()) {
+            ManagedDependency managed = managedOf(coordinate);
+            return version + (managed != null && managed.managed()
+                    ? " " + text("value.managed", "(gerenciada)") : "");
+        }
+        return inventoryLoaded
+                ? text("value.unresolved", "(nao resolvida)")
+                : text("value.resolving", "(resolvendo...)");
+    }
+
+    private static String safeLiteralVersion(String version) {
+        return version == null || ManagedDependency.isPlaceholder(version) ? "" : version;
+    }
+
+    private String versionOriginSummary(ManagedDependency managed) {
+        if (managed == null || currentTab() == Tab.BROWSE || currentTab() == Tab.HEALTH) {
+            return "";
+        }
+        String description = switch (managed.versionOrigin()) {
+            case DIRECT -> text("details.origin.direct", "declarada diretamente");
+            case LOCAL_PROPERTY -> text("details.origin.property", "propriedade local")
+                    + (managed.propertyName().isBlank() ? "" : " “" + managed.propertyName() + "”");
+            case LOCAL_MANAGEMENT -> text("details.origin.management",
+                    "dependencyManagement local");
+            case EXTERNAL_MANAGEMENT -> text("details.origin.external",
+                    "parent ou BOM externo (somente leitura)");
+            case UNRESOLVED -> text("details.origin.unresolved", "origem nao resolvida");
+        };
+        String file = managed.sourceFile() == null ? ""
+                : " · " + managed.sourceFile().getFileName();
+        return text("details.versionOrigin", "Origem da versao:") + " " + description + file;
+    }
+
+    private static void setWrappedText(JTextArea area, String value) {
+        String content = value == null ? "" : value;
+        area.setText(content);
+        area.setRows(Math.max(1, Math.min(8, (int) content.lines().count())));
+        area.revalidate();
     }
 
     private String versionSummary(DependencyCoordinate coordinate) {
-        for (MavenCentralClient.SearchResult result : searchResults) {
+        for (DependencySearchResult result : searchResults) {
             if (result.coordinate().sameArtifact(coordinate)) {
                 return result.versionCount() + " "
                         + text("label.versionsAvailable", "versoes publicadas");
@@ -680,13 +1028,62 @@ public final class DependencyManagerPanel extends JPanel {
     }
 
     private String publishedSummary(DependencyCoordinate coordinate) {
-        for (MavenCentralClient.SearchResult result : searchResults) {
+        for (DependencySearchResult result : searchResults) {
             if (result.coordinate().sameArtifact(coordinate) && result.lastUpdated() > 0) {
                 return text("label.published", "Publicada em:") + " "
                         + formatDate(result.lastUpdated());
             }
         }
         return "";
+    }
+
+    private DependencySearchResult searchResultOf(DependencyCoordinate coordinate) {
+        return searchResults.stream().filter(result -> result.coordinate().sameArtifact(coordinate))
+                .findFirst().orElse(null);
+    }
+
+    private String localRepositorySummary(DependencySearchResult result) {
+        if (result == null || !result.local() || result.localRepository() == null) {
+            return "";
+        }
+        return text("details.localRepository", "Repositorio local:") + " "
+                + result.localRepository();
+    }
+
+    private void selectVersion(String version) {
+        for (int index = 0; index < versionSelector.getItemCount(); index++) {
+            DependencyVersionChoice choice = versionSelector.getItemAt(index);
+            if (choice != null && choice.version().equals(version)) {
+                versionSelector.setSelectedIndex(index);
+                return;
+            }
+        }
+    }
+
+    private void refreshAddAvailability() {
+        if (currentTab() != Tab.BROWSE) {
+            return;
+        }
+        DependencyVersionChoice choice = selectedVersionChoice();
+        JavaModule module = selectedModule();
+        boolean blocked = choice != null && choice.localOnly()
+                && !host.canInstallLocal(module);
+        addButton.setEnabled(selectedCoordinate() != null && choice != null
+                && !choice.version().isBlank() && !blocked);
+        addButton.setToolTipText(blocked ? text("details.gradleMavenLocalRequired",
+                "Adicione mavenLocal() aos repositorios do Gradle para usar esta versao local.")
+                : null);
+        if (blocked) {
+            setStatus(text("status.gradleMavenLocalRequired",
+                            "Esta versao existe apenas localmente; configure mavenLocal() no Gradle."),
+                    BadgeLabel.Tone.WARNING);
+        } else if (currentTab() == Tab.BROWSE && !searchResults.isEmpty()) {
+            applySearchStatus(lastSearchOutcome);
+        }
+    }
+
+    private DependencyVersionChoice selectedVersionChoice() {
+        return (DependencyVersionChoice) versionSelector.getSelectedItem();
     }
 
     private String publishedSuffix(long lastUpdated) {
@@ -721,7 +1118,13 @@ public final class DependencyManagerPanel extends JPanel {
         if (selected == null || module == null) {
             return;
         }
-        String version = (String) versionSelector.getSelectedItem();
+        DependencyVersionChoice choice = selectedVersionChoice();
+        if (choice == null || choice.version().isBlank()
+                || choice.localOnly() && !host.canInstallLocal(module)) {
+            refreshAddAvailability();
+            return;
+        }
+        String version = choice.version();
         String scope = (String) scopeSelector.getSelectedItem();
         DependencyCoordinate coordinate = selected.withVersion(version).withScope(scope);
 
@@ -750,13 +1153,27 @@ public final class DependencyManagerPanel extends JPanel {
         if (selected == null || module == null) {
             return;
         }
-        String target = (String) versionSelector.getSelectedItem();
-        if (target == null || target.isBlank() || target.equals(selected.version())) {
+        ManagedDependency managed = managedOf(selected);
+        if (managed == null || !managed.versionEditable()) {
+            setStatus(text("status.managedExternally",
+                    "A versao e gerenciada por um parent ou BOM externo e nao pode ser alterada aqui."),
+                    BadgeLabel.Tone.WARNING);
+            return;
+        }
+        String current = resolvedVersion(selected);
+        DependencyVersionChoice choice = selectedVersionChoice();
+        String target = choice == null ? "" : choice.version();
+        if (target == null || target.isBlank() || target.equals(current)) {
             setStatus(text("status.upToDate", "Ja esta na versao mais recente."),
                     BadgeLabel.Tone.NEUTRAL);
             return;
         }
-        host.updateVersion(module, selected, target, changed -> onUi(() ->
+        String preview = selected.key() + "\n" + current + "  →  " + target
+                + updateOriginPreview(managed);
+        if (!confirmUpdate(preview)) {
+            return;
+        }
+        host.updateVersion(module, managed, target, changed -> onUi(() ->
                 reportChange(changed, selected.key() + " → " + target)));
     }
 
@@ -765,23 +1182,43 @@ public final class DependencyManagerPanel extends JPanel {
         if (module == null) {
             return;
         }
-        List<Map.Entry<DependencyCoordinate, String>> pending = new ArrayList<>();
+        List<Map.Entry<ManagedDependency, String>> pending = new ArrayList<>();
         for (int index = 0; index < rows.size(); index++) {
             DependencyCoordinate coordinate = rows.get(index).coordinate();
+            ManagedDependency managed = managedOf(coordinate);
+            if (managed == null || !managed.versionEditable()) {
+                continue;
+            }
             String latest = latestVersions.get(coordinate.key());
-            if (latest != null && !latest.isBlank() && !latest.equals(coordinate.version())) {
-                pending.add(Map.entry(coordinate, latest));
+            if (isNewerVersion(latest, managed.resolvedVersion())) {
+                pending.add(Map.entry(managed, latest));
             }
         }
         if (pending.isEmpty()) {
+            return;
+        }
+        String preview = pending.stream()
+                .map(entry -> entry.getKey().key() + ": " + entry.getKey().resolvedVersion()
+                        + " → " + entry.getValue() + updateOriginPreview(entry.getKey()))
+                .reduce((left, right) -> left + "\n" + right).orElse("");
+        if (!confirmUpdate(preview)) {
             return;
         }
         updateAllButton.setEnabled(false);
         applyNextUpdate(module, pending, 0, 0);
     }
 
+    private boolean confirmUpdate(String preview) {
+        int answer = JOptionPane.showConfirmDialog(this,
+                text("confirm.update.message", "As seguintes versoes serao alteradas:")
+                        + "\n\n" + preview,
+                text("confirm.update.title", "Confirmar atualizacao"),
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+        return answer == JOptionPane.OK_OPTION;
+    }
+
     private void applyNextUpdate(JavaModule module,
-                                 List<Map.Entry<DependencyCoordinate, String>> pending,
+                                 List<Map.Entry<ManagedDependency, String>> pending,
                                  int index, int applied) {
         if (index >= pending.size()) {
             onUi(() -> {
@@ -792,10 +1229,40 @@ public final class DependencyManagerPanel extends JPanel {
             });
             return;
         }
-        Map.Entry<DependencyCoordinate, String> target = pending.get(index);
+        Map.Entry<ManagedDependency, String> target = pending.get(index);
         host.updateVersion(module, target.getKey(), target.getValue(), changed ->
                 applyNextUpdate(module, pending, index + 1,
                         Boolean.TRUE.equals(changed) ? applied + 1 : applied));
+    }
+
+    private String updateOriginPreview(ManagedDependency managed) {
+        if (managed.versionOrigin() == DependencyVersionOrigin.LOCAL_PROPERTY) {
+            return "\n  " + text("confirm.update.property", "Propriedade atualizada:")
+                    + " " + managed.propertyName();
+        }
+        if (managed.versionOrigin() == DependencyVersionOrigin.LOCAL_MANAGEMENT) {
+            return "\n  " + text("confirm.update.management",
+                    "Entrada atualizada no dependencyManagement");
+        }
+        return "";
+    }
+
+    private boolean hasApplicableUpdates() {
+        for (DependencyCoordinate coordinate : installed) {
+            ManagedDependency managed = managedOf(coordinate);
+            if (managed != null && managed.versionEditable()
+                    && isNewerVersion(latestVersions.get(coordinate.key()),
+                    managed.resolvedVersion())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isNewerVersion(String candidate, String current) {
+        return candidate != null && !candidate.isBlank()
+                && current != null && !current.isBlank()
+                && MavenVersionOrder.compare(candidate, current) > 0;
     }
 
     private void reportChange(Boolean changed, String done) {

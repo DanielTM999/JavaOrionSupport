@@ -10,6 +10,7 @@ projetos Maven e Gradle, execução, depuração, testes e ferramentas Spring em
 - Refatorações, ações rápidas, geração de código e Safe Delete com busca de usos.
 - Projetos Maven, Gradle Groovy/Kotlin e Java sem ferramenta de build.
 - Painel **Problemas** com erros navegáveis do Java, Maven, Gradle e JUnit.
+- Relatórios existentes do Checkstyle, PMD e SpotBugs integrados ao painel **Problemas**.
 - Gerenciamento e provisionamento de JDKs, JDT LS e extensões Java.
 - Execução em terminal PTY e configurações reutilizáveis por projeto.
 - Depuração DAP, breakpoints condicionais, watches, avaliação e hot reload.
@@ -78,7 +79,7 @@ dele, o plugin resolve uma instalação disponível.
 | **Testes** | Descobre, executa e depura testes por pacote, classe ou método, com cobertura opcional. |
 | **Debug** | Mostra threads, pilha, variáveis, watches e controles de execução. |
 | **Spring** | Apresenta beans, injeções, endpoints, propriedades e informações do Actuator. |
-| **Dependências** | Pesquisa artefatos e atualiza `pom.xml` ou scripts Gradle. |
+| **Dependências** | Pesquisa no Maven Central e no repositório local configurado, mostra saúde/árvore e atualiza `pom.xml` ou scripts Gradle. |
 | **JDK Manager** | Seleciona, baixa e gerencia as JDKs usadas pelo projeto. |
 | **TODO** | Agrupa marcadores configuráveis encontrados no código. |
 
@@ -95,11 +96,22 @@ Ao excluir uma classe com **Safe Delete**, o plugin procura referências pelo JD
 verificação local de segurança. Se encontrar usos fora da seleção, permite visualizá-los ou cancelar
 a exclusão.
 
+Consultas JPA em `@Query` recebem realce e sugestões de palavras-chave, entidades, aliases,
+propriedades e parâmetros, inclusive quando o texto está dividido em literais concatenados. JPQL e
+SQL nativo usam vocabulários distintos. Em `nativeQuery = true`, há sugestões de tabelas, colunas e
+SQL, mas a validação semântica completa fica a cargo do banco de dados. Expressões SpEL e consultas
+montadas com constantes são tratadas de forma conservadora para evitar diagnósticos incorretos.
+
 ## Build, execução e testes
 
 As ações de build incluem `compile`, `rebuild`, `clean`, `test`, `package` e `install`. A saída
 completa permanece disponível no terminal, enquanto os erros relevantes são convertidos em itens
 navegáveis no painel **Problemas**.
+
+Se o projeto já produz XML do Checkstyle, PMD ou SpotBugs nos caminhos convencionais do Maven ou
+Gradle, os achados também aparecem no painel **Problemas**, identificados pela ferramenta de origem.
+O plugin apenas lê os relatórios existentes: ele não instala nem altera plugins de análise do projeto.
+Ao executar um novo build, itens removidos dos relatórios desaparecem do painel.
 
 Há configurações para aplicação Java, Spring Boot, JAR, Maven, Gradle, testes e JVM remota. Cada uma
 pode definir módulo, JDK, argumentos da JVM, argumentos da aplicação, diretório de trabalho,
@@ -149,6 +161,13 @@ Aguarde a mensagem **Java: IntelliSense pronto**. Se o projeto mudou enquanto er
 
 Confirme que o `pom.xml` ou script Gradle está salvo e sincronize o projeto. Em projetos com wrapper,
 verifique se `mvnw`, `gradlew` e seus arquivos auxiliares estão presentes.
+
+### O terminal mostra um aviso de acesso nativo
+
+Em JDKs recentes, JNA/pty4j pode emitir um aviso sobre acesso nativo restrito ao abrir um terminal
+PTY. O aviso vem da biblioteca de terminal e não indica, por si só, falha da execução. Se uma versão
+futura da JDK passar a bloquear a chamada, inicie a Orion com
+`--enable-native-access=ALL-UNNAMED` até que a dependência utilizada pela aplicação seja atualizada.
 
 ### O build falhou, mas o editor não mostrou o motivo
 

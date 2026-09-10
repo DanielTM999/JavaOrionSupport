@@ -3,6 +3,7 @@ package dtm.ide.spring.jpa;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -146,6 +147,121 @@ class JpaSourceParserTest {
         JpaQueryMethod method = result.repositories().getFirst().methods().getFirst();
         assertTrue(method.hasDeclaredQuery());
         assertFalse(method.validatable());
+    }
+
+    @Test
+    void readsAQueryDeclaredAsATextBlock() {
+        String source = String.join("\n",
+                "package com.example;",
+                "public interface ClienteRepository extends JpaRepository<Cliente, Long> {",
+                "    @Query(\"\"\"",
+                "        select count(c)",
+                "        from Cliente c",
+                "        where c.email = :email",
+                "        \"\"\")",
+                "    long findByNomeInexistente(@Param(\"email\") String email);",
+                "}");
+
+        JpaQueryMethod method = parse(source).repositories().getFirst().methods().getFirst();
+
+        assertTrue(method.hasDeclaredQuery());
+        assertTrue(method.jpql().contains("select count(c)"));
+        assertEquals(List.of("email"), method.parameters());
+        assertFalse(method.validatable());
+        assertTrue(method.validatableQuery());
+    }
+
+    @Test
+    void annotationPresenceSuppressesDerivedValidationWhenQueryUsesAConstant() {
+        JpaQueryMethod method = parse("""
+                package com.example;
+
+                public interface ClienteRepository extends JpaRepository<Cliente, Long> {
+                    @Query(CONSULTA_CLIENTES)
+                    List<Cliente> findByPropriedadeInexistente();
+                }
+                """).repositories().getFirst().methods().getFirst();
+
+        assertTrue(method.hasDeclaredQuery());
+        assertTrue(method.jpql().isBlank());
+        assertFalse(method.validatable());
+        assertFalse(method.validatableQuery());
+    }
+
+    @Test
+    void readsNamedTextBlockValueWithoutConfusingQueryEqualsWithAnnotationAttributes() {
+        String source = String.join("\n",
+                "package com.example;",
+                "public interface ClienteRepository extends JpaRepository<Cliente, Long> {",
+                "    @Query(value = \"\"\"",
+                "        select c from Cliente c",
+                "        where c.email = :email",
+                "        \"\"\", nativeQuery = false)",
+                "    List<Cliente> buscar(@Param(\"email\") String email);",
+                "}");
+
+        JpaQueryMethod method = parse(source).repositories().getFirst().methods().getFirst();
+
+        assertTrue(method.jpql().contains("where c.email = :email"));
+        assertFalse(method.jpql().contains("\"\"\""));
+        assertTrue(method.validatableQuery());
+    }
+
+    @Test
+    void joinsAQueryBuiltFromStringLiterals() {
+        JpaQueryMethod method = parse("""
+                package com.example;
+                public interface ClienteRepository extends JpaRepository<Cliente, Long> {
+                    @Query("select c from Cliente c "
+                            + "where c.email = :email")
+                    List<Cliente> buscar(@Param("email") String email);
+                }
+                """).repositories().getFirst().methods().getFirst();
+
+        assertEquals("select c from Cliente c where c.email = :email", method.jpql());
+        assertTrue(method.validatableQuery());
+    }
+
+    @Test
+    void keepsCommasInsideAnUnnamedQueryWhenOtherAttributesFollow() {
+        JpaQueryMethod method = parse("""
+                package com.example;
+                public interface ClienteRepository extends JpaRepository<Cliente, Long> {
+                    @Query("select c.id, c.email from Cliente c", nativeQuery = false)
+                    List<Cliente> buscar();
+                }
+                """).repositories().getFirst().methods().getFirst();
+
+        assertEquals("select c.id, c.email from Cliente c", method.jpql());
+        assertTrue(method.validatableQuery());
+    }
+
+    @Test
+    void doesNotPartiallyAnalyzeAQueryContainingAConstant() {
+        JpaQueryMethod method = parse("""
+                package com.example;
+                public interface ClienteRepository extends JpaRepository<Cliente, Long> {
+                    @Query("select c from Cliente c " + ACTIVE_FILTER)
+                    List<Cliente> buscar();
+                }
+                """).repositories().getFirst().methods().getFirst();
+
+        assertTrue(method.hasDeclaredQuery());
+        assertTrue(method.jpql().isBlank());
+        assertFalse(method.validatableQuery());
+    }
+
+    @Test
+    void skipsSemanticValidationForSpelQueries() {
+        JpaQueryMethod method = parse("""
+                package com.example;
+                public interface ClienteRepository extends JpaRepository<Cliente, Long> {
+                    @Query("select e from #{#entityName} e")
+                    List<Cliente> buscar();
+                }
+                """).repositories().getFirst().methods().getFirst();
+
+        assertFalse(method.validatableQuery());
     }
 
     @Test
