@@ -26,6 +26,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -67,9 +68,10 @@ class JdtLsLombokIntegrationTest {
                 .resolveAgent(descriptor, List.of());
         assumeTrue(agent.isUsable(), "o agente do Lombok nao esta disponivel neste ambiente");
 
+        AtomicInteger diagnosticPublications = new AtomicInteger();
         service = new JdtLsService(jdks, provisioner,
-                new JdtLsExtensionBundles(new SdkDownloader(null), jdks.sdkRoot()), path -> {
-        });
+                new JdtLsExtensionBundles(new SdkDownloader(null), jdks.sdkRoot()),
+                path -> diagnosticPublications.incrementAndGet());
         service.setLombokAgentJar(agent.jar());
         service.start(project, jdk.get(), DownloadProgressListener.NOOP).join();
         assumeTrue(service.awaitReady(READY_TIMEOUT_MS), "o JDT LS nao ficou pronto a tempo");
@@ -101,6 +103,13 @@ class JdtLsLombokIntegrationTest {
                 builderLine, builderColumn);
         assertTrue(!definitions.isEmpty(), "builder() gerado deveria ter destino de navegacao");
 
+        service.changeDocument(source, "@" + text);
+        service.changeDocument(source, text);
+        int publicationsAfterRapidEdit = diagnosticPublications.get();
+        await(() -> diagnosticPublications.get() > publicationsAfterRapidEdit, 10_000);
+        assertTrue(service.diagnostics(source).isEmpty(),
+                "o diagnostico do snapshot invalido nao pode sobreviver ao texto valido");
+
         service.closeDocument(source);
         assertEquals(JdtLsService.ANY_VERSION, service.documentVersion(source));
         service.stop();
@@ -121,6 +130,15 @@ class JdtLsLombokIntegrationTest {
             }
         }
         throw new AssertionError("linha nao encontrada: " + needle);
+    }
+
+    private static void await(java.util.function.BooleanSupplier condition, long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+        assertTrue(condition.getAsBoolean(), "o JDT LS nao publicou o diagnostico final a tempo");
     }
 
     private Path copyFixture(String name) throws IOException {

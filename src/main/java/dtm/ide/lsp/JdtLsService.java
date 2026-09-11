@@ -6,6 +6,7 @@ import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
 import dtm.ide.api.project.editor.DocumentHighlight;
 import dtm.ide.api.project.editor.SemanticToken;
+import dtm.ide.inspection.DiagnosticRanges;
 import dtm.ide.sdk.DownloadProgressListener;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
@@ -930,12 +931,21 @@ public class JdtLsService {
         return current;
     }
 
-    void onPublishDiagnostics(JsonNode params) {
+    synchronized void onPublishDiagnostics(JsonNode params) {
         if (params == null) {
             return;
         }
         String uri = params.path("uri").asText("");
         if (uri.isBlank()) {
+            return;
+        }
+        JsonNode publishedVersion = params.get("version");
+        int currentVersion = documents.version(uri);
+        if (publishedVersion != null && publishedVersion.isIntegralNumber()
+                && currentVersion != ANY_VERSION
+                && publishedVersion.asInt() != currentVersion) {
+            log.debug("Diagnosticos descartados para {}: versao {} recebida, {} atual",
+                    uri, publishedVersion.asInt(), currentVersion);
             return;
         }
         List<Diagnostic> diagnostics = new ArrayList<>();
@@ -953,7 +963,10 @@ public class JdtLsService {
         Path path = LspConversions.toPath(uri);
         if (path != null) {
             Path key = normalizePath(path);
-            diagnosticsByPath.put(key, List.copyOf(diagnostics));
+            String content = documents.content(uri);
+            diagnosticsByPath.put(key, content == null
+                    ? List.copyOf(diagnostics)
+                    : DiagnosticRanges.compactMultiline(diagnostics, content));
             rawDiagnosticsByPath.put(key, List.copyOf(rawDiagnostics));
             onDiagnosticsPublished.accept(path);
         }
@@ -1019,7 +1032,7 @@ public class JdtLsService {
         }
     }
 
-    public void openDocument(Path filePath, String text) {
+    public synchronized void openDocument(Path filePath, String text) {
         if (filePath == null) {
             return;
         }
@@ -1027,11 +1040,7 @@ public class JdtLsService {
         String content = text == null ? "" : text;
         String previous = documents.put(uri, content);
         if (!content.equals(previous)) {
-            symbolCache.remove(uri);
-            codeLensCache.remove(uri);
-            completionCache.remove(uri);
-            clearNavigationCache(uri);
-            cancelInFlightForUri(uri);
+            documentContentChanged(filePath, uri);
         }
         if (!canSyncDocuments()) {
             return;
@@ -1043,7 +1052,7 @@ public class JdtLsService {
         }
     }
 
-    public void changeDocument(Path filePath, String text) {
+    public synchronized void changeDocument(Path filePath, String text) {
         if (filePath == null) {
             return;
         }
@@ -1053,11 +1062,7 @@ public class JdtLsService {
             return;
         }
         String previous = documents.put(uri, content);
-        symbolCache.remove(uri);
-        codeLensCache.remove(uri);
-        completionCache.remove(uri);
-        clearNavigationCache(uri);
-        cancelInFlightForUri(uri);
+        documentContentChanged(filePath, uri);
 
         if (!canSyncDocuments()) {
             return;
@@ -1069,7 +1074,7 @@ public class JdtLsService {
         sendDidChange(uri, previous, content);
     }
 
-    public void closeDocument(Path filePath) {
+    public synchronized void closeDocument(Path filePath) {
         if (filePath == null) {
             return;
         }
@@ -1171,7 +1176,7 @@ public class JdtLsService {
         }
     }
 
-    public void saveDocument(Path filePath, String text) {
+    public synchronized void saveDocument(Path filePath, String text) {
         if (filePath == null) {
             return;
         }
@@ -1183,7 +1188,7 @@ public class JdtLsService {
         }
     }
 
-    private void flushOpenDocuments() {
+    private synchronized void flushOpenDocuments() {
         Path root = projectRoot;
         documents.forEach((uri, content) -> {
             Path path = LspConversions.toPath(uri);
@@ -1231,7 +1236,7 @@ public class JdtLsService {
                 .execute(this::performDocumentResynchronization);
     }
 
-    private void performDocumentResynchronization() {
+    private synchronized void performDocumentResynchronization() {
         if (!canSyncDocuments()) {
             return;
         }
@@ -1304,6 +1309,20 @@ public class JdtLsService {
                 "contentChanges", List.of(change)));
     }
 
+    private void documentContentChanged(Path filePath, String uri) {
+        symbolCache.remove(uri);
+        codeLensCache.remove(uri);
+        completionCache.remove(uri);
+        clearNavigationCache(uri);
+        cancelInFlightForUri(uri);
+        Path key = normalizePath(filePath);
+        boolean hadDiagnostics = diagnosticsByPath.remove(key) != null;
+        hadDiagnostics |= rawDiagnosticsByPath.remove(key) != null;
+        if (hadDiagnostics) {
+            onDiagnosticsPublished.accept(filePath);
+        }
+    }
+
     static Map<String, Object> incrementalDocumentChange(String previous, String current) {
         String before = previous == null ? "" : previous;
         String after = current == null ? "" : current;
@@ -1357,12 +1376,14 @@ public class JdtLsService {
         }
         String uri = LspConversions.toUri(filePath);
         String requestedText = text == null ? "" : text;
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         CompletionCache cached = completionCache.get(uri);
         if (cached != null && cached.text().equals(requestedText)
                 && cached.line() == line && cached.col() == col) {
             return cached.items();
         }
-        syncBeforeRequest(filePath, text);
         int version = documents.version(uri);
         if (isStaleVersion(expectedVersion, version)) {
             log.debug("Completion descartada antes do envio: versao {} esperada, {} atual",
@@ -1481,7 +1502,9 @@ public class JdtLsService {
             return List.of();
         }
         String uri = LspConversions.toUri(filePath);
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         int version = documents.version(uri);
         String key = method + "|" + uri + "|" + version + "|" + line + "|" + col;
         List<Location> cached = navigationCache.get(key);
@@ -1618,7 +1641,9 @@ public class JdtLsService {
         if (!capabilities.callHierarchy()) {
             return List.of();
         }
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         JsonNode result = request("textDocument/prepareCallHierarchy",
                 positionParams(filePath, line, col), REQUEST_TIMEOUT_MS);
         return callHierarchyItems(result);
@@ -1708,11 +1733,13 @@ public class JdtLsService {
         }
         String uri = LspConversions.toUri(filePath);
         String requestedText = text == null ? "" : text;
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         SymbolCache cached = symbolCache.get(uri);
         if (cached != null && cached.text().equals(requestedText)) {
             return cached.symbols();
         }
-        syncBeforeRequest(filePath, text);
         int version = documents.version(uri);
         String key = "symbols|" + uri + "|" + version;
         JsonNode result = interactive
@@ -1767,7 +1794,9 @@ public class JdtLsService {
         }
         Map<String, Object> params = positionParams(filePath, line, col);
         params.put("newName", newName);
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         JsonNode result = request("textDocument/rename", params, REQUEST_TIMEOUT_MS);
         return LspConversions.singleDocumentEdits(result);
     }
@@ -1777,7 +1806,9 @@ public class JdtLsService {
         if (!capabilities.codeAction()) {
             return List.of();
         }
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("textDocument", documentId(filePath));
         params.put("range", rangeParam(range));
@@ -1813,6 +1844,9 @@ public class JdtLsService {
             return List.of();
         }
         Map<String, Object> params = sourceActionParams(filePath, text, line, col);
+        if (params == null) {
+            return List.of();
+        }
         @SuppressWarnings("unchecked")
         Map<String, Object> context = (Map<String, Object>) params.get("context");
         Map<String, Object> filteredContext = new LinkedHashMap<>(context);
@@ -1977,6 +2011,9 @@ public class JdtLsService {
         Map<String, Object> contextExtra = (Map<String, Object>) extra.remove("contextExtra");
         Map<String, Object> params = new LinkedHashMap<>(extra);
         Map<String, Object> context = sourceActionParams(filePath, text, line, col);
+        if (context == null) {
+            return List.of();
+        }
         if (contextExtra != null) {
             context.putAll(contextExtra);
         }
@@ -1988,6 +2025,9 @@ public class JdtLsService {
     private JsonNode sourceRequest(String method, Path filePath, String text, int line, int col,
                                    Map<String, Object> paramsExtra) {
         Map<String, Object> params = sourceActionParams(filePath, text, line, col);
+        if (params == null) {
+            return null;
+        }
         if (paramsExtra != null) {
             params.putAll(paramsExtra);
         }
@@ -1995,7 +2035,9 @@ public class JdtLsService {
     }
 
     private Map<String, Object> sourceActionParams(Path filePath, String text, int line, int col) {
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return null;
+        }
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("textDocument", documentId(filePath));
         Map<String, Object> position = Map.of("line", Math.max(0, line),
@@ -2075,7 +2117,9 @@ public class JdtLsService {
         if (!capabilities.inlayHint()) {
             return List.of();
         }
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         Map<String, Object> params = Map.of(
                 "textDocument", documentId(filePath),
                 "range", Map.of(
@@ -2102,11 +2146,13 @@ public class JdtLsService {
         }
         String uri = LspConversions.toUri(filePath);
         String requestedText = text == null ? "" : text;
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         CodeLensCache cached = codeLensCache.get(uri);
         if (cached != null && cached.text().equals(requestedText)) {
             return cached.lenses();
         }
-        syncBeforeRequest(filePath, text);
         JsonNode result = requestBackground("textDocument/codeLens",
                 Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS * 2);
         if (result == null || !result.isArray()) {
@@ -2254,7 +2300,9 @@ public class JdtLsService {
         if (!capabilities.semanticTokens()) {
             return List.of();
         }
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
         JsonNode result = requestBackground("textDocument/semanticTokens/full",
                 Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS);
         if (result == null || !isCurrentText(filePath, text)) {
@@ -2267,7 +2315,9 @@ public class JdtLsService {
         if (!capabilities.formatting()) {
             return null;
         }
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return null;
+        }
         Map<String, Object> params = Map.of(
                 "textDocument", documentId(filePath),
                 "options", Map.of(
@@ -2283,7 +2333,9 @@ public class JdtLsService {
         if (!capabilities.codeAction()) {
             return null;
         }
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return null;
+        }
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("textDocument", documentId(filePath));
         params.put("range", rangeParam(Range.point(0, 0)));
@@ -2380,21 +2432,36 @@ public class JdtLsService {
 
     private JsonNode requestAt(String method, Path filePath, String text, int line, int col,
                                long timeoutMs) {
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return null;
+        }
         return request(method, positionParams(filePath, line, col), timeoutMs);
     }
 
     private JsonNode requestAtInteractive(String method, Path filePath, String text,
                                           int line, int col) {
-        syncBeforeRequest(filePath, text);
+        if (!syncBeforeRequest(filePath, text)) {
+            return null;
+        }
         return requestInteractive(method, positionParams(filePath, line, col),
                 INTERACTIVE_TIMEOUT_MS);
     }
 
-    private void syncBeforeRequest(Path filePath, String text) {
-        if (text != null) {
-            openDocument(filePath, text);
+    private synchronized boolean syncBeforeRequest(Path filePath, String text) {
+        if (filePath == null || text == null) {
+            return filePath != null;
         }
+        String uri = LspConversions.toUri(filePath);
+        String current = documents.content(uri);
+        if (current == null) {
+            openDocument(filePath, text);
+            return true;
+        }
+        boolean currentSnapshot = current.equals(text);
+        if (!currentSnapshot) {
+            log.debug("Requisicao descartada para {}: snapshot do editor desatualizado", uri);
+        }
+        return currentSnapshot;
     }
 
     private JsonNode request(String method, Object params, long timeoutMs) {

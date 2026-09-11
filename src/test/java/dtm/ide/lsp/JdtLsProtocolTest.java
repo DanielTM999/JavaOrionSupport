@@ -3,7 +3,9 @@ package dtm.ide.lsp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.stools.component.panels.editor.code.api.Location;
+import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
+import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,6 +18,7 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -149,6 +152,66 @@ class JdtLsProtocolTest {
     }
 
     @Test
+    void aStaleFeatureRequestNeverRollsBackTheServerDocument() throws Exception {
+        responses.put("textDocument/definition", "[]");
+        service.openDocument(FILE, TEXT);
+        drainNotifications();
+
+        String latest = TEXT + "// latest\n";
+        service.changeDocument(FILE, latest);
+        awaitRequest("textDocument/didChange");
+
+        List<Location> locations = service.definitionsInteractive(FILE, TEXT, 1, 12);
+
+        assertTrue(locations.isEmpty());
+        assertEquals(1, count("textDocument/didChange"));
+        assertEquals(0, count("textDocument/definition"));
+    }
+
+    @Test
+    void diagnosticsFollowTheCurrentDocumentVersion() throws Exception {
+        service.openDocument(FILE, TEXT);
+        drainNotifications();
+        int firstVersion = service.documentVersion(FILE);
+        service.onPublishDiagnostics(diagnostics(firstVersion, "current", 1, 0, 1, 5));
+        assertEquals("current", service.diagnostics(FILE).iterator().next().message());
+
+        String latest = TEXT + "// latest\n";
+        service.changeDocument(FILE, latest);
+        awaitRequest("textDocument/didChange");
+        int latestVersion = service.documentVersion(FILE);
+        assertTrue(service.diagnostics(FILE).isEmpty());
+
+        service.onPublishDiagnostics(diagnostics(firstVersion, "stale", 0, 0, 2, 0));
+        assertTrue(service.diagnostics(FILE).isEmpty());
+
+        service.onPublishDiagnostics(diagnostics(latestVersion, "latest", 1, 0, 1, 5));
+        assertEquals("latest", service.diagnostics(FILE).iterator().next().message());
+
+        service.onPublishDiagnostics(diagnostics(null, "unversioned", 1, 0, 1, 5));
+        assertEquals("unversioned", service.diagnostics(FILE).iterator().next().message());
+    }
+
+    @Test
+    void broadDiagnosticsAreCompactInTheEditorButRawForCodeActions() throws Exception {
+        responses.put("textDocument/codeAction", "[]");
+        service.openDocument(FILE, TEXT);
+        drainNotifications();
+        service.onPublishDiagnostics(diagnostics(service.documentVersion(FILE),
+                "Syntax error on token(s), misplaced construct(s)", 0, 0, 2, 0));
+
+        Diagnostic visible = service.diagnostics(FILE).iterator().next();
+        assertEquals(0, visible.startLine());
+        assertEquals(0, visible.endLine());
+        assertEquals("package demo;".length(), visible.endCol());
+
+        service.codeActions(FILE, TEXT, Range.point(0, 0), List.of(visible));
+        JsonNode request = awaitRequest("textDocument/codeAction");
+        JsonNode raw = request.path("params").path("context").path("diagnostics").get(0);
+        assertEquals(2, raw.path("range").path("end").path("line").asInt());
+    }
+
+    @Test
     void anUnansweredNavigationGivesUpInsideTheInteractiveBudget() {
         service.openDocument(FILE, TEXT);
         long started = System.nanoTime();
@@ -214,6 +277,23 @@ class JdtLsProtocolTest {
         return counter == null ? 0 : counter.get();
     }
 
+    private static JsonNode diagnostics(Integer version, String message,
+                                        int startLine, int startCol, int endLine, int endCol) {
+        Map<String, Object> params = new java.util.LinkedHashMap<>();
+        params.put("uri", FILE.toUri().toString());
+        if (version != null) {
+            params.put("version", version);
+        }
+        params.put("diagnostics", List.of(Map.of(
+                "range", Map.of(
+                        "start", Map.of("line", startLine, "character", startCol),
+                        "end", Map.of("line", endLine, "character", endCol)),
+                "severity", 1,
+                "message", message,
+                "source", "Java")));
+        return JSON.valueToTree(params);
+    }
+
     private void set(String field, Object value) throws Exception {
         Field target = JdtLsService.class.getDeclaredField(field);
         target.setAccessible(true);
@@ -225,6 +305,7 @@ class JdtLsProtocolTest {
                 {"capabilities":{"definitionProvider":true,"typeDefinitionProvider":true,
                  "implementationProvider":true,"referencesProvider":true,
                  "documentSymbolProvider":true,"documentHighlightProvider":true,
+                 "codeActionProvider":true,
                  "completionProvider":{"resolveProvider":true,"triggerCharacters":[".","@"]},
                  "textDocumentSync":{"change":2}}}
                 """);

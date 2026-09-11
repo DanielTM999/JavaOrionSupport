@@ -942,14 +942,9 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         SwingUtilities.invokeLater(() -> {
-            Map<Path, String> buffers = new LinkedHashMap<>();
-            javaEditors.forEach((path, editor) -> buffers.put(path, editor.getText()));
+            List<Path> openFiles = List.copyOf(javaEditors.keySet());
             background.submit(() -> {
-                JdtLsService lsp = jdtLs;
-                buffers.forEach((path, text) -> {
-                    if (lsp != null) {
-                        lsp.openDocument(path, text);
-                    }
+                openFiles.forEach(path -> {
                     requestRefreshDiagnostics(path);
                     requestRefreshCodeLenses(path);
                     requestRefreshInlayHints(path);
@@ -1430,7 +1425,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         JdtLsService lsp = jdtLs;
         if (lsp != null && lsp.isInteractive()) {
-            lsp.changeDocument(filePath, context.getText());
             merged.addAll(lsp.diagnostics(filePath));
         }
         merged.addAll(problems.diagnostics(filePath));

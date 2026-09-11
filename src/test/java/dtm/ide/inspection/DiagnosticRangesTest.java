@@ -60,6 +60,43 @@ class DiagnosticRangesTest {
     }
 
     @Test
+    void compactsAMultilineDiagnosticToItsFirstMeaningfulLine() {
+        Diagnostic broad = new Diagnostic(1, 0, 6, 1, DiagnosticSeverity.ERROR,
+                "Syntax error on token(s), misplaced construct(s)", "Java", null);
+
+        Diagnostic compact = DiagnosticRanges.compactMultiline(List.of(broad), SOURCE).getFirst();
+
+        assertEquals(2, compact.startLine());
+        assertEquals(2, compact.endLine());
+        assertEquals(0, compact.startCol());
+        assertEquals("@Entity".length(), compact.endCol());
+        assertEquals(broad.message(), compact.message());
+        assertEquals(broad.severity(), compact.severity());
+        assertEquals(broad.source(), compact.source());
+    }
+
+    @Test
+    void keepsThePreciseRangeOfASingleLineDiagnostic() {
+        Diagnostic exact = new Diagnostic(5, 4, 5, 11, DiagnosticSeverity.ERROR,
+                "unknown symbol", "Java", null);
+
+        assertEquals(exact, DiagnosticRanges.compactMultiline(List.of(exact), SOURCE).getFirst());
+    }
+
+    @Test
+    void excludesTheCarriageReturnFromAWindowsLineLength() {
+        String windows = "class Demo {\r\n    missing();\r\n}\r\n";
+        Diagnostic broad = new Diagnostic(1, 4, 2, 1, DiagnosticSeverity.ERROR,
+                "error", "Java", null);
+
+        Diagnostic compact = DiagnosticRanges.compactMultiline(List.of(broad), windows).getFirst();
+
+        assertEquals(1, compact.startLine());
+        assertEquals(1, compact.endLine());
+        assertEquals("    missing();".length(), compact.endCol());
+    }
+
+    @Test
     void clampsALineBeyondTheEndOfTheFile() {
         Diagnostic beyond = unbounded(500);
 
