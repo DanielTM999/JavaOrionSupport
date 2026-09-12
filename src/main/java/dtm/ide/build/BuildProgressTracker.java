@@ -76,6 +76,15 @@ public final class BuildProgressTracker implements Consumer<String> {
         }
     }
 
+    public void moduleStarted(JavaModule module, int index, int total) {
+        if (module == null) {
+            return;
+        }
+        seen.add(module);
+        int percent = total > 1 ? clamp(((index - 1) * 100) / total) : -1;
+        publish(new Update(moduleLabel(module, index, total), percent));
+    }
+
     public Update completed() {
         return new Update(lastLabel == null ? action : lastLabel, 100);
     }
@@ -147,9 +156,13 @@ public final class BuildProgressTracker implements Consumer<String> {
     }
 
     private String moduleLabel(JavaModule module, int position) {
+        return moduleLabel(module, position, modules.size());
+    }
+
+    private String moduleLabel(JavaModule module, int position, int total) {
         String label = action + " - " + module.name();
-        return modules.size() > 1
-                ? label + " (" + position + "/" + modules.size() + ")"
+        return total > 1
+                ? label + " (" + position + "/" + total + ")"
                 : label;
     }
 

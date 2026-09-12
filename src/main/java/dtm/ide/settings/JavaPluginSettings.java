@@ -21,6 +21,8 @@ public final class JavaPluginSettings {
     private static final String KEY_DEFAULT_JDK = "defaultJdkVersion";
     private static final String KEY_BUILD_OFFLINE = "buildOffline";
     private static final String KEY_SKIP_TESTS_ON_RUN = "skipTestsOnRun";
+    private static final String KEY_INCREMENTAL_BUILD = "incrementalBuild";
+    private static final String KEY_BUILD_ON_PROJECT_OPEN = "buildOnProjectOpen";
     private static final String KEY_HOT_RELOAD_MODE = "hotReloadMode";
     private static final String KEY_LOMBOK_SUPPORT = "lombokSupport";
     private static final String KEY_TODO_MARKERS = "todoMarkers";
@@ -56,6 +58,8 @@ public final class JavaPluginSettings {
     private int defaultJdkVersion = 21;
     private boolean buildOffline;
     private boolean skipTestsOnRun = true;
+    private boolean incrementalBuild = true;
+    private boolean buildOnProjectOpen = true;
     private HotReloadMode hotReloadMode = HotReloadMode.MANUAL;
     private boolean lombokSupport = true;
     private List<String> todoMarkers = TodoScanner.DEFAULT_MARKERS;
@@ -136,6 +140,22 @@ public final class JavaPluginSettings {
 
     public void setSkipTestsOnRun(boolean value) {
         this.skipTestsOnRun = value;
+    }
+
+    public boolean isIncrementalBuild() {
+        return incrementalBuild;
+    }
+
+    public void setIncrementalBuild(boolean value) {
+        this.incrementalBuild = value;
+    }
+
+    public boolean isBuildOnProjectOpen() {
+        return buildOnProjectOpen;
+    }
+
+    public void setBuildOnProjectOpen(boolean value) {
+        this.buildOnProjectOpen = value;
     }
 
     public HotReloadMode getHotReloadMode() {
@@ -338,6 +358,8 @@ public final class JavaPluginSettings {
         defaultJdkVersion = 21;
         buildOffline = false;
         skipTestsOnRun = true;
+        incrementalBuild = true;
+        buildOnProjectOpen = true;
         hotReloadMode = HotReloadMode.MANUAL;
         lombokSupport = true;
         todoMarkers = TodoScanner.DEFAULT_MARKERS;
@@ -379,6 +401,8 @@ public final class JavaPluginSettings {
         defaultJdkVersion = integer(properties, KEY_DEFAULT_JDK, 21);
         buildOffline = bool(properties, KEY_BUILD_OFFLINE, false);
         skipTestsOnRun = bool(properties, KEY_SKIP_TESTS_ON_RUN, true);
+        incrementalBuild = bool(properties, KEY_INCREMENTAL_BUILD, true);
+        buildOnProjectOpen = bool(properties, KEY_BUILD_ON_PROJECT_OPEN, true);
         hotReloadMode = HotReloadMode.fromKey(properties.getProperty(KEY_HOT_RELOAD_MODE,
                 HotReloadMode.MANUAL.key()));
         springSupport = bool(properties, KEY_SPRING_SUPPORT, true);
@@ -415,6 +439,8 @@ public final class JavaPluginSettings {
         properties.setProperty(KEY_DEFAULT_JDK, Integer.toString(defaultJdkVersion));
         properties.setProperty(KEY_BUILD_OFFLINE, Boolean.toString(buildOffline));
         properties.setProperty(KEY_SKIP_TESTS_ON_RUN, Boolean.toString(skipTestsOnRun));
+        properties.setProperty(KEY_INCREMENTAL_BUILD, Boolean.toString(incrementalBuild));
+        properties.setProperty(KEY_BUILD_ON_PROJECT_OPEN, Boolean.toString(buildOnProjectOpen));
         properties.setProperty(KEY_HOT_RELOAD_MODE, hotReloadMode.key());
         properties.setProperty(KEY_SPRING_SUPPORT, Boolean.toString(springSupport));
         properties.setProperty(KEY_SAFE_DELETE, Boolean.toString(safeDelete));

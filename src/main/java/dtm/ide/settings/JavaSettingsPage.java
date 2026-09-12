@@ -56,6 +56,11 @@ public final class JavaSettingsPage implements PluginSettingsPage {
             new JCheckBox(text("field.offline", "Construir sem acessar a rede"));
     private final JCheckBox skipTestsOnRun =
             new JCheckBox(text("field.skipTests", "Pular testes ao compilar para executar"));
+    private final JCheckBox incrementalBuild =
+            new JCheckBox(text("field.incrementalBuild",
+                    "Compilar so o que mudou antes de executar"));
+    private final JCheckBox buildOnOpen =
+            new JCheckBox(text("field.buildOnOpen", "Compilar o projeto ao abrir"));
 
     private final JCheckBox buildFileCompletion =
             new JCheckBox(text("field.buildFileCompletion",
@@ -140,6 +145,8 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         settings.setOrganizeImportsOnSave(organizeImportsOnSave.isSelected());
         settings.setBuildOffline(buildOffline.isSelected());
         settings.setSkipTestsOnRun(skipTestsOnRun.isSelected());
+        settings.setIncrementalBuild(incrementalBuild.isSelected());
+        settings.setBuildOnProjectOpen(buildOnOpen.isSelected());
         settings.setHotReloadMode((HotReloadMode) hotReloadMode.getSelectedItem());
         settings.setJdtBuildMode((JdtBuildMode) jdtBuildMode.getSelectedItem());
 
@@ -201,6 +208,8 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         content.add(section(text("section.buildRun", "Build e execucao"),
                 buildOffline,
                 skipTestsOnRun,
+                incrementalBuild,
+                buildOnOpen,
                 coverageGutter,
                 labeled(text("field.hotReload", "Hot reload:"), hotReloadMode),
                 labeled(text("field.jdtBuildMode", "Erros do projeto:"), jdtBuildMode)));
@@ -321,6 +330,8 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         organizeImportsOnSave.setSelected(settings.isOrganizeImportsOnSave());
         buildOffline.setSelected(settings.isBuildOffline());
         skipTestsOnRun.setSelected(settings.isSkipTestsOnRun());
+        incrementalBuild.setSelected(settings.isIncrementalBuild());
+        buildOnOpen.setSelected(settings.isBuildOnProjectOpen());
         hotReloadMode.setSelectedItem(settings.getHotReloadMode());
         jdtBuildMode.setSelectedItem(settings.getJdtBuildMode());
 

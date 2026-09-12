@@ -1,0 +1,416 @@
+package dtm.ide.build.incremental;
+
+import dtm.ide.build.BuildDiagnostic;
+import dtm.ide.build.BuildDiagnosticParser;
+import dtm.ide.build.BuildRequest;
+import dtm.ide.build.BuildResult;
+import dtm.ide.build.BuildSystem;
+import dtm.ide.build.JavacCommands;
+import dtm.ide.build.ProcessRunner;
+import dtm.ide.project.JavaModule;
+import dtm.ide.project.JavaProjectConventions;
+import dtm.ide.project.JavaProjectDescriptor;
+import dtm.ide.project.WorkspaceModuleGraph;
+import dtm.ide.sdk.JdkInstallation;
+import lombok.extern.slf4j.Slf4j;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+
+@Slf4j
+public final class IncrementalJavaBuilder {
+
+    public static final String STATE_DIRECTORY = ".orion/incremental";
+
+    private static final String GENERATED_SOURCES = "target/generated-sources/annotations";
+    private static final String TEST_OUTPUT_DIR = "target/test-classes";
+    private static final double FULL_MODULE_RATIO = 0.4;
+
+    @FunctionalInterface
+    public interface JavacExecutor {
+        int run(List<String> command, Path workingDirectory, Map<String, String> environment,
+                Consumer<String> output);
+    }
+
+    @FunctionalInterface
+    public interface ModuleListener {
+        void starting(JavaModule module, int index, int total);
+    }
+
+    private final JavaProjectDescriptor descriptor;
+    private final Supplier<BuildSystem> buildSupplier;
+    private final Supplier<JdkInstallation> jdkSupplier;
+    private final ProcessRunner runner = new ProcessRunner();
+
+    private JavacExecutor javac = runner::run;
+    private ModuleListener moduleListener = (module, index, total) -> { };
+
+    public IncrementalJavaBuilder(JavaProjectDescriptor descriptor,
+                                  Supplier<BuildSystem> buildSupplier,
+                                  Supplier<JdkInstallation> jdkSupplier) {
+        this.descriptor = descriptor;
+        this.buildSupplier = buildSupplier;
+        this.jdkSupplier = jdkSupplier;
+    }
+
+    public IncrementalJavaBuilder withJavac(JavacExecutor executor) {
+        this.javac = executor == null ? runner::run : executor;
+        return this;
+    }
+
+    public IncrementalJavaBuilder withModuleListener(ModuleListener listener) {
+        this.moduleListener = listener == null ? (module, index, total) -> { } : listener;
+        return this;
+    }
+
+    public static Path stateDirectory(Path projectRoot) {
+        return projectRoot.resolve(STATE_DIRECTORY);
+    }
+
+    public boolean isApplicable(JavaModule target) {
+        return descriptor != null && descriptor.kind().isMaven() && target != null
+                && buildSupplier.get() != null && hasCompiler();
+    }
+
+    public BuildResult build(JavaModule target, boolean includeTests, Consumer<String> output) {
+        Instant start = Instant.now();
+        List<JavaModule> order = WorkspaceModuleGraph.of(descriptor).buildOrderFor(target);
+        List<BuildDiagnostic> diagnostics = new ArrayList<>();
+        int total = order.size() + (includeTests ? 1 : 0);
+
+        for (int index = 0; index < order.size(); index++) {
+            JavaModule module = order.get(index);
+            moduleListener.starting(module, index + 1, total);
+            BuildResult result = buildModule(module, false, output);
+            diagnostics.addAll(result.diagnostics());
+            if (!result.successful()) {
+                return new BuildResult(result.exitCode(), diagnostics,
+                        Duration.between(start, Instant.now()), result.command());
+            }
+        }
+        if (includeTests) {
+            moduleListener.starting(target, total, total);
+            BuildResult result = buildModule(target, true, output);
+            diagnostics.addAll(result.diagnostics());
+            if (!result.successful()) {
+                return new BuildResult(result.exitCode(), diagnostics,
+                        Duration.between(start, Instant.now()), result.command());
+            }
+        }
+        return new BuildResult(0, diagnostics, Duration.between(start, Instant.now()),
+                "build incremental");
+    }
+
+    public void cancel() {
+        runner.cancel();
+    }
+
+    public boolean isRunning() {
+        return runner.isRunning();
+    }
+
+    private BuildResult buildModule(JavaModule module, boolean test, Consumer<String> output) {
+        Path outputDir = outputDirOf(module, test);
+        Optional<String> classpath = classpathOf(module, test);
+        if (classpath.isEmpty()) {
+            return delegate(module, test, output, "classpath nao resolvido");
+        }
+
+        Path stateFile = stateFileOf(module, test);
+        ModuleBuildState state = ModuleBuildState.load(stateFile);
+        String fingerprint = fingerprintOf(module, classpath.get());
+        if (!state.isUsable(fingerprint) || !Files.isDirectory(outputDir)) {
+            BuildResult result = delegate(module, test, output, "estado incremental ausente");
+            if (result.successful()) {
+                refreshState(module, test, state, fingerprint, stateFile);
+            }
+            return result;
+        }
+
+        List<Path> sources = collectSources(module, test);
+        ModuleBuildState.Changes changes = state.changes(module.root(), sources);
+        if (changes.isEmpty()) {
+            emit(output, "[" + module.artifactId() + "] sem mudancas");
+            return ok();
+        }
+
+        Set<Path> toCompile = compilationSet(module, state, changes, sources);
+        if (toCompile.isEmpty()) {
+            applyDeletions(module, test, state, changes);
+            state.save();
+            emit(output, "[" + module.artifactId() + "] apenas remocoes aplicadas");
+            return ok();
+        }
+
+        BuildResult result = compile(module, test, toCompile, classpath.get(), outputDir, output);
+        if (result.successful()) {
+            applyDeletions(module, test, state, changes);
+            for (Path source : toCompile) {
+                state.record(module.root(), source);
+            }
+            state.save();
+            return result;
+        }
+        if (!result.diagnostics().isEmpty()) {
+            return result;
+        }
+        log.info("javac falhou sem diagnosticos em {}; voltando para o Maven", module.artifactId());
+        BuildResult fallback = delegate(module, test, output, "javac indisponivel");
+        if (fallback.successful()) {
+            refreshState(module, test, state, fingerprint, stateFile);
+        }
+        return fallback;
+    }
+
+    private Set<Path> compilationSet(JavaModule module, ModuleBuildState state,
+                                     ModuleBuildState.Changes changes, List<Path> sources) {
+        Set<Path> selected = new LinkedHashSet<>(changes.touched());
+        Set<String> types = new LinkedHashSet<>();
+        for (Path source : changes.deleted()) {
+            types.addAll(state.typesOf(module.root(), source));
+        }
+        for (Path source : changes.touched()) {
+            types.addAll(declaredTypesOf(source));
+        }
+        selected.addAll(state.dependentsOf(module.root(), types));
+        selected.removeAll(changes.deleted());
+        selected.removeIf(path -> !Files.isRegularFile(path));
+
+        if (!sources.isEmpty() && selected.size() > sources.size() * FULL_MODULE_RATIO) {
+            return new LinkedHashSet<>(sources);
+        }
+        return selected;
+    }
+
+    private BuildResult compile(JavaModule module, boolean test, Set<Path> sources,
+                                String classpath, Path outputDir, Consumer<String> output) {
+        JdkInstallation jdk = jdkSupplier.get();
+        Instant start = Instant.now();
+        Path argumentFile = null;
+        try {
+            Files.createDirectories(outputDir);
+            Path generated = module.root().resolve(GENERATED_SOURCES);
+            Files.createDirectories(generated);
+
+            List<String> command = new ArrayList<>();
+            command.add(jdk.javacExecutable().toString());
+            command.add("-d");
+            command.add(outputDir.toString());
+            command.add("-s");
+            command.add(generated.toString());
+            command.add("-encoding");
+            command.add("UTF-8");
+            command.add("-proc:full");
+            command.add("-implicit:none");
+            command.add("-nowarn");
+            command.add("-cp");
+            command.add(classpath);
+            JavacCommands.releaseArgument(descriptor, jdk, List.of()).ifPresent(release -> {
+                command.add("--release");
+                command.add(release);
+            });
+
+            if (sources.size() > JavacCommands.ARGUMENT_FILE_THRESHOLD) {
+                argumentFile = JavacCommands.writeArgumentFile(sources);
+                command.add("@" + argumentFile);
+            } else {
+                sources.forEach(source -> command.add(source.toString()));
+            }
+
+            BuildDiagnosticParser parser = new BuildDiagnosticParser(module.root());
+            emit(output, "[" + module.artifactId() + "] javac " + sources.size()
+                    + " arquivo(s)" + (test ? " de teste" : "") + " -> " + outputDir);
+
+            int exitCode = javac.run(command, module.root(),
+                    Map.of("JAVA_HOME", jdk.home().toString()), line -> {
+                        parser.accept(line);
+                        emit(output, line);
+                    });
+
+            return new BuildResult(exitCode, parser.diagnostics(),
+                    Duration.between(start, Instant.now()), String.join(" ", command));
+        } catch (Exception e) {
+            log.debug("Falha no javac incremental de {}: {}", module.artifactId(), e.getMessage());
+            return new BuildResult(-1, List.of(), Duration.between(start, Instant.now()), "javac");
+        } finally {
+            JavacCommands.deleteQuietly(argumentFile);
+        }
+    }
+
+    private BuildResult delegate(JavaModule module, boolean test, Consumer<String> output,
+                                 String reason) {
+        BuildSystem build = buildSupplier.get();
+        if (build == null) {
+            return new BuildResult(-1, List.of(new BuildDiagnostic(null, 0, 0, null,
+                    "Nenhum build system disponivel.", "build")), Duration.ZERO, "maven");
+        }
+        emit(output, "[" + module.artifactId() + "] build completo (" + reason + ")");
+        BuildSystem.BuildAction action = test
+                ? BuildSystem.BuildAction.TEST_COMPILE
+                : BuildSystem.BuildAction.COMPILE;
+        return build.execute(BuildRequest.of(action, module)
+                .withSkipTests(true)
+                .withAlsoMake(false), output);
+    }
+
+    private void refreshState(JavaModule module, boolean test, ModuleBuildState state,
+                              String fingerprint, Path stateFile) {
+        state.reset(fingerprint);
+        for (Path source : collectSources(module, test)) {
+            state.record(module.root(), source);
+        }
+        state.save();
+        log.debug("Estado incremental regravado em {}", stateFile);
+    }
+
+    private void applyDeletions(JavaModule module, boolean test, ModuleBuildState state,
+                                ModuleBuildState.Changes changes) {
+        Path outputDir = outputDirOf(module, test);
+        for (Path source : changes.deleted()) {
+            removeClasses(module, test, source, outputDir);
+            state.remove(module.root(), source);
+        }
+    }
+
+    private void removeClasses(JavaModule module, boolean test, Path source, Path outputDir) {
+        Optional<Path> relative = relativeToSourceRoot(module, test, source);
+        if (relative.isEmpty()) {
+            return;
+        }
+        String fileName = relative.get().getFileName().toString();
+        String typeName = fileName.substring(0, fileName.length() - ".java".length());
+        Path parent = relative.get().getParent();
+        Path classDir = parent == null ? outputDir : outputDir.resolve(parent);
+        if (!Files.isDirectory(classDir)) {
+            return;
+        }
+        try (Stream<Path> files = Files.list(classDir)) {
+            files.filter(path -> {
+                String name = path.getFileName().toString();
+                return name.equals(typeName + ".class") || name.startsWith(typeName + "$");
+            }).forEach(JavacCommands::deleteQuietly);
+        } catch (Exception e) {
+            log.debug("Nao foi possivel remover as classes de {}: {}", source, e.getMessage());
+        }
+    }
+
+    private Optional<Path> relativeToSourceRoot(JavaModule module, boolean test, Path source) {
+        for (Path root : test ? module.testRoots() : module.sourceRoots()) {
+            if (source.startsWith(root)) {
+                return Optional.of(root.relativize(source));
+            }
+        }
+        return Optional.empty();
+    }
+
+    private Optional<String> classpathOf(JavaModule module, boolean test) {
+        BuildSystem build = buildSupplier.get();
+        if (build == null) {
+            return Optional.empty();
+        }
+        Optional<String> classpath = test
+                ? build.resolveTestClasspath(module)
+                : build.resolveRuntimeClasspath(module);
+        return classpath.filter(value -> !value.isBlank());
+    }
+
+    private String fingerprintOf(JavaModule module, String classpath) {
+        JdkInstallation jdk = jdkSupplier.get();
+        return ModuleBuildState.fingerprintOf(
+                ModuleBuildState.FORMAT_VERSION,
+                hashOfFile(module.root().resolve(JavaProjectConventions.POM_FILE)),
+                hashOfFile(descriptor.root().resolve(JavaProjectConventions.POM_FILE)),
+                resourcesFingerprint(module),
+                classpath,
+                jdk == null ? "" : jdk.home().toString());
+    }
+
+    private static String hashOfFile(Path file) {
+        try {
+            return Files.isRegularFile(file)
+                    ? ModuleBuildState.hashOf(Files.readAllBytes(file))
+                    : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static String resourcesFingerprint(JavaModule module) {
+        List<String> stamps = new ArrayList<>();
+        for (Path root : module.sourceRoots()) {
+            if (root.getFileName() == null || !root.getFileName().toString().equals("resources")
+                    || !Files.isDirectory(root)) {
+                continue;
+            }
+            try (Stream<Path> paths = Files.walk(root)) {
+                paths.filter(Files::isRegularFile).sorted().forEach(path -> {
+                    try {
+                        stamps.add(path + ":" + Files.size(path) + ":"
+                                + Files.getLastModifiedTime(path).toMillis());
+                    } catch (Exception ignored) {
+                    }
+                });
+            } catch (Exception e) {
+                log.debug("Falha ao varrer {}: {}", root, e.getMessage());
+            }
+        }
+        return ModuleBuildState.fingerprintOf(stamps.toArray(String[]::new));
+    }
+
+    private Path stateFileOf(JavaModule module, boolean test) {
+        return stateDirectory(descriptor.root())
+                .resolve(module.artifactId() + (test ? "-test" : "") + ".state");
+    }
+
+    private static Path outputDirOf(JavaModule module, boolean test) {
+        return test ? module.root().resolve(TEST_OUTPUT_DIR) : module.outputDir();
+    }
+
+    private static List<Path> collectSources(JavaModule module, boolean test) {
+        List<Path> sources = new ArrayList<>();
+        for (Path root : test ? module.existingTestRoots() : module.existingSourceRoots()) {
+            try (Stream<Path> paths = Files.walk(root)) {
+                paths.filter(Files::isRegularFile)
+                        .filter(path -> path.getFileName().toString().endsWith(".java"))
+                        .forEach(sources::add);
+            } catch (Exception e) {
+                log.debug("Falha ao varrer {}: {}", root, e.getMessage());
+            }
+        }
+        return sources;
+    }
+
+    private static Set<String> declaredTypesOf(Path source) {
+        try {
+            return new LinkedHashSet<>(ModuleBuildState.typesDeclaredIn(Files.readString(source)));
+        } catch (Exception e) {
+            return Set.of();
+        }
+    }
+
+    private boolean hasCompiler() {
+        JdkInstallation jdk = jdkSupplier == null ? null : jdkSupplier.get();
+        return jdk != null && jdk.isJdk();
+    }
+
+    private static BuildResult ok() {
+        return new BuildResult(0, List.of(), Duration.ZERO, "build incremental");
+    }
+
+    private static void emit(Consumer<String> output, String line) {
+        if (output != null) {
+            output.accept(line);
+        }
+    }
+}

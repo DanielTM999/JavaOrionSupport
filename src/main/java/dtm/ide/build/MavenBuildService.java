@@ -31,9 +31,11 @@ public final class MavenBuildService implements BuildSystem {
     private final Supplier<JdkInstallation> jdkSupplier;
     private final DownloadProgressListener progressListener;
     private final ProcessRunner runner = new ProcessRunner();
+    private final ProcessRunner classpathRunner = new ProcessRunner();
     private final Map<String, String> classpathCache = new ConcurrentHashMap<>();
 
     private static final String TEST_OUTPUT_DIR = "target/test-classes";
+    private static final String REACTOR_CLASSPATH_FILE = "target/orion-classpath.txt";
 
     private volatile Supplier<Set<String>> activeProfiles;
 
@@ -122,36 +124,106 @@ public final class MavenBuildService implements BuildSystem {
         if (cached != null) {
             return Optional.of(cached);
         }
+        Optional<String> resolved = resolveInModule(module, test);
+        if (resolved.isEmpty()) {
+            resolved = resolveInReactor(module, test);
+        }
+        if (resolved.isEmpty()) {
+            return Optional.empty();
+        }
+        String full = prefixOutputDirs(module, test)
+                + ReactorClasspath.substituteWorkspaceModules(resolved.get(), descriptor, module,
+                        test);
+        classpathCache.put(key, full);
+        return Optional.of(full);
+    }
+
+    private Optional<String> resolveInModule(JavaModule module, boolean test) {
+        Path outputFile = null;
         try {
-            Path outputFile = Files.createTempFile("orion-classpath", ".txt");
+            outputFile = Files.createTempFile("orion-classpath", ".txt");
             List<String> command = new ArrayList<>(baseCommand());
             command.add("-q");
             command.add("dependency:build-classpath");
             command.add("-Dmdep.outputFile=" + outputFile);
             command.add("-Dmdep.includeScope=" + (test ? "test" : "runtime"));
+            appendActiveProfiles(command);
 
-            int exitCode = runner.run(command, module.root(), Map.of(), line -> {
-            });
+            int exitCode = classpathRunner.run(command, module.root(),
+                    environmentFor(BuildRequest.of(BuildAction.COMPILE, module)), line -> {
+                    });
             if (exitCode != 0) {
-                Files.deleteIfExists(outputFile);
                 return Optional.empty();
             }
-            String classpath = Files.readString(outputFile).trim();
-            Files.deleteIfExists(outputFile);
-            if (classpath.isBlank()) {
-                return Optional.empty();
-            }
-            String full = prefixOutputDirs(module, test) + classpath;
-            classpathCache.put(key, full);
-            return Optional.of(full);
+            return readClasspath(outputFile);
         } catch (Exception e) {
             log.debug("Falha ao resolver o classpath de {}: {}", module.root(), e.getMessage());
             return Optional.empty();
+        } finally {
+            deleteQuietly(outputFile);
         }
     }
 
-    private static String cacheKey(JavaModule module, boolean test) {
-        return (test ? "test|" : "runtime|") + module.root();
+    private Optional<String> resolveInReactor(JavaModule module, boolean test) {
+        if (module.root().equals(descriptor.root())) {
+            return Optional.empty();
+        }
+        Path outputFile = module.root().resolve(REACTOR_CLASSPATH_FILE);
+        try {
+            List<String> command = new ArrayList<>(baseCommand());
+            command.add("-q");
+            command.add("dependency:build-classpath");
+            command.add("-Dmdep.outputFile=" + REACTOR_CLASSPATH_FILE);
+            command.add("-Dmdep.includeScope=" + (test ? "test" : "runtime"));
+            command.add("-pl");
+            command.add(relativeModulePath(module));
+            command.add("-am");
+            appendActiveProfiles(command);
+
+            int exitCode = classpathRunner.run(command, descriptor.root(),
+                    environmentFor(BuildRequest.of(BuildAction.COMPILE, module)), line -> {
+                    });
+            if (exitCode != 0) {
+                return Optional.empty();
+            }
+            return readClasspath(outputFile);
+        } catch (Exception e) {
+            log.debug("Falha ao resolver o classpath de {} pelo reactor: {}", module.root(),
+                    e.getMessage());
+            return Optional.empty();
+        } finally {
+            deleteQuietly(outputFile);
+        }
+    }
+
+    private void appendActiveProfiles(List<String> command) {
+        Set<String> profiles = activeProfiles();
+        if (!profiles.isEmpty()) {
+            command.add("-P" + String.join(",", profiles));
+        }
+    }
+
+    private static Optional<String> readClasspath(Path outputFile) throws Exception {
+        if (outputFile == null || !Files.isRegularFile(outputFile)) {
+            return Optional.empty();
+        }
+        String classpath = Files.readString(outputFile).trim();
+        return classpath.isBlank() ? Optional.empty() : Optional.of(classpath);
+    }
+
+    private static void deleteQuietly(Path path) {
+        if (path == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(path);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String cacheKey(JavaModule module, boolean test) {
+        return (test ? "test|" : "runtime|") + String.join(",", activeProfiles())
+                + "|" + module.root();
     }
 
     private static String prefixOutputDirs(JavaModule module, boolean test) {
@@ -223,10 +295,16 @@ public final class MavenBuildService implements BuildSystem {
     }
 
     private void appendModuleSelection(List<String> command, JavaModule module) {
+        appendModuleSelection(command, module, true);
+    }
+
+    private void appendModuleSelection(List<String> command, JavaModule module, boolean alsoMake) {
         if (module != null && !module.root().equals(descriptor.root())) {
             command.add("-pl");
             command.add(relativeModulePath(module));
-            command.add("-am");
+            if (alsoMake) {
+                command.add("-am");
+            }
         }
     }
 
@@ -234,7 +312,7 @@ public final class MavenBuildService implements BuildSystem {
         List<String> command = new ArrayList<>(baseCommand());
         command.addAll(goalsFor(request.action()));
 
-        appendModuleSelection(command, request.module());
+        appendModuleSelection(command, request.module(), request.alsoMake());
         Set<String> profiles = new LinkedHashSet<>(request.profiles());
         profiles.addAll(activeProfiles());
         if (!profiles.isEmpty()) {

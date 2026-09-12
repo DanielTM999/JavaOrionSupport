@@ -52,6 +52,8 @@ import dtm.ide.build.BuildDiagnostic;
 import dtm.ide.build.BuildProgressTracker;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
+import dtm.ide.build.incremental.IncrementalJavaBuilder;
+import dtm.ide.build.incremental.ModuleBuildState;
 import dtm.ide.build.BuildRunConfigurations;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.build.GradleBuildService;
@@ -286,6 +288,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String RENAME_PROGRESS_ID = "javaRenameWait";
     private static final String BUILD_PROGRESS_ID = "javaBuild";
     private static final String RUN_BUILD_PROGRESS_ID = "javaRunBuild";
+    private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
 
     private static String text(String key, String fallback) {
         return dtm.stools.i18n.I18n.getText(JavaIdeAdapter.class, key, fallback);
@@ -376,6 +379,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile DependencyManagerPanel dependencyPanel;
     private volatile JavaRunSupport runSupport;
     private final AtomicReference<BuildProgressTracker> runBuildProgress = new AtomicReference<>();
+    private final AtomicReference<IncrementalJavaBuilder> startupBuilder = new AtomicReference<>();
     private volatile JavaDebugSession debugSession;
     private volatile JavaDebugPanel debugPanel;
     private volatile String debugPanelId;
@@ -466,6 +470,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         dependencyService = null;
         runSupport = null;
         runBuildProgress.set(null);
+        cancelStartupBuild();
+        hideProgress(STARTUP_BUILD_PROGRESS_ID);
         closeDebugSession();
         activeJavaEditor = null;
         selectedRunConfig = null;
@@ -696,7 +702,72 @@ public class JavaIdeAdapter extends IdeAdapter {
                         + " " + resolution.requestedMajor());
             }
             startLanguageServer(ticket, root, resolution.installation());
+            background.submit(() -> startupBuild(ticket, root));
         });
+    }
+
+    private void startupBuild(long ticket, Path root) {
+        if (!settings().isBuildOnProjectOpen() || !current(ticket, root)) {
+            return;
+        }
+        JavaProjectDescriptor current = descriptor;
+        BuildSystem build = ensureBuildSystem();
+        if (current == null || build == null || current.rootModule() == null) {
+            return;
+        }
+        if (build.isRunning() || !buildRunning.compareAndSet(false, true)) {
+            return;
+        }
+
+        BuildProgressTracker progress = new BuildProgressTracker(
+                text("progress.buildingModule", "Buildando modulo"), current, null,
+                update -> updateProgress(STARTUP_BUILD_PROGRESS_ID,
+                        update.label(), update.percent()));
+        BuildProgressTracker.Update initial = progress.initial();
+        showProgress(STARTUP_BUILD_PROGRESS_ID, initial.label(), true, this::cancelStartupBuild);
+        if (initial.percent() >= 0) {
+            updateProgress(STARTUP_BUILD_PROGRESS_ID, initial.label(), initial.percent());
+        }
+        try {
+            BuildResult result = runStartupBuild(current, build, progress);
+            if (!current(ticket, root)) {
+                return;
+            }
+            publishBuildDiagnostics(result, true);
+            setStatusBarText("Java: " + result.summary());
+        } finally {
+            startupBuilder.set(null);
+            BuildProgressTracker.Update completed = progress.completed();
+            updateProgress(STARTUP_BUILD_PROGRESS_ID, completed.label(), completed.percent());
+            hideProgress(STARTUP_BUILD_PROGRESS_ID);
+            buildRunning.set(false);
+        }
+    }
+
+    private BuildResult runStartupBuild(JavaProjectDescriptor current, BuildSystem build,
+                                        BuildProgressTracker progress) {
+        JavaModule rootModule = current.rootModule();
+        if (settings().isIncrementalBuild()) {
+            IncrementalJavaBuilder builder =
+                    new IncrementalJavaBuilder(current, this::ensureBuildSystem, this::getProjectJdk)
+                            .withModuleListener(progress::moduleStarted);
+            if (builder.isApplicable(rootModule)) {
+                startupBuilder.set(builder);
+                return builder.build(rootModule, false, progress);
+            }
+        }
+        return executeBuild(BuildSystem.BuildAction.COMPILE, build, null, progress);
+    }
+
+    private void cancelStartupBuild() {
+        IncrementalJavaBuilder builder = startupBuilder.getAndSet(null);
+        if (builder != null) {
+            builder.cancel();
+        }
+        BuildSystem build = buildSystem;
+        if (build != null && build.isRunning()) {
+            build.cancel();
+        }
     }
 
     private void promptForProjectJdk(long ticket, Path root, JdkService.JdkResolution resolution) {
@@ -5600,6 +5671,13 @@ public class JavaIdeAdapter extends IdeAdapter {
                     }
                 })
                 .withChainHost(this::chainHost)
+                .withIncrementalBuild(() -> settings().isIncrementalBuild())
+                .withModuleProgress((module, index, total) -> {
+                    BuildProgressTracker progress = runBuildProgress.get();
+                    if (progress != null) {
+                        progress.moduleStarted(module, index, total);
+                    }
+                })
                 .withBuildResultListener(result -> publishBuildDiagnostics(result, true));
         runSupport = created;
         return created;
@@ -6471,9 +6549,19 @@ public class JavaIdeAdapter extends IdeAdapter {
     private BuildResult executeBuild(BuildSystem.BuildAction action, BuildSystem build,
                                      JavaModule module, Consumer<String> output) {
         JavaPluginSettings preferences = settings();
+        if (action == BuildSystem.BuildAction.REBUILD || action == BuildSystem.BuildAction.CLEAN) {
+            discardIncrementalState();
+        }
         BuildRequest request = BuildRequest.of(action, module)
                 .withOffline(preferences.isBuildOffline());
         return build.execute(request, output);
+    }
+
+    private void discardIncrementalState() {
+        if (descriptor == null || descriptor.root() == null) {
+            return;
+        }
+        ModuleBuildState.discard(IncrementalJavaBuilder.stateDirectory(descriptor.root()));
     }
 
     private String buildProgressAction(BuildSystem.BuildAction action) {

@@ -81,6 +81,35 @@ class BuildProgressTrackerTest {
         assertTrue(updates.isEmpty());
     }
 
+    @Test
+    void reportsEachModuleStepOfAnIncrementalBuild() {
+        Fixture fixture = fixture();
+        List<BuildProgressTracker.Update> updates = new ArrayList<>();
+        BuildProgressTracker tracker = new BuildProgressTracker(
+                "Buildando modulo", fixture.descriptor(), null, updates::add);
+
+        tracker.moduleStarted(fixture.orders(), 1, 3);
+        tracker.moduleStarted(fixture.billing(), 2, 3);
+
+        assertEquals(new BuildProgressTracker.Update(
+                "Buildando modulo - orders (1/3)", 0), updates.get(0));
+        assertEquals(new BuildProgressTracker.Update(
+                "Buildando modulo - billing (2/3)", 33), updates.get(1));
+    }
+
+    @Test
+    void aSingleModuleStepStaysIndeterminate() {
+        Fixture fixture = fixture();
+        List<BuildProgressTracker.Update> updates = new ArrayList<>();
+        BuildProgressTracker tracker = new BuildProgressTracker(
+                "Buildando modulo", fixture.descriptor(), null, updates::add);
+
+        tracker.moduleStarted(fixture.billing(), 1, 1);
+
+        assertEquals(new BuildProgressTracker.Update("Buildando modulo - billing", -1),
+                updates.getFirst());
+    }
+
     private Fixture fixture() {
         JavaModule aggregator = module(root, "workspace", "workspace", "pom");
         JavaModule orders = module(root.resolve("orders"), "orders", "orders", "jar");
@@ -89,7 +118,7 @@ class BuildProgressTrackerTest {
         JavaProjectDescriptor descriptor = new JavaProjectDescriptor(root,
                 JavaProjectKind.MAVEN_MULTIMODULE, List.of(aggregator, orders, billing),
                 false, false, 21, null);
-        return new Fixture(descriptor, billing);
+        return new Fixture(descriptor, orders, billing);
     }
 
     private static JavaModule module(Path path, String name, String artifact, String packaging) {
@@ -98,6 +127,7 @@ class BuildProgressTrackerTest {
                 List.of(path.resolve("src/test/java")), path.resolve("target/classes"));
     }
 
-    private record Fixture(JavaProjectDescriptor descriptor, JavaModule billing) {
+    private record Fixture(JavaProjectDescriptor descriptor, JavaModule orders,
+                           JavaModule billing) {
     }
 }

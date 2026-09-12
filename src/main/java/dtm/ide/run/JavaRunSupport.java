@@ -6,6 +6,7 @@ import dtm.ide.api.extension.runconfig.RunProcessHandle;
 import dtm.ide.build.BuildCommand;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
+import dtm.ide.build.incremental.IncrementalJavaBuilder;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.run.chain.RunChainExecutor;
 import dtm.ide.run.chain.RunChainHost;
@@ -23,9 +24,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -64,6 +67,10 @@ public class JavaRunSupport {
     private volatile Supplier<RunChainHost> chainHost = () -> RunChainHost.EMPTY;
     private volatile Consumer<BuildResult> buildResultListener = result -> {
     };
+    private volatile BooleanSupplier incrementalBuildEnabled = () -> true;
+    private volatile IncrementalJavaBuilder.ModuleListener moduleProgress =
+            (module, index, total) -> {
+            };
 
     public JavaRunSupport(Supplier<JavaProjectDescriptor> descriptorSupplier,
                           Supplier<JdkInstallation> jdkSupplier,
@@ -83,6 +90,17 @@ public class JavaRunSupport {
 
     public JavaRunSupport withBuildResultListener(Consumer<BuildResult> listener) {
         this.buildResultListener = listener == null ? result -> {
+        } : listener;
+        return this;
+    }
+
+    public JavaRunSupport withIncrementalBuild(BooleanSupplier enabled) {
+        this.incrementalBuildEnabled = enabled == null ? () -> true : enabled;
+        return this;
+    }
+
+    public JavaRunSupport withModuleProgress(IncrementalJavaBuilder.ModuleListener listener) {
+        this.moduleProgress = listener == null ? (module, index, total) -> {
         } : listener;
         return this;
     }
@@ -435,11 +453,11 @@ public class JavaRunSupport {
         if (build == null) {
             return Optional.empty();
         }
-        BuildSystem.BuildAction action = usesTestClasspath(configuration)
-                ? BuildSystem.BuildAction.TEST_COMPILE
-                : BuildSystem.BuildAction.COMPILE;
-        BuildResult result = build.execute(
-                BuildRequest.of(action, module).withSkipTests(true), output);
+        boolean test = usesTestClasspath(configuration);
+        BuildResult result = incrementalBuild(module, test)
+                .orElseGet(() -> build.execute(BuildRequest.of(test
+                        ? BuildSystem.BuildAction.TEST_COMPILE
+                        : BuildSystem.BuildAction.COMPILE, module).withSkipTests(true), output));
         buildResultListener.accept(result);
 
         if (result.successful()) {
@@ -447,6 +465,23 @@ public class JavaRunSupport {
         }
         return Optional.of(text("error.buildFailed", "O build falhou; a execucao foi cancelada.")
                 + " " + result.summary());
+    }
+
+    private Optional<BuildResult> incrementalBuild(JavaModule module, boolean test) {
+        if (!incrementalBuildEnabled.getAsBoolean() || module == null) {
+            return Optional.empty();
+        }
+        JavaProjectDescriptor descriptor = descriptorSupplier.get();
+        if (descriptor == null) {
+            return Optional.empty();
+        }
+        IncrementalJavaBuilder builder =
+                new IncrementalJavaBuilder(descriptor, buildSupplier, jdkSupplier)
+                        .withModuleListener(moduleProgress);
+        if (!builder.isApplicable(module)) {
+            return Optional.empty();
+        }
+        return Optional.of(builder.build(module, test, output));
     }
 
     // --- Auxiliares ----------------------------------------------------------
@@ -468,8 +503,27 @@ public class JavaRunSupport {
         if (classpath.isPresent() && !classpath.get().isBlank()) {
             return classpath.get();
         }
-        log.info("Classpath nao resolvido; usando apenas as classes compiladas de {}", module.root());
-        return module.outputDir().toString();
+        log.info("Classpath nao resolvido; usando apenas as classes compiladas do projeto a partir de {}",
+                module.root());
+        return workspaceOutputDirs(module, test);
+    }
+
+    private String workspaceOutputDirs(JavaModule module, boolean test) {
+        LinkedHashSet<String> entries = new LinkedHashSet<>();
+        if (test) {
+            entries.add(module.root().resolve("target/test-classes").toString());
+        }
+        entries.add(module.outputDir().toString());
+        JavaProjectDescriptor descriptor = descriptorSupplier.get();
+        if (descriptor != null) {
+            for (JavaModule other : descriptor.modules()) {
+                if (other == null || other.isAggregator()) {
+                    continue;
+                }
+                entries.add(other.outputDir().toString());
+            }
+        }
+        return String.join(java.io.File.pathSeparator, entries);
     }
 
     private Path workingDirectoryOf(RunConfigurationData configuration, JavaModule module,

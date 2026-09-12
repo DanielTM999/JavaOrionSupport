@@ -76,6 +76,22 @@ public final class MavenPom {
         return values;
     }
 
+    public List<List<String>> entries(String outer, String inner, String... fields) {
+        Element parent = child(root, outer);
+        if (parent == null || fields == null || fields.length == 0) {
+            return List.of();
+        }
+        List<List<String>> entries = new ArrayList<>();
+        for (Element element : children(parent, inner)) {
+            List<String> values = new ArrayList<>(fields.length);
+            for (String field : fields) {
+                values.add(textOf(child(element, field)));
+            }
+            entries.add(List.copyOf(values));
+        }
+        return entries;
+    }
+
     public String property(String name) {
         return value("properties", name);
     }

@@ -12,7 +12,8 @@ public record BuildRequest(
         List<String> profiles,
         Map<String, String> environment,
         boolean offline,
-        boolean skipTests
+        boolean skipTests,
+        boolean alsoMake
 ) {
 
     public BuildRequest {
@@ -23,35 +24,40 @@ public record BuildRequest(
     }
 
     public static BuildRequest of(BuildSystem.BuildAction action) {
-        return new BuildRequest(action, null, List.of(), List.of(), Map.of(), false, false);
+        return new BuildRequest(action, null, List.of(), List.of(), Map.of(), false, false, true);
     }
 
     public static BuildRequest of(BuildSystem.BuildAction action, JavaModule module) {
-        return new BuildRequest(action, module, List.of(), List.of(), Map.of(), false, false);
+        return new BuildRequest(action, module, List.of(), List.of(), Map.of(), false, false, true);
     }
 
     public BuildRequest withModule(JavaModule target) {
         return new BuildRequest(action, target, extraArguments, profiles, environment,
-                offline, skipTests);
+                offline, skipTests, alsoMake);
     }
 
     public BuildRequest withArguments(List<String> arguments) {
         return new BuildRequest(action, module, arguments, profiles, environment,
-                offline, skipTests);
+                offline, skipTests, alsoMake);
     }
 
     public BuildRequest withProfiles(List<String> activeProfiles) {
         return new BuildRequest(action, module, extraArguments, activeProfiles, environment,
-                offline, skipTests);
+                offline, skipTests, alsoMake);
     }
 
     public BuildRequest withSkipTests(boolean skip) {
         return new BuildRequest(action, module, extraArguments, profiles, environment,
-                offline, skip);
+                offline, skip, alsoMake);
     }
 
     public BuildRequest withOffline(boolean value) {
         return new BuildRequest(action, module, extraArguments, profiles, environment,
-                value, skipTests);
+                value, skipTests, alsoMake);
+    }
+
+    public BuildRequest withAlsoMake(boolean value) {
+        return new BuildRequest(action, module, extraArguments, profiles, environment,
+                offline, skipTests, value);
     }
 }

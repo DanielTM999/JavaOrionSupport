@@ -6,10 +6,21 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaPluginSettingsTest {
     @TempDir
     Path directory;
+
+    @Test
+    void theProjectIsBuiltOnOpenByDefaultAndThePreferencePersists() {
+        JavaPluginSettings settings = new JavaPluginSettings(directory);
+        assertTrue(settings.isBuildOnProjectOpen());
+        settings.setBuildOnProjectOpen(false);
+        settings.save();
+        assertFalse(new JavaPluginSettings(directory).isBuildOnProjectOpen());
+    }
 
     @Test
     void hotReloadIsManualByDefaultAndPersists() {

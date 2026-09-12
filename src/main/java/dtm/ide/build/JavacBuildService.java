@@ -8,7 +8,6 @@ import dtm.ide.sdk.SdkDownloader;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -23,8 +22,6 @@ import java.util.stream.Stream;
 
 @Slf4j
 public final class JavacBuildService implements BuildSystem {
-
-    private static final int ARGUMENT_FILE_THRESHOLD = 30;
 
     private final JavaProjectDescriptor descriptor;
     private final Supplier<JdkInstallation> jdkSupplier;
@@ -87,14 +84,15 @@ public final class JavacBuildService implements BuildSystem {
             command.add(module.outputDir().toString());
             command.add("-encoding");
             command.add("UTF-8");
-            releaseArgument(jdk, request.extraArguments()).ifPresent(release -> {
-                command.add("--release");
-                command.add(release);
-            });
+            JavacCommands.releaseArgument(descriptor, jdk, request.extraArguments())
+                    .ifPresent(release -> {
+                        command.add("--release");
+                        command.add(release);
+                    });
             command.addAll(request.extraArguments());
 
-            if (sources.size() > ARGUMENT_FILE_THRESHOLD) {
-                argumentFile = writeArgumentFile(sources);
+            if (sources.size() > JavacCommands.ARGUMENT_FILE_THRESHOLD) {
+                argumentFile = JavacCommands.writeArgumentFile(sources);
                 command.add("@" + argumentFile);
             } else {
                 sources.forEach(source -> command.add(source.toString()));
@@ -120,7 +118,7 @@ public final class JavacBuildService implements BuildSystem {
             emit(output, reason);
             return BuildResult.failed("javac", reason);
         } finally {
-            deleteQuietly(argumentFile);
+            JavacCommands.deleteQuietly(argumentFile);
         }
     }
 
@@ -174,26 +172,6 @@ public final class JavacBuildService implements BuildSystem {
                 Duration.between(start, Instant.now()), String.join(" ", command));
     }
 
-    private static final int MIN_RELEASE = 7;
-
-    private Optional<String> releaseArgument(JdkInstallation jdk, List<String> extraArguments) {
-        for (String argument : extraArguments) {
-            if (argument.equals("--release") || argument.startsWith("--release=")
-                    || argument.equals("-source") || argument.equals("-target")) {
-                return Optional.empty();
-            }
-        }
-        Optional<Integer> requested = descriptor == null ? Optional.empty() : descriptor.jdkMajor();
-        if (requested.isEmpty()) {
-            return Optional.empty();
-        }
-        int major = requested.get();
-        if (major < MIN_RELEASE || major > jdk.major()) {
-            return Optional.empty();
-        }
-        return Optional.of(String.valueOf(major));
-    }
-
     private static List<Path> collectSources(JavaModule module, boolean includeTests) {
         List<Path> roots = new ArrayList<>(module.existingSourceRoots());
         if (includeTests) {
@@ -210,27 +188,6 @@ public final class JavacBuildService implements BuildSystem {
             }
         }
         return sources;
-    }
-
-    private static Path writeArgumentFile(List<Path> sources) throws Exception {
-        Path file = Files.createTempFile("orion-javac-sources", ".txt");
-        StringBuilder content = new StringBuilder();
-        for (Path source : sources) {
-            content.append('"').append(source.toString().replace("\\", "\\\\")).append('"')
-                    .append(System.lineSeparator());
-        }
-        Files.writeString(file, content.toString(), StandardCharsets.UTF_8);
-        return file;
-    }
-
-    private static void deleteQuietly(Path path) {
-        if (path == null) {
-            return;
-        }
-        try {
-            Files.deleteIfExists(path);
-        } catch (Exception ignored) {
-        }
     }
 
     private static void emit(Consumer<String> output, String line) {
