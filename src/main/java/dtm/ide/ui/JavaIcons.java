@@ -5,6 +5,7 @@ import dtm.stools.configs.UiTokens;
 import dtm.stools.utils.ImageUtils;
 
 import javax.swing.Icon;
+import javax.swing.UIManager;
 import java.awt.Color;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,7 +42,9 @@ public final class JavaIcons {
     }
 
     public static Icon spring(int size) {
-        return plain("/imgs/wizard-spring.svg", size);
+        Color foreground = UIManager.getColor("Label.foreground");
+        return colored("/imgs/java-spring.svg", size,
+                foreground == null ? UiTokens.foreground() : foreground);
     }
 
     public static Icon test(int size) {

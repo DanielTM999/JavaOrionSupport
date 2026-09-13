@@ -13,6 +13,44 @@ public final class JpaPropertyResolver {
     private JpaPropertyResolver() {
     }
 
+    /** Resolves literal JPQL attribute names; only dots separate path segments. */
+    public static Optional<List<JpaField>> resolveJpqlPath(JpaEntity root, String expression,
+                                                           EntityLookup lookup) {
+        if (root == null || expression == null || expression.isBlank()) {
+            return Optional.empty();
+        }
+        List<JpaField> path = new ArrayList<>();
+        JpaEntity current = root;
+        for (String part : expression.split("\\.", -1)) {
+            if (current == null || part.isBlank()) {
+                return Optional.empty();
+            }
+            Optional<JpaField> field = exactFieldOf(current, part, lookup);
+            if (field.isEmpty()) {
+                return Optional.empty();
+            }
+            path.add(field.get());
+            current = targetOf(field.get(), lookup).orElse(null);
+        }
+        return Optional.of(List.copyOf(path));
+    }
+
+    private static Optional<JpaField> exactFieldOf(JpaEntity entity, String name,
+                                                   EntityLookup lookup) {
+        JpaEntity current = entity;
+        for (int depth = 0; current != null && depth <= 9; depth++) {
+            Optional<JpaField> field = current.fields().stream()
+                    .filter(candidate -> !candidate.ignored() && candidate.name().equals(name))
+                    .findFirst();
+            if (field.isPresent()) {
+                return field;
+            }
+            current = lookup == null || current.superType().isBlank() ? null
+                    : lookup.byType(current.superType()).orElse(null);
+        }
+        return Optional.empty();
+    }
+
     public static Optional<List<JpaField>> resolveCondition(JpaEntity root, String condition,
                                                             EntityLookup lookup) {
         for (String candidate : JpaDerivedQuery.propertyCandidates(condition)) {

@@ -61,8 +61,7 @@ public final class JpqlDiagnostics {
             if (owner.isEmpty()) {
                 continue;
             }
-            String expression = path.expression().replace('.', '_');
-            if (JpaPropertyResolver.resolvePath(owner.get(), expression, lookup).isPresent()) {
+            if (JpaPropertyResolver.resolveJpqlPath(owner.get(), path.expression(), lookup).isPresent()) {
                 continue;
             }
             StringBuilder message = new StringBuilder()
@@ -71,9 +70,10 @@ public final class JpqlDiagnostics {
                     .append(owner.get().simpleName())
                     .append(": ")
                     .append(path.expression());
-            String closest = JpaNaming.closest(firstSegment(path.expression()),
+            String first = firstSegment(path.expression());
+            String closest = JpaNaming.closest(first,
                     JpaPropertyResolver.knownProperties(owner.get(), lookup));
-            if (!closest.isBlank()) {
+            if (!closest.isBlank() && !closest.equals(first)) {
                 message.append(". ")
                         .append(text("diagnostic.useInstead", "Voce quis dizer"))
                         .append(' ')
@@ -119,7 +119,8 @@ public final class JpqlDiagnostics {
         if (root.isEmpty()) {
             return Optional.empty();
         }
-        return root.get().fieldNamed(relation)
+        return JpaPropertyResolver.resolveJpqlPath(root.get(), relation, snapshot.entityLookup())
+                .map(fields -> fields.getLast())
                 .filter(field -> !field.targetEntity().isBlank())
                 .flatMap(field -> snapshot.entityNamed(field.targetEntity()));
     }

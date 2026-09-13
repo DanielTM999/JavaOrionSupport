@@ -160,7 +160,7 @@ public final class JpaQueryCompletionProvider {
         for (int i = 1; i < path.length && entity != null; i++) {
             Optional<JpaField> field = nativeSql
                     ? fieldByColumn(entity, path[i], snapshot)
-                    : JpaPropertyResolver.resolvePath(entity, path[i], snapshot.entityLookup())
+                    : JpaPropertyResolver.resolveJpqlPath(entity, path[i], snapshot.entityLookup())
                     .map(fields -> fields.getLast());
             entity = field.filter(JpaField::navigable)
                     .flatMap(value -> snapshot.entityNamed(value.targetEntity()))
@@ -284,7 +284,8 @@ public final class JpaQueryCompletionProvider {
                 JpaEntity entity = snapshot.entityNamed(parsed.entityOf(alias)).orElse(null);
                 String relation = parsed.relationOf(alias);
                 if (entity != null && !relation.isBlank()) {
-                    entity = entity.fieldNamed(relation)
+                    entity = JpaPropertyResolver.resolveJpqlPath(entity, relation, snapshot.entityLookup())
+                            .map(fields -> fields.getLast())
                             .flatMap(field -> snapshot.entityNamed(field.targetEntity()))
                             .orElse(null);
                 }
