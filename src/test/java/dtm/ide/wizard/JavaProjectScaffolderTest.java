@@ -127,7 +127,7 @@ class JavaProjectScaffolderTest {
                     <parent>
                         <groupId>org.springframework.boot</groupId>
                         <artifactId>spring-boot-starter-parent</artifactId>
-                        <version>3.5.6</version>
+                        <version>4.1.1.RELEASE</version>
                         <relativePath/>
                     </parent>
                     <groupId>com.example</groupId>
@@ -164,7 +164,8 @@ class JavaProjectScaffolderTest {
 
         String root = Files.readString(project.resolve("pom.xml"));
         String web = Files.readString(project.resolve("web/pom.xml"));
-        assertTrue(root.contains("<version>3.5.6</version>"));
+        assertTrue(root.contains("<version>4.1.1</version>"));
+        assertFalse(root.contains("4.1.1.RELEASE"));
         assertTrue(root.contains("<packaging>pom</packaging>"));
         assertTrue(root.contains("<module>web</module>"));
         assertTrue(root.contains("<module>core</module>"));

@@ -161,7 +161,8 @@ final class SpringMultiModuleScaffolder {
         if (bootVersion == null || bootVersion.getTextContent().isBlank()) {
             throw new IllegalArgumentException("O POM gerado nao declara a versao do Spring Boot.");
         }
-        String springBootVersion = bootVersion.getTextContent().trim();
+        String springBootVersion = SpringInitializrClient.normalizeBootVersion(
+                bootVersion.getTextContent());
 
         setChildText(document, parent, "groupId", project.groupId());
         setChildText(document, parent, "artifactId", project.artifactId());

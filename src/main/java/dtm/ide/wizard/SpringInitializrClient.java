@@ -20,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 public final class SpringInitializrClient {
@@ -27,6 +29,8 @@ public final class SpringInitializrClient {
     private static final String BASE_URL = "https://start.spring.io";
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Pattern MODERN_QUALIFIED_BOOT_VERSION = Pattern.compile(
+            "^(\\d+)\\.\\d+\\.\\d+\\.(RELEASE|BUILD-SNAPSHOT|M\\d+|RC\\d+)$");
 
     private final HttpClient http = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
@@ -95,7 +99,7 @@ public final class SpringInitializrClient {
             packageName = blankTo(packageName, groupId + "." + artifactId.replace("-", ""));
             javaVersion = blankTo(javaVersion, "21");
             packaging = blankTo(packaging, "jar");
-            bootVersion = bootVersion == null ? "" : bootVersion.trim();
+            bootVersion = normalizeBootVersion(bootVersion);
             dependencies = dependencies == null ? List.of() : List.copyOf(dependencies);
         }
 
@@ -248,6 +252,27 @@ public final class SpringInitializrClient {
                 .append(URLEncoder.encode(value, StandardCharsets.UTF_8)).append('&'));
         url.setLength(url.length() - 1);
         return url.toString();
+    }
+
+    /**
+     * Converte a notacao interna exposta pelo metadata do Initializr para a versao
+     * efetivamente publicada nos repositorios Spring/Maven. O Spring Boot 2 e anterior
+     * usava {@code .RELEASE} de verdade, portanto essas versoes permanecem intactas.
+     */
+    static String normalizeBootVersion(String version) {
+        String value = version == null ? "" : version.trim();
+        Matcher matcher = MODERN_QUALIFIED_BOOT_VERSION.matcher(value);
+        if (!matcher.matches() || Integer.parseInt(matcher.group(1)) < 3) {
+            return value;
+        }
+
+        String qualifier = matcher.group(2);
+        String base = value.substring(0, value.length() - qualifier.length() - 1);
+        return switch (qualifier) {
+            case "RELEASE" -> base;
+            case "BUILD-SNAPSHOT" -> base + "-SNAPSHOT";
+            default -> base + "-" + qualifier;
+        };
     }
 
     public static String projectTypeOf(boolean gradle) {
