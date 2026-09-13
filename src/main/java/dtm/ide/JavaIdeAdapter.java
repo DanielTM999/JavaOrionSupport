@@ -283,7 +283,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String HIDE_OCCURRENCE_COMMAND = "java.orion.hideInspectionOccurrence";
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
-    private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 500;
+    private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 800;
     private static final long COVERAGE_POLL_INTERVAL_MS = 400L;
     private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
