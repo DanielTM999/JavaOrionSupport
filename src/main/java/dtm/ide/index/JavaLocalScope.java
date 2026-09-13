@@ -1,303 +1,265 @@
 package dtm.ide.index;
 
+import com.sun.source.tree.*;
+import com.sun.source.util.JavacTask;
+import com.sun.source.util.SourcePositions;
+import com.sun.source.util.TreeScanner;
+import com.sun.source.util.Trees;
 import dtm.stools.component.panels.editor.code.api.Range;
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
+import javax.tools.JavaFileObject;
+import javax.tools.SimpleJavaFileObject;
+import javax.tools.ToolProvider;
+import java.net.URI;
+import java.util.*;
 
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Deque;
-import java.util.List;
-import java.util.Set;
-
+/** Syntax-only fallback: no attribution, classpath lookup or annotation processing. */
 public final class JavaLocalScope {
-
-    private static final Set<String> CONTROL = Set.of(
-            "if", "for", "while", "switch", "catch", "synchronized", "try", "do", "else",
-            "return", "case", "assert", "throw", "yield", "super", "this");
-    private static final Set<String> TYPE_HOLDERS = Set.of(
-            "new", "record", "class", "interface", "enum");
-    private static final Set<String> PRIMITIVES = Set.of(
-            "boolean", "byte", "char", "double", "float", "int", "long", "short");
+    private static final Map<String, List<Scope>> CACHE = new LinkedHashMap<>(8, .75f, true);
 
     public record Scope(String name, Range declaration, boolean onDeclaration,
-                        int startLine, int endLine, List<Range> usages) {
-    }
+                        int startLine, int endLine, List<Range> usages) { }
 
-    private JavaLocalScope() {
-    }
+    private JavaLocalScope() { }
 
     public static Scope at(String source, int line, int col) {
-        if (source == null || source.isEmpty() || line < 0 || col < 0) {
-            return null;
-        }
-        String code = JavaLexicalSource.mask(source);
-        int[] lineStarts = JavaLexicalSource.lineStarts(code);
-        int caret = offsetOf(code, lineStarts, line, col);
-        if (caret < 0) {
-            return null;
-        }
-        int[] span = wordSpan(code, caret);
-        if (span == null) {
-            return null;
-        }
-        String name = code.substring(span[0], span[1]);
-        if (JavaLexicalSource.isKeyword(name)) {
-            return null;
-        }
-        int[] region = methodRegion(code, span[0]);
-        if (region == null || span[0] < region[0] || span[1] > region[1]) {
-            return null;
-        }
-        int[] declaration = isDeclaration(code, span[0])
-                ? span : declarationIn(code, region, name);
-        if (declaration == null) {
-            return null;
-        }
-        List<Range> usages = new ArrayList<>();
-        for (int[] occurrence : JavaLexicalSource.occurrences(code, Set.of(name))) {
-            if (occurrence[0] < region[0] || occurrence[1] > region[1]
-                    || occurrence[0] == declaration[0]
-                    || isMemberAccess(code, occurrence[0], occurrence[1])) {
-                continue;
+        if (source == null || source.isEmpty() || line < 0 || col < 0) return null;
+        for (Scope symbol : scopes(source)) {
+            boolean declaration = contains(symbol.declaration(), line, col);
+            if (declaration || symbol.usages().stream().anyMatch(r -> contains(r, line, col))) {
+                return new Scope(symbol.name(), symbol.declaration(), declaration,
+                        symbol.startLine(), symbol.endLine(), symbol.usages());
             }
-            usages.add(JavaLexicalSource.rangeOf(lineStarts, occurrence[0], occurrence[1]));
         }
-        return new Scope(name,
-                JavaLexicalSource.rangeOf(lineStarts, declaration[0], declaration[1]),
-                declaration[0] == span[0],
-                JavaLexicalSource.lineOf(lineStarts, region[0]),
-                JavaLexicalSource.lineOf(lineStarts, Math.max(region[0], region[1] - 1)),
-                List.copyOf(usages));
+        return null;
     }
 
-    private static int offsetOf(String code, int[] lineStarts, int line, int col) {
-        if (line >= lineStarts.length) {
-            return -1;
-        }
-        int start = lineStarts[line];
-        int end = line + 1 < lineStarts.length ? lineStarts[line + 1] - 1 : code.length();
-        return Math.min(start + col, end);
+    private static boolean contains(Range range, int line, int col) {
+        return range.start().line() == line && col >= range.start().col() && col < range.end().col();
     }
 
-    private static int[] wordSpan(String code, int caret) {
-        int start = caret;
-        while (start > 0 && Character.isJavaIdentifierPart(code.charAt(start - 1))) {
-            start--;
+    private static List<Scope> scopes(String source) {
+        synchronized (CACHE) {
+            List<Scope> cached = CACHE.get(source);
+            if (cached != null) return cached;
         }
-        int end = caret;
-        while (end < code.length() && Character.isJavaIdentifierPart(code.charAt(end))) {
-            end++;
+        List<Scope> parsed = parse(source);
+        synchronized (CACHE) {
+            CACHE.put(source, parsed);
+            while (CACHE.size() > 8) CACHE.remove(CACHE.keySet().iterator().next());
         }
-        if (start >= end || !Character.isJavaIdentifierStart(code.charAt(start))) {
+        return parsed;
+    }
+
+    private static List<Scope> parse(String source) {
+        try {
+            var compiler = ToolProvider.getSystemJavaCompiler();
+            if (compiler == null) return List.of();
+            var diagnostics = new DiagnosticCollector<JavaFileObject>();
+            JavaFileObject file = new SimpleJavaFileObject(URI.create("string:///Buffer.java"),
+                    JavaFileObject.Kind.SOURCE) {
+                @Override public CharSequence getCharContent(boolean ignored) { return source; }
+            };
+            try (var manager = compiler.getStandardFileManager(diagnostics, null, null)) {
+                JavacTask task = (JavacTask) compiler.getTask(null, manager, diagnostics,
+                        List.of("-proc:none"), null, List.of(file));
+                CompilationUnitTree unit = task.parse().iterator().next();
+                // Broken syntax can change nesting. Never guess a binding in that case.
+                if (diagnostics.getDiagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR)) {
+                    return List.of();
+                }
+                Scanner scanner = new Scanner(source, unit, Trees.instance(task).getSourcePositions());
+                scanner.scan(unit, null);
+                return scanner.symbols.stream().map(Symbol::snapshot).toList();
+            }
+        } catch (Exception | LinkageError unavailable) {
+            // A host runtime without jdk.compiler still has semantic navigation through JDT LS.
+            return List.of();
+        }
+    }
+
+    private static final class Symbol {
+        final String name;
+        final Range declaration;
+        final int startLine, endLine;
+        final List<Range> uses = new ArrayList<>();
+        Symbol(String name, Range declaration, int startLine, int endLine) {
+            this.name = name; this.declaration = declaration;
+            this.startLine = startLine; this.endLine = endLine;
+        }
+        Scope snapshot() { return new Scope(name, declaration, false, startLine, endLine, List.copyOf(uses)); }
+    }
+
+    private record Frame(Tree owner, Map<String, Symbol> bindings) {
+        Frame(Tree owner) { this(owner, new HashMap<>()); }
+    }
+
+    private static final class Scanner extends TreeScanner<Void, Void> {
+        final String code;
+        final int[] lines;
+        final CompilationUnitTree unit;
+        final SourcePositions positions;
+        final Deque<Frame> frames = new ArrayDeque<>();
+        final List<Symbol> symbols = new ArrayList<>();
+
+        Scanner(String source, CompilationUnitTree unit, SourcePositions positions) {
+            this.code = JavaLexicalSource.mask(source);
+            this.lines = JavaLexicalSource.lineStarts(source);
+            this.unit = unit; this.positions = positions;
+        }
+        int start(Tree tree) { return (int) positions.getStartPosition(unit, tree); }
+        int end(Tree tree) { return (int) positions.getEndPosition(unit, tree); }
+        Range range(int from, int to) { return JavaLexicalSource.rangeOf(lines, from, to); }
+
+        @Override public Void visitClass(ClassTree tree, Void unused) {
+            Frame frame = new Frame(tree);
+            for (Tree member : tree.getMembers()) {
+                if (member instanceof VariableTree field) frame.bindings.put(field.getName().toString(), null);
+            }
+            frames.push(frame);
+            scan(tree.getMembers(), null);
+            frames.pop();
             return null;
         }
-        return new int[]{start, end};
-    }
-
-    private static int[] methodRegion(String code, int offset) {
-        Deque<Integer> braces = new ArrayDeque<>();
-        Deque<Integer> parens = new ArrayDeque<>();
-        for (int i = 0; i < offset; i++) {
-            switch (code.charAt(i)) {
-                case '{' -> braces.push(i);
-                case '}' -> pop(braces);
-                case '(' -> parens.push(i);
-                case ')' -> pop(parens);
-                default -> {
+        @Override public Void visitMethod(MethodTree tree, Void unused) {
+            frames.push(new Frame(tree));
+            scan(tree.getParameters(), null); scan(tree.getBody(), null);
+            frames.pop();
+            return null;
+        }
+        @Override public Void visitBlock(BlockTree tree, Void unused) {
+            frames.push(new Frame(tree));
+            scan(tree.getStatements(), null);
+            frames.pop();
+            return null;
+        }
+        @Override public Void visitVariable(VariableTree tree, Void unused) {
+            if (frames.isEmpty()) return null;
+            Frame frame = frames.peek();
+            if (!(frame.owner instanceof ClassTree)) {
+                int from = tree.getType() == null ? start(tree) : end(tree.getType());
+                int to = tree.getInitializer() == null ? end(tree) : start(tree.getInitializer());
+                if (from < start(tree) || from >= to) from = start(tree);
+                String name = tree.getName().toString();
+                int declaration = -1;
+                for (int[] span : JavaLexicalSource.occurrences(code, Set.of(name))) {
+                    if (span[0] >= from && span[1] <= to) declaration = span[0];
+                }
+                if (declaration >= 0) {
+                    Symbol symbol = new Symbol(name, range(declaration, declaration + name.length()),
+                            JavaLexicalSource.lineOf(lines, Math.max(0, start(frame.owner))),
+                            JavaLexicalSource.lineOf(lines, Math.max(0, end(frame.owner) - 1)));
+                    frame.bindings.put(name, symbol);
+                    symbols.add(symbol);
                 }
             }
-        }
-        if (!parens.isEmpty()) {
-            int[] header = regionOfHeader(code, parens.peek());
-            if (header != null) {
-                return header;
-            }
-        }
-        for (int brace : braces) {
-            if (!isMethodBody(code, brace)) {
-                continue;
-            }
-            int close = matchForward(code, brace, '{', '}');
-            return new int[]{headerStart(code, brace), close < 0 ? code.length() : close + 1};
-        }
-        return null;
-    }
-
-    private static void pop(Deque<Integer> stack) {
-        if (!stack.isEmpty()) {
-            stack.pop();
-        }
-    }
-
-    private static int[] regionOfHeader(String code, int open) {
-        if (!isMethodHeaderParen(code, open)) {
+            scan(tree.getInitializer(), null);
             return null;
         }
-        int close = matchForward(code, open, '(', ')');
-        if (close < 0) {
+        @Override public Void visitIdentifier(IdentifierTree tree, Void unused) {
+            String name = tree.getName().toString();
+            for (Frame frame : frames) {
+                if (frame.bindings.containsKey(name)) {
+                    Symbol symbol = frame.bindings.get(name);
+                    if (symbol != null && start(tree) >= 0) symbol.uses.add(range(start(tree), end(tree)));
+                    break;
+                }
+                if (frame.owner instanceof ClassTree type
+                        && (type.getExtendsClause() != null || type.getSimpleName().isEmpty())) break;
+            }
             return null;
         }
-        int brace = bodyBraceAfter(code, close + 1);
-        if (brace < 0) {
+        @Override public Void visitTypeCast(TypeCastTree tree, Void unused) {
+            scan(tree.getExpression(), null);
             return null;
         }
-        int end = matchForward(code, brace, '{', '}');
-        return new int[]{open, end < 0 ? code.length() : end + 1};
-    }
-
-    private static boolean isMethodBody(String code, int brace) {
-        int index = skipBack(code, brace - 1);
-        while (index >= 0 && code.charAt(index) != ')') {
-            char current = code.charAt(index);
-            if (!Character.isJavaIdentifierPart(current) && current != '.' && current != ',') {
-                return false;
+        @Override public Void visitInstanceOf(InstanceOfTree tree, Void unused) {
+            scan(tree.getExpression(), null);
+            return null;
+        }
+        @Override public Void visitNewArray(NewArrayTree tree, Void unused) {
+            scan(tree.getDimensions(), null); scan(tree.getInitializers(), null);
+            return null;
+        }
+        @Override public Void visitMemberSelect(MemberSelectTree tree, Void unused) {
+            scan(tree.getExpression(), null);
+            return null;
+        }
+        @Override public Void visitMethodInvocation(MethodInvocationTree tree, Void unused) {
+            if (tree.getMethodSelect() instanceof MemberSelectTree member) scan(member.getExpression(), null);
+            scan(tree.getArguments(), null);
+            return null;
+        }
+        @Override public Void visitNewClass(NewClassTree tree, Void unused) {
+            scan(tree.getEnclosingExpression(), null); scan(tree.getArguments(), null);
+            scan(tree.getClassBody(), null);
+            return null;
+        }
+        @Override public Void visitLambdaExpression(LambdaExpressionTree tree, Void unused) {
+            frames.push(new Frame(tree));
+            scan(tree.getParameters(), null); scan(tree.getBody(), null);
+            frames.pop();
+            return null;
+        }
+        @Override public Void visitForLoop(ForLoopTree tree, Void unused) {
+            frames.push(new Frame(tree));
+            scan(tree.getInitializer(), null); scan(tree.getCondition(), null);
+            scan(tree.getUpdate(), null); scan(tree.getStatement(), null);
+            frames.pop();
+            return null;
+        }
+        @Override public Void visitEnhancedForLoop(EnhancedForLoopTree tree, Void unused) {
+            scan(tree.getExpression(), null);
+            frames.push(new Frame(tree));
+            scan(tree.getVariable(), null); scan(tree.getStatement(), null);
+            frames.pop();
+            return null;
+        }
+        @Override public Void visitCatch(CatchTree tree, Void unused) {
+            frames.push(new Frame(tree));
+            scan(tree.getParameter(), null); scan(tree.getBlock(), null);
+            frames.pop();
+            return null;
+        }
+        @Override public Void visitTry(TryTree tree, Void unused) {
+            frames.push(new Frame(tree));
+            scan(tree.getResources(), null); scan(tree.getBlock(), null);
+            frames.pop();
+            scan(tree.getCatches(), null); scan(tree.getFinallyBlock(), null);
+            return null;
+        }
+        @Override public Void visitSwitch(SwitchTree tree, Void unused) {
+            scan(tree.getExpression(), null);
+            frames.push(new Frame(tree));
+            scan(tree.getCases(), null);
+            frames.pop();
+            return null;
+        }
+        @Override public Void visitSwitchExpression(SwitchExpressionTree tree, Void unused) {
+            scan(tree.getExpression(), null);
+            frames.push(new Frame(tree));
+            scan(tree.getCases(), null);
+            frames.pop();
+            return null;
+        }
+        @Override public Void visitCase(CaseTree tree, Void unused) {
+            // Labels may contain type/pattern names, which are not local-variable uses.
+            if (tree.getCaseKind() == CaseTree.CaseKind.RULE) frames.push(new Frame(tree));
+            scan(tree.getStatements(), null);
+            scan(tree.getBody(), null);
+            if (tree.getCaseKind() == CaseTree.CaseKind.RULE) frames.pop();
+            return null;
+        }
+        @Override public Void visitMemberReference(MemberReferenceTree tree, Void unused) {
+            if (tree.getMode() != MemberReferenceTree.ReferenceMode.NEW) {
+                scan(tree.getQualifierExpression(), null);
             }
-            index = skipBack(code, index - 1);
+            return null;
         }
-        if (index < 0) {
-            return false;
+        @Override public Void visitBindingPattern(BindingPatternTree tree, Void unused) {
+            // Flow-dependent pattern bindings require JDT LS.
+            return null;
         }
-        int open = matchBackward(code, index, '(', ')');
-        return open >= 0 && isMethodHeaderParen(code, open);
-    }
-
-    private static boolean isMethodHeaderParen(String code, int open) {
-        int end = skipBack(code, open - 1) + 1;
-        if (end <= 0 || !Character.isJavaIdentifierPart(code.charAt(end - 1))) {
-            return false;
-        }
-        int start = end;
-        while (start > 0 && Character.isJavaIdentifierPart(code.charAt(start - 1))) {
-            start--;
-        }
-        String name = code.substring(start, end);
-        if (CONTROL.contains(name) || JavaLexicalSource.isKeyword(name)) {
-            return false;
-        }
-        int previous = skipBack(code, start - 1);
-        if (previous < 0) {
-            return true;
-        }
-        if (code.charAt(previous) == '.') {
-            return false;
-        }
-        return !TYPE_HOLDERS.contains(tokenEndingAt(code, previous + 1));
-    }
-
-    private static int bodyBraceAfter(String code, int from) {
-        int index = skipForward(code, from);
-        while (index < code.length() && code.charAt(index) != '{') {
-            char current = code.charAt(index);
-            if (!Character.isJavaIdentifierPart(current) && current != '.' && current != ',') {
-                return -1;
-            }
-            index = skipForward(code, index + 1);
-        }
-        return index < code.length() ? index : -1;
-    }
-
-    private static int headerStart(String code, int brace) {
-        int index = skipBack(code, brace - 1);
-        while (index >= 0 && code.charAt(index) != ')') {
-            index = skipBack(code, index - 1);
-        }
-        if (index < 0) {
-            return brace;
-        }
-        int open = matchBackward(code, index, '(', ')');
-        return open < 0 ? brace : open;
-    }
-
-    private static int[] declarationIn(String code, int[] region, String name) {
-        for (int[] occurrence : JavaLexicalSource.occurrences(code, Set.of(name))) {
-            if (occurrence[0] < region[0] || occurrence[1] > region[1]) {
-                continue;
-            }
-            if (!isMemberAccess(code, occurrence[0], occurrence[1])
-                    && isDeclaration(code, occurrence[0])) {
-                return occurrence;
-            }
-        }
-        return null;
-    }
-
-    private static boolean isMemberAccess(String code, int start, int end) {
-        int before = skipBack(code, start - 1);
-        if (before >= 0 && code.charAt(before) == '.') {
-            return true;
-        }
-        int after = skipForward(code, end);
-        return after < code.length() && code.charAt(after) == '(';
-    }
-
-    private static boolean isDeclaration(String code, int start) {
-        int index = skipBack(code, start - 1);
-        if (index < 0) {
-            return false;
-        }
-        char previous = code.charAt(index);
-        if (previous == '>' || previous == ']') {
-            return true;
-        }
-        if (!Character.isJavaIdentifierPart(previous)) {
-            return false;
-        }
-        String token = tokenEndingAt(code, index + 1);
-        if (token.equals("var") || token.equals("final") || token.equals("instanceof")) {
-            return true;
-        }
-        if (JavaLexicalSource.isKeyword(token)) {
-            return PRIMITIVES.contains(token);
-        }
-        return true;
-    }
-
-    private static String tokenEndingAt(String code, int end) {
-        int start = end;
-        while (start > 0 && Character.isJavaIdentifierPart(code.charAt(start - 1))) {
-            start--;
-        }
-        return start >= end ? "" : code.substring(start, end);
-    }
-
-    private static int skipBack(String code, int from) {
-        int index = Math.min(from, code.length() - 1);
-        while (index >= 0 && Character.isWhitespace(code.charAt(index))) {
-            index--;
-        }
-        return index;
-    }
-
-    private static int skipForward(String code, int from) {
-        int index = Math.max(0, from);
-        while (index < code.length() && Character.isWhitespace(code.charAt(index))) {
-            index++;
-        }
-        return index;
-    }
-
-    private static int matchForward(String code, int open, char opening, char closing) {
-        int depth = 0;
-        for (int i = open; i < code.length(); i++) {
-            char current = code.charAt(i);
-            if (current == opening) {
-                depth++;
-            } else if (current == closing && --depth == 0) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private static int matchBackward(String code, int close, char opening, char closing) {
-        int depth = 0;
-        for (int i = close; i >= 0; i--) {
-            char current = code.charAt(i);
-            if (current == closing) {
-                depth++;
-            } else if (current == opening && --depth == 0) {
-                return i;
-            }
-        }
-        return -1;
     }
 }

@@ -13,6 +13,24 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class JavaSafeDeleteScannerTest {
 
+    @org.junit.jupiter.api.Test
+    void incompleteScanIsNotReportedAsNoUsages(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        var target = java.nio.file.Files.writeString(dir.resolve("Target.java"), "class Target {}");
+        java.nio.file.Files.writeString(dir.resolve("Use.java"), "class Use { Target field; }");
+        var scan = JavaSafeDeleteScanner.scan(dir, java.util.List.of(target), java.util.Map.of(), 0);
+        org.junit.jupiter.api.Assertions.assertFalse(scan.complete());
+    }
+
+    @org.junit.jupiter.api.Test
+    void scannerUsesUnsavedBuffers(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        var target = java.nio.file.Files.writeString(dir.resolve("Target.java"), "class Target {}");
+        var use = java.nio.file.Files.writeString(dir.resolve("Use.java"), "class Use {}");
+        var scan = JavaSafeDeleteScanner.scan(dir, java.util.List.of(target),
+                java.util.Map.of(use, "class Use { Target field; }"));
+        org.junit.jupiter.api.Assertions.assertTrue(scan.complete());
+        org.junit.jupiter.api.Assertions.assertEquals(1, scan.locations().size());
+    }
+
     @TempDir
     Path root;
 

@@ -31,6 +31,44 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaIdeAdapterNavigationTest {
 
+    @Test
+    void aMissingDefinitionDoesNotMeanTheClickWasOnTheDeclaration() {
+        assertFalse(JavaIdeAdapter.isOwnDeclaration(java.util.List.of(), click(
+                Path.of("Demo.java"), MouseEvent.BUTTON1, InputEvent.CTRL_DOWN_MASK)));
+    }
+
+    @Test
+    void sameLineDeclarationMustStillContainTheClickedWord() {
+        var context = click(Path.of("Demo.java"), MouseEvent.BUTTON1, InputEvent.CTRL_DOWN_MASK);
+        String uri = context.filePath().toAbsolutePath().toUri().toString();
+        assertTrue(JavaIdeAdapter.isOwnDeclaration(java.util.List.of(
+                dtm.stools.component.panels.editor.code.api.Location.of(uri,
+                        dtm.stools.component.panels.editor.code.api.Range.of(0, 6, 0, 10))), context));
+        assertFalse(JavaIdeAdapter.isOwnDeclaration(java.util.List.of(
+                dtm.stools.component.panels.editor.code.api.Location.of(uri,
+                        dtm.stools.component.panels.editor.code.api.Range.of(0, 20, 0, 24))), context));
+    }
+
+    @Test
+    void semanticEmptyResultDoesNotFallBackToALocalHomonym() throws Exception {
+        JavaIdeAdapter adapter = new JavaIdeAdapter();
+        var lsp = new dtm.ide.lsp.JdtLsService(null, null, null, null) {
+            @Override public boolean isInteractive() { return true; }
+            @Override public dtm.ide.navigation.JavaNavigation.Result navigation(
+                    dtm.ide.navigation.JavaNavigation.Kind kind, Path file, String text, int line, int col) {
+                return dtm.ide.navigation.JavaNavigation.Result.of(dtm.ide.navigation.JavaNavigation.Status.COMPLETE);
+            }
+        };
+        var field = JavaIdeAdapter.class.getDeclaredField("jdtLs");
+        field.setAccessible(true);
+        field.set(adapter, lsp);
+        String source = "class A { void m(int x) { use(x); } }";
+        var result = adapter.resolveNavigation(Path.of("A.java"), source, 0, source.lastIndexOf("x"),
+                dtm.ide.navigation.JavaNavigation.Kind.DEFINITION);
+        assertEquals(dtm.ide.navigation.JavaNavigation.Status.COMPLETE, result.status());
+        assertTrue(result.locations().isEmpty());
+    }
+
     private static final IdeEditorContext EDITOR = (IdeEditorContext) Proxy.newProxyInstance(
             IdeEditorContext.class.getClassLoader(),
             new Class<?>[]{IdeEditorContext.class},

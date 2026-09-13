@@ -155,6 +155,24 @@ Um teste de regressão deve reproduzir o defeito antes da correção e passar de
 dependentes da instalação pessoal da JDK, da rede ou de caminhos absolutos; use diretórios temporários
 e fixtures pequenas.
 
+O perfil `jdtls-integration` executa testes com o servidor real, incluindo Lombok, Java simples,
+Maven, Maven com módulos e Gradle. Para usar componentes já provisionados, prepare uma cópia
+isolada do SDK e informe seu diretório:
+
+```powershell
+mvn -Pjdtls-integration test "-Dmaven.antrun.skip=true" "-Dorion.it.sdk=C:\testes\java-sdk"
+```
+
+Esse diretório deve conter `jdtls/<versão>` e, para Lombok, `lombok`, `java-debug` e `java-test`.
+Use uma configuração limpa do JDT LS: caches OSGi copiados de outra instalação podem conter
+caminhos absolutos antigos. Os projetos dos testes são temporários. Sem os componentes locais,
+os testes que dependem deles são ignorados; confira a contagem de testes ignorados no relatório.
+
+Para validar navegação na interface, confira Ctrl+clique no uso e na declaração, parâmetros com
+nomes iguais em métodos diferentes, `this.campo`, múltiplos usos na mesma linha e implementações
+de interfaces e métodos. Edite outro arquivo e confirme a atualização das contagens; feche ou edite
+o documento durante uma busca para verificar que respostas antigas não abrem destinos.
+
 ## Enviando uma alteração
 
 1. Crie uma branch curta e focada.

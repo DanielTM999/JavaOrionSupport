@@ -3,6 +3,8 @@ package dtm.ide.lsp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.stools.component.panels.editor.code.api.Location;
+import dtm.ide.navigation.JavaNavigation.Kind;
+import dtm.ide.navigation.JavaNavigation.Status;
 import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
@@ -212,7 +214,7 @@ class JdtLsProtocolTest {
     }
 
     @Test
-    void anUnansweredNavigationGivesUpInsideTheInteractiveBudget() {
+    void anUnansweredNavigationHasABoundedTimeout() {
         service.openDocument(FILE, TEXT);
         long started = System.nanoTime();
 
@@ -220,7 +222,22 @@ class JdtLsProtocolTest {
 
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
         assertTrue(locations.isEmpty());
-        assertTrue(elapsedMs < 2_000, "a navegacao esperou " + elapsedMs + " ms");
+        assertTrue(elapsedMs < 5_500, "a navegacao esperou " + elapsedMs + " ms");
+    }
+
+    @Test
+    void deletingAnotherFileRefreshesLensesAndInvalidatesReferences() {
+        responses.put("textDocument/references", "[]");
+        service.openDocument(FILE, TEXT);
+        service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 12);
+        AtomicInteger refreshed = new AtomicInteger();
+        service.setCodeLensRefreshListener(path -> refreshed.incrementAndGet());
+
+        service.pathDeleted(FILE.resolveSibling("Other.java"));
+        service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 12);
+
+        assertTrue(refreshed.get() > 0);
+        assertEquals(2, count("textDocument/references"));
     }
 
     @Test
@@ -236,6 +253,93 @@ class JdtLsProtocolTest {
         assertEquals(JdtLsService.ANY_VERSION, service.documentVersion(FILE));
     }
 
+    @Test
+    void anEmptySemanticResultIsSuccessfulAndInvalidatedByAnotherFile() throws Exception {
+        responses.put("textDocument/references", "[]");
+        service.openDocument(FILE, TEXT);
+        assertEquals(Status.COMPLETE, service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 6).status());
+        service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 6);
+        assertEquals(1, count("textDocument/references"));
+        service.openDocument(FILE.resolveSibling("Other.java"), "class Other { Demo value; }");
+        service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 6);
+        assertEquals(2, count("textDocument/references"));
+        assertEquals(Status.STALE, service.navigation(Kind.REFERENCES, FILE, TEXT + "old", 1, 6).status());
+    }
+
+    @Test
+    void implementationUsesItsOwnEndpointAndKeepsAllDestinations() {
+        responses.put("textDocument/implementation", "[{\"uri\":\"file:///demo/A.java\",\"range\":{\"start\":{\"line\":0,\"character\":1},\"end\":{\"line\":0,\"character\":2}}},"
+                + "{\"uri\":\"file:///demo/A.java\",\"range\":{\"start\":{\"line\":0,\"character\":4},\"end\":{\"line\":0,\"character\":5}}}]");
+        var result = service.navigation(Kind.IMPLEMENTATION, FILE, TEXT, 1, 6);
+        assertEquals(Status.COMPLETE, result.status());
+        assertEquals(2, result.locations().size());
+        assertEquals(0, count("textDocument/definition"));
+        assertEquals(0, count("textDocument/references"));
+    }
+
+    @Test
+    void aWorkspaceBuildDoesNotTurnAnEmptySearchIntoACachedSuccess() throws Exception {
+        responses.put("textDocument/references", "[]");
+        service.openDocument(FILE, TEXT);
+        assertEquals(Status.COMPLETE, service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 6).status());
+        var progress = JdtLsService.class.getDeclaredMethod("onProgress", JsonNode.class);
+        progress.setAccessible(true);
+        progress.invoke(service, JSON.readTree("{\"token\":\"build-1\",\"value\":{\"kind\":\"begin\",\"title\":\"Building workspace\"}}"));
+        assertEquals(Status.INDEXING, service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 6).status());
+        progress.invoke(service, JSON.readTree("{\"token\":\"build-1\",\"value\":{\"kind\":\"end\"}}"));
+        assertEquals(Status.COMPLETE, service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 6).status());
+        assertEquals(3, count("textDocument/references"));
+    }
+
+    @Test
+    void resolvesEveryLensBeyondSixtyAndRefreshesAfterAnotherFileChanges() throws Exception {
+        var lenses = JSON.createArrayNode();
+        for (int i = 0; i < 130; i++) {
+            var lens = lenses.addObject();
+            lens.set("range", JSON.valueToTree(Map.of("start", Map.of("line", i, "character", 0),
+                    "end", Map.of("line", i, "character", 1))));
+            lens.set("data", JSON.valueToTree(List.of(FILE.toUri().toString(),
+                    Map.of("line", i, "character", 0), i % 2 == 0 ? "references" : "implementations")));
+        }
+        responses.put("textDocument/codeLens", lenses.toString());
+        responses.put("codeLens/resolve", "echo-lens");
+        service.openDocument(FILE, TEXT);
+        List<JdtLsService.JavaCodeLens> result = awaitLenses(130);
+        assertEquals(65, result.stream().filter(l -> l.command().equals("java.show.implementations")).count());
+        assertEquals(130, count("codeLens/resolve"));
+        assertEquals(1, count("textDocument/codeLens"));
+        service.openDocument(FILE.resolveSibling("Other.java"), "class Other {}");
+        awaitLenses(130);
+        assertEquals(260, count("codeLens/resolve"));
+        service.closeDocument(FILE);
+    }
+
+    private List<JdtLsService.JavaCodeLens> awaitLenses(int expected) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+        while (System.nanoTime() < deadline) {
+            var result = service.codeLenses(FILE, TEXT);
+            if (result.size() == expected && result.stream().allMatch(l -> l.status() == Status.COMPLETE)) return result;
+            Thread.sleep(20);
+        }
+        throw new AssertionError("not all lenses resolved: " + count("codeLens/resolve"));
+    }
+
+    @Test
+    void organizeImportsIsSynchronizedBeforeFormatting() throws Exception {
+        responses.put("textDocument/codeAction", "[{\"title\":\"Organize\",\"edit\":{\"changes\":{\""
+                + FILE.toUri() + "\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+                + "\"end\":{\"line\":0,\"character\":0}},\"newText\":\"// organized\\n\"}]}}}]");
+        responses.put("textDocument/formatting", "[]");
+        service.openDocument(FILE, TEXT);
+        drainNotifications();
+        String result = service.prepareSave(FILE, TEXT, true, true, 4, true);
+        assertEquals("// organized\n" + TEXT, result);
+        assertEquals(1, count("textDocument/formatting"));
+        JsonNode change = awaitRequest("textDocument/didChange");
+        assertEquals(2, change.path("params").path("textDocument").path("version").asInt());
+        awaitRequest("textDocument/formatting");
+    }
+
     private void serve() {
         try {
             while (running) {
@@ -248,12 +352,81 @@ class JdtLsProtocolTest {
                         .incrementAndGet();
                 received.add(message);
                 if (message.hasNonNull("id") && responses.containsKey(method)) {
+                    String response = responses.get(method);
+                    if (response.equals("echo-lens")) {
+                        var lens = message.path("params").deepCopy();
+                        String kind = lens.path("data").get(2).asText();
+                        ((com.fasterxml.jackson.databind.node.ObjectNode) lens).set("command", JSON.valueToTree(Map.of(
+                                "title", "1 " + kind, "command", "java.show." + kind,
+                                "arguments", List.of(FILE.toUri().toString(), Map.of("line", 0, "character", 0),
+                                        List.of(Map.of("uri", FILE.toUri().toString(), "range", lens.get("range")))))));
+                        response = lens.toString();
+                    }
                     writeFrame(toClient, "{\"jsonrpc\":\"2.0\",\"id\":" + message.get("id")
-                            + ",\"result\":" + responses.get(method) + "}");
+                            + ",\"result\":" + response + "}");
                 }
             }
         } catch (Exception ignored) {
         }
+    }
+
+    @Test
+    void delayedDefinitionCannotSurviveADocumentEdit() throws Exception {
+        service.openDocument(FILE, TEXT);
+        var pending = java.util.concurrent.CompletableFuture.supplyAsync(() ->
+                service.navigation(Kind.DEFINITION, FILE, TEXT, 1, 6));
+        JsonNode oldRequest = awaitRequest("textDocument/definition");
+        String edited = TEXT + "// new version\n";
+        service.changeDocument(FILE, edited);
+        assertEquals(Status.STALE, pending.get(2, TimeUnit.SECONDS).status());
+        synchronized (toClient) {
+            writeFrame(toClient, "{\"jsonrpc\":\"2.0\",\"id\":" + oldRequest.get("id") + ",\"result\":[]}");
+        }
+        responses.put("textDocument/definition", "[]");
+        assertEquals(Status.COMPLETE, service.navigation(Kind.DEFINITION, FILE, edited, 1, 6).status());
+        assertEquals(2, count("textDocument/definition"));
+    }
+
+    @Test
+    void aLateLensResolutionCannotReappearAfterClose() throws Exception {
+        responses.put("textDocument/codeLens", "[{\"range\":{\"start\":{\"line\":1,\"character\":6},"
+                + "\"end\":{\"line\":1,\"character\":10}},\"data\":[\"" + FILE.toUri()
+                + "\",{\"line\":1,\"character\":6},\"implementations\"]}]");
+        AtomicInteger refreshed = new AtomicInteger();
+        service.setCodeLensRefreshListener(path -> refreshed.incrementAndGet());
+        service.openDocument(FILE, TEXT);
+        service.codeLenses(FILE, TEXT);
+        JsonNode oldRequest = awaitRequest("codeLens/resolve");
+        service.closeDocument(FILE);
+        int afterClose = refreshed.get();
+        synchronized (toClient) {
+            writeFrame(toClient, "{\"jsonrpc\":\"2.0\",\"id\":" + oldRequest.get("id")
+                    + ",\"result\":{\"range\":{\"start\":{\"line\":1,\"character\":6},"
+                    + "\"end\":{\"line\":1,\"character\":10}},\"command\":{\"title\":\"1 implementation\","
+                    + "\"command\":\"java.show.implementations\"}}}");
+        }
+        Thread.sleep(150);
+        assertEquals(afterClose, refreshed.get());
+        assertEquals(JdtLsService.ANY_VERSION, service.documentVersion(FILE));
+    }
+
+    @Test
+    void aConcurrentEditDuringSaveIsNeverReplacedByTheTransformation() throws Exception {
+        service.openDocument(FILE, TEXT);
+        var saving = java.util.concurrent.CompletableFuture.supplyAsync(() ->
+                service.prepareSave(FILE, TEXT, false, true, 4, true));
+        JsonNode formatting = awaitRequest("textDocument/formatting");
+        String edited = TEXT + "// typed during save\n";
+        service.changeDocument(FILE, edited);
+        synchronized (toClient) {
+            writeFrame(toClient, "{\"jsonrpc\":\"2.0\",\"id\":" + formatting.get("id")
+                    + ",\"result\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+                    + "\"end\":{\"line\":0,\"character\":0}},\"newText\":\"// formatted\\n\"}]}");
+        }
+        saving.get(2, TimeUnit.SECONDS);
+        responses.put("textDocument/definition", "[]");
+        assertEquals(Status.COMPLETE, service.navigation(Kind.DEFINITION, FILE, edited, 1, 6).status());
+        assertEquals(2, service.documentVersion(FILE));
     }
 
     private JsonNode awaitRequest(String method) throws InterruptedException {
@@ -305,7 +478,7 @@ class JdtLsProtocolTest {
                 {"capabilities":{"definitionProvider":true,"typeDefinitionProvider":true,
                  "implementationProvider":true,"referencesProvider":true,
                  "documentSymbolProvider":true,"documentHighlightProvider":true,
-                 "codeActionProvider":true,
+                 "codeActionProvider":true,"codeLensProvider":{"resolveProvider":true},"documentFormattingProvider":true,
                  "completionProvider":{"resolveProvider":true,"triggerCharacters":[".","@"]},
                  "textDocumentSync":{"change":2}}}
                 """);

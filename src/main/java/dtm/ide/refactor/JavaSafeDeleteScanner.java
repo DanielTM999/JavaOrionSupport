@@ -28,47 +28,73 @@ public final class JavaSafeDeleteScanner {
     private JavaSafeDeleteScanner() {
     }
 
+    public record ScanResult(List<Location> locations, boolean complete) {
+        public ScanResult { locations = List.copyOf(locations); }
+    }
+
     public static List<Location> findExternalUsages(Path projectRoot, List<Path> targets) {
-        if (projectRoot == null || targets == null || targets.isEmpty()) {
-            return List.of();
-        }
+        return scan(projectRoot, targets, java.util.Map.of()).locations();
+    }
+
+    public static ScanResult scan(Path projectRoot, List<Path> targets, java.util.Map<Path, String> buffers) {
+        return scan(projectRoot, targets, buffers, MAX_FILES);
+    }
+
+    static ScanResult scan(Path projectRoot, List<Path> targets, java.util.Map<Path, String> buffers, int limit) {
+        if (projectRoot == null || targets == null || targets.isEmpty()) return new ScanResult(List.of(), false);
         Path root = projectRoot.toAbsolutePath().normalize();
         Set<Path> deleted = normalizedTargets(targets);
-        Set<String> symbols = declaredTypeNames(deleted);
-        if (symbols.isEmpty() || !Files.isDirectory(root)) {
-            return List.of();
+        Set<String> symbols = new LinkedHashSet<>();
+        boolean[] complete = {true};
+        for (Path target : deleted) {
+            try (var walk = Files.walk(target)) {
+                for (Path source : walk.filter(JavaProjectConventions::isJava).filter(Files::isRegularFile).toList()) {
+                    String name = source.getFileName().toString();
+                    symbols.add(name.substring(0, name.length() - 5));
+                    String content = buffers.containsKey(source) ? buffers.get(source) : Files.readString(source);
+                    Matcher matcher = TYPE_DECLARATION.matcher(maskNonCode(content));
+                    while (matcher.find()) symbols.add(matcher.group(1) == null ? matcher.group(2) : matcher.group(1));
+                }
+            } catch (IOException | java.io.UncheckedIOException | SecurityException failure) { complete[0] = false; }
         }
-
+        if (!Files.isDirectory(root)) return new ScanResult(List.of(), false);
         List<Location> usages = new ArrayList<>();
+        Set<Path> scanned = new LinkedHashSet<>();
         int[] visited = {0};
         try {
             Files.walkFileTree(root, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                    if (!dir.equals(root) && (JavaProjectConventions.isIgnoredFolder(dir)
-                            || isInside(dir, deleted))) {
-                        return FileVisitResult.SKIP_SUBTREE;
-                    }
-                    return visited[0] >= MAX_FILES
-                            ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+                @Override public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    return !dir.equals(root) && (JavaProjectConventions.isIgnoredFolder(dir) || isInside(dir, deleted))
+                            ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
                 }
-
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    if (++visited[0] > MAX_FILES) {
+                @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (++visited[0] > limit || Thread.currentThread().isInterrupted()) {
+                        complete[0] = false;
                         return FileVisitResult.TERMINATE;
                     }
-                    if (attrs.isRegularFile() && JavaProjectConventions.isJava(file)
-                            && !isInside(file, deleted)) {
-                        scanFile(file, symbols, usages);
+                    if (attrs.isRegularFile() && JavaProjectConventions.isJava(file) && !isInside(file, deleted)) {
+                        try {
+                            String content = buffers.containsKey(file) ? buffers.get(file) : Files.readString(file);
+                            scanText(file, content, symbols, usages);
+                            scanned.add(file);
+                        } catch (IOException | SecurityException failure) { complete[0] = false; }
                     }
                     return FileVisitResult.CONTINUE;
                 }
+                @Override public FileVisitResult visitFileFailed(Path file, IOException error) {
+                    complete[0] = false;
+                    return FileVisitResult.CONTINUE;
+                }
             });
-        } catch (IOException ignored) {
-            // Safe Delete still has the language-server result when a folder cannot be scanned.
+        } catch (IOException | SecurityException failure) { complete[0] = false; }
+        for (var buffer : buffers.entrySet()) {
+            Path file = buffer.getKey();
+            if (file.startsWith(root) && JavaProjectConventions.isJava(file)
+                    && !isInside(file, deleted) && !scanned.contains(file)) {
+                scanText(file, buffer.getValue(), symbols, usages);
+            }
         }
-        return List.copyOf(usages);
+        return new ScanResult(usages, complete[0]);
     }
 
     static Set<String> declaredTypeNames(Set<Path> targets) {
@@ -87,8 +113,7 @@ public final class JavaSafeDeleteScanner {
         return names;
     }
 
-    private static void scanFile(Path file, Set<String> symbols, List<Location> usages) {
-        String text = read(file);
+    private static void scanText(Path file, String text, Set<String> symbols, List<Location> usages) {
         if (text.isEmpty()) {
             return;
         }

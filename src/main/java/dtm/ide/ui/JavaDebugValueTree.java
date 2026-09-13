@@ -44,6 +44,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
 public final class JavaDebugValueTree extends JPanel {
+    private static String text(String key, String fallback) {
+        return dtm.stools.i18n.I18n.getText(JavaDebugValueTree.class, key, fallback);
+    }
 
     @FunctionalInterface
     public interface ChildrenProvider {
@@ -54,13 +57,14 @@ public final class JavaDebugValueTree extends JPanel {
     private final DefaultTreeModel model = new DefaultTreeModel(root);
     private final JTree tree = new JTree(model);
     private final EmptyStatePanel empty = new EmptyStatePanel(
-            "No variables", "Pause on a line with local values or select another stack frame.")
+            text("noVariables", "No variables"), text("pauseHint", "Pause on a line with local values or select another stack frame."))
             .setDashedBorder(false);
     private final SkeletonPanel loading = new SkeletonPanel().clearBlocks().addTextLines(7)
             .setAnimated(true).setBlockGap(9);
     private final CardLayout cards = new CardLayout();
     private final JPanel content = new JPanel(cards);
     private final Executor executor;
+    private final java.util.concurrent.atomic.AtomicLong generation = new java.util.concurrent.atomic.AtomicLong();
     private volatile ChildrenProvider childrenProvider = reference -> List.of();
 
     public JavaDebugValueTree() {
@@ -85,10 +89,12 @@ public final class JavaDebugValueTree extends JPanel {
     }
 
     public void bindChildrenProvider(ChildrenProvider provider) {
+        generation.incrementAndGet();
         childrenProvider = provider == null ? reference -> List.of() : provider;
     }
 
     public void setScopes(List<JavaDebugSnapshot.Scope> scopes) {
+        generation.incrementAndGet();
         runOnEdt(() -> {
             root.removeAllChildren();
             if (scopes != null) {
@@ -98,21 +104,23 @@ public final class JavaDebugValueTree extends JPanel {
                     root.add(node);
                 }
             }
-            refreshTree("No variables in the current frame", true);
+            refreshTree(text("noFrameVariables", "No variables in the current frame"), true);
         });
     }
 
     public void setValue(JavaDebugSnapshot.Variable value) {
+        generation.incrementAndGet();
         runOnEdt(() -> {
             root.removeAllChildren();
             if (value != null && !syntheticNoFields(value)) {
                 root.add(variableNode(value));
             }
-            refreshTree("No value", true);
+            refreshTree(text("noValue", "No value"), true);
         });
     }
 
     public void setVariables(List<JavaDebugSnapshot.Variable> values, String emptyText) {
+        generation.incrementAndGet();
         runOnEdt(() -> {
             root.removeAllChildren();
             visible(values).forEach(value -> root.add(variableNode(value)));
@@ -121,6 +129,7 @@ public final class JavaDebugValueTree extends JPanel {
     }
 
     public void setLoading() {
+        generation.incrementAndGet();
         runOnEdt(() -> {
             root.removeAllChildren();
             model.reload();
@@ -129,7 +138,7 @@ public final class JavaDebugValueTree extends JPanel {
     }
 
     public void clear() {
-        setVariables(List.of(), "No variables in the current frame");
+        setVariables(List.of(), text("noFrameVariables", "No variables in the current frame"));
     }
 
     public JComponent component() {
@@ -184,10 +193,10 @@ public final class JavaDebugValueTree extends JPanel {
         }
         tree.setSelectionPath(path);
         JPopupMenu menu = new JPopupMenu();
-        JMenuItem copyValue = new JMenuItem("Copy value");
+        JMenuItem copyValue = new JMenuItem(text("copyValue", "Copy value"));
         copyValue.setEnabled(node.variable != null);
         copyValue.addActionListener(action -> copySelected(false));
-        JMenuItem copyExpression = new JMenuItem("Copy expression");
+        JMenuItem copyExpression = new JMenuItem(text("copyExpression", "Copy expression"));
         copyExpression.setEnabled(node.variable != null
                 && node.variable.evaluateName() != null
                 && !node.variable.evaluateName().isBlank());
@@ -222,32 +231,34 @@ public final class JavaDebugValueTree extends JPanel {
     }
 
     private void load(ValueNode node, TreePath path) {
-        if (node.loaded || node.reference <= 0) {
-            return;
-        }
+        if (node.loaded || node.reference <= 0) return;
         node.loaded = true;
+        long ticket = generation.get();
+        ChildrenProvider provider = childrenProvider;
         CompletableFuture.supplyAsync(() -> {
-            try {
-                return visible(childrenProvider.load(node.reference));
-            } catch (Exception error) {
-                return List.<JavaDebugSnapshot.Variable>of();
-            }
-        }, executor).thenAccept(values -> SwingUtilities.invokeLater(() -> {
+            try { return visible(provider.load(node.reference)); }
+            catch (Exception error) { throw new java.util.concurrent.CompletionException(error); }
+        }, executor).whenComplete((values, error) -> SwingUtilities.invokeLater(() -> {
+            if (ticket != generation.get() || provider != childrenProvider || node.getRoot() != root) return;
             node.removeAllChildren();
-            values.forEach(value -> node.add(variableNode(value)));
-            if (values.isEmpty()) {
-                node.add(ValueNode.empty());
+            if (error != null) {
+                node.loaded = false;
+                node.add(ValueNode.failure());
+            } else {
+                values.forEach(value -> node.add(variableNode(value)));
+                if (values.isEmpty()) node.add(ValueNode.empty());
             }
             model.nodeStructureChanged(node);
-            tree.expandPath(path);
+            // Do not expand on failure: expansion is the user's explicit retry action.
+            if (error == null) tree.expandPath(path);
         }));
     }
 
     private void refreshTree(String emptyText, boolean expandFirst) {
         model.reload();
         if (root.getChildCount() == 0) {
-            empty.setTitle(emptyText == null || emptyText.isBlank() ? "No value" : emptyText);
-            empty.setDescription("The selected object or frame does not expose child values.");
+            empty.setTitle(emptyText == null || emptyText.isBlank() ? text("noValue", "No value") : emptyText);
+            empty.setDescription(text("noChildren", "The selected object or frame does not expose child values."));
             cards.show(content, "empty");
             return;
         }
@@ -328,7 +339,8 @@ public final class JavaDebugValueTree extends JPanel {
             }
             if (node.placeholder) {
                 icon.setIcon(null);
-                name.setText(node.empty ? "No fields" : "Loading...");
+                name.setText(node.failed ? text("loadFailed", "Could not load; expand to retry")
+                        : node.empty ? text("noFields", "No fields") : text("loading", "Loading..."));
                 name.setFont(UiTokens.fontSmall());
                 name.setForeground(JavaDebugTheme.muted());
                 return this;
@@ -391,6 +403,7 @@ public final class JavaDebugValueTree extends JPanel {
         private final boolean empty;
         private final JavaDebugSnapshot.Variable variable;
         private boolean loaded;
+        private boolean failed;
 
         private ValueNode(String name, String displayValue, String type, int reference,
                           boolean scope, boolean placeholder, boolean empty,
@@ -419,6 +432,12 @@ public final class JavaDebugValueTree extends JPanel {
 
         static ValueNode placeholder() {
             return new ValueNode("", "", "", 0, false, true, false, null, true);
+        }
+
+        static ValueNode failure() {
+            ValueNode node = placeholder();
+            node.failed = true;
+            return node;
         }
 
         static ValueNode empty() {

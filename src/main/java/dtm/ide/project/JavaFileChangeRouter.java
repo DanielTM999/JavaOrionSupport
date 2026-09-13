@@ -46,7 +46,10 @@ public final class JavaFileChangeRouter {
     private final ScheduledExecutorService scheduler;
     private final Map<Path, Pending> pending = new ConcurrentHashMap<>();
 
-    private record Pending(ScheduledFuture<?> task, boolean created) {
+    private boolean closed;
+    private long generation;
+
+    private record Pending(ScheduledFuture<?> task, boolean created, long generation) {
     }
 
     public JavaFileChangeRouter(Listener listener, Predicate<Path> editorManaged) {
@@ -85,20 +88,24 @@ public final class JavaFileChangeRouter {
         schedule(file, true);
     }
 
-    private void schedule(Path file, boolean created) {
+    private synchronized void schedule(Path file, boolean created) {
+        if (closed) return;
         pending.compute(file, (path, previous) -> {
             boolean wasCreated = created || (previous != null && previous.created());
             if (previous != null) {
                 previous.task().cancel(false);
             }
-            ScheduledFuture<?> task = scheduler.schedule(() -> dispatch(path),
+            long ticket = ++generation;
+            ScheduledFuture<?> task = scheduler.schedule(() -> dispatch(path, ticket),
                     DEBOUNCE_MS, TimeUnit.MILLISECONDS);
-            return new Pending(task, wasCreated);
+            return new Pending(task, wasCreated, ticket);
         });
     }
 
-    private void dispatch(Path file) {
-        Pending removed = pending.remove(file);
+    synchronized void dispatch(Path file, long ticket) {
+        Pending removed = pending.get(file);
+        if (closed || removed == null || removed.generation() != ticket) return;
+        pending.remove(file, removed);
         FileRole role = roleOf(file);
         if (role == null) {
             return;
@@ -118,7 +125,8 @@ public final class JavaFileChangeRouter {
         }
     }
 
-    public void shutdown() {
+    public synchronized void shutdown() {
+        closed = true;
         pending.values().forEach(entry -> entry.task().cancel(false));
         pending.clear();
         scheduler.shutdownNow();

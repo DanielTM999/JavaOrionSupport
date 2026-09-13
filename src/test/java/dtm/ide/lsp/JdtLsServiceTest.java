@@ -31,6 +31,42 @@ class JdtLsServiceTest {
     Path root;
 
     @Test
+    void stopUnblocksAReaderWaitingOnAProcessPipe() throws Exception {
+        String javaExecutable = Path.of(System.getProperty("java.home"), "bin",
+                System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java").toString();
+        Process child = new ProcessBuilder(javaExecutable, "-cp", System.getProperty("java.class.path"),
+                IdleServer.class.getName()).start();
+        JdtLsService service = new JdtLsService(null, null, null, null);
+        try {
+            assertEquals('R', child.getInputStream().read());
+            LspJsonRpcClient client = new LspJsonRpcClient(child.getInputStream(), child.getOutputStream(),
+                    "idle-server-test");
+            var processField = JdtLsService.class.getDeclaredField("process");
+            processField.setAccessible(true);
+            processField.set(service, child);
+            var clientField = JdtLsService.class.getDeclaredField("client");
+            clientField.setAccessible(true);
+            clientField.set(service, client);
+            java.util.concurrent.CompletableFuture.runAsync(service::stop)
+                    .get(12, java.util.concurrent.TimeUnit.SECONDS);
+            assertTrue(child.waitFor(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertFalse(child.isAlive());
+            assertTrue(client.isClosed());
+        } finally {
+            child.destroyForcibly();
+            service.shutdown();
+        }
+    }
+
+    public static class IdleServer {
+        public static void main(String[] args) throws Exception {
+            System.out.print("R");
+            System.out.flush();
+            Thread.sleep(60_000);
+        }
+    }
+
+    @Test
     void launchCommandPreventsMetadataAtProjectRoot() {
         JdtLsService service = new JdtLsService(null, null, null, null);
         JdkInstallation runtime = new JdkInstallation(root.resolve("jdk"), JdkVendor.TEMURIN,
@@ -142,34 +178,6 @@ class JdtLsServiceTest {
         assertEquals(List.of(source), published);
         service.clearDiagnostics();
         assertEquals(List.of(source), published);
-    }
-
-    @Test
-    void retriesTheCodeLensResolveUntilTheServerAnswersInTime() {
-        JdtLsService.CodeLensRetry first = JdtLsService.claimCodeLensRetry(null, "texto");
-        assertEquals(1, first.attempts());
-        assertTrue(first.inFlight());
-
-        assertNull(JdtLsService.claimCodeLensRetry(first, "texto"));
-
-        JdtLsService.CodeLensRetry second =
-                JdtLsService.claimCodeLensRetry(first.settled(), "texto");
-        assertEquals(2, second.attempts());
-
-        assertNull(JdtLsService.claimCodeLensRetry(second.settled(), "texto"));
-    }
-
-    @Test
-    void countsCodeLensRetriesPerBufferContent() {
-        JdtLsService.CodeLensRetry exhausted =
-                new JdtLsService.CodeLensRetry("antigo", 2, false);
-
-        assertNull(JdtLsService.claimCodeLensRetry(exhausted, "antigo"));
-
-        JdtLsService.CodeLensRetry afterEdit =
-                JdtLsService.claimCodeLensRetry(exhausted, "editado");
-        assertEquals(1, afterEdit.attempts());
-        assertEquals("editado", afterEdit.text());
     }
 
     @Test

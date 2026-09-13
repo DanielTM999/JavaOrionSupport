@@ -18,6 +18,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaFileChangeRouterTest {
 
+    @Test
+    void anObsoleteDispatchCannotConsumeTheReplacementEvent(@TempDir Path dir) throws Exception {
+        Path file = Files.writeString(dir.resolve("A.java"), "class A {}");
+        List<Event> events = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        JavaFileChangeRouter router = router(events, latch, path -> false);
+        try {
+            router.acceptCreated(file);
+            router.accept(file, StandardWatchEventKinds.ENTRY_MODIFY);
+            router.dispatch(file, 1); // The first timer already left its queue before cancellation.
+            assertTrue(events.isEmpty());
+            assertTrue(latch.await(3, TimeUnit.SECONDS));
+            assertEquals(1, events.size());
+            assertEquals(JavaFileChangeRouter.Change.CREATED, events.getFirst().change());
+        } finally { router.shutdown(); }
+    }
+
+    @Test
+    void shutdownRejectsPendingAndFutureEvents(@TempDir Path dir) throws Exception {
+        Path file = Files.writeString(dir.resolve("A.java"), "class A {}");
+        List<Event> events = new CopyOnWriteArrayList<>();
+        JavaFileChangeRouter router = router(events, new CountDownLatch(1), path -> false);
+        router.acceptCreated(file);
+        router.shutdown();
+        router.dispatch(file, 1);
+        router.acceptCreated(file);
+        router.accept(file, StandardWatchEventKinds.ENTRY_MODIFY);
+        assertTrue(events.isEmpty());
+    }
+
     private record Event(Path file, JavaFileChangeRouter.FileRole role,
                          JavaFileChangeRouter.Change change) {
     }

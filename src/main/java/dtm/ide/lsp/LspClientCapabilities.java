@@ -75,7 +75,7 @@ final class LspClientCapabilities {
                 "formats", List.of("relative")));
 
         Map<String, Object> workspace = new LinkedHashMap<>();
-        workspace.put("applyEdit", true);
+        workspace.put("applyEdit", false);
         workspace.put("configuration", true);
         workspace.put("workspaceFolders", true);
         workspace.put("didChangeWatchedFiles", Map.of(

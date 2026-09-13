@@ -23,6 +23,7 @@ class LspClientCapabilitiesTest {
 
         assertTrue(textDocument.containsKey("codeLens"));
         assertEquals(Map.of("refreshSupport", true), workspace.get("codeLens"));
+        assertEquals(false, workspace.get("applyEdit"), "the client currently rejects server-initiated edits");
     }
 
     @Test

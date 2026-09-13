@@ -60,17 +60,17 @@ class JdtLsLombokIntegrationTest {
         Optional<JdkInstallation> jdk = jdks.languageServerJdk();
         assumeTrue(jdk.isPresent(), "o teste de integracao precisa de uma JDK 21 ou mais nova");
 
-        JdtLsProvisioner provisioner = new JdtLsProvisioner(new SdkDownloader(null), jdks.sdkRoot());
+        JdtLsProvisioner provisioner = new JdtLsProvisioner(new SdkDownloader(null), integrationSdk(jdks));
         assumeTrue(provisioner.find().isPresent(),
                 "o teste de integracao precisa do Eclipse JDT LS ja provisionado");
 
-        LombokAgentResolver.Agent agent = new LombokAgentResolver(jdks.sdkRoot())
+        LombokAgentResolver.Agent agent = new LombokAgentResolver(integrationSdk(jdks))
                 .resolveAgent(descriptor, List.of());
         assumeTrue(agent.isUsable(), "o agente do Lombok nao esta disponivel neste ambiente");
 
         AtomicInteger diagnosticPublications = new AtomicInteger();
         service = new JdtLsService(jdks, provisioner,
-                new JdtLsExtensionBundles(new SdkDownloader(null), jdks.sdkRoot()),
+                new JdtLsExtensionBundles(new SdkDownloader(null), integrationSdk(jdks)),
                 path -> diagnosticPublications.incrementAndGet());
         service.setLombokAgentJar(agent.jar());
         service.start(project, jdk.get(), DownloadProgressListener.NOOP).join();
@@ -78,10 +78,13 @@ class JdtLsLombokIntegrationTest {
 
         Path source = project.resolve("src/main/java/demo/CustomerService.java");
         String text = Files.readString(source);
+        int initialPublications = diagnosticPublications.get();
+        service.openDocument(source, text);
+        await(() -> diagnosticPublications.get() > initialPublications && !service.isWarmingUp(), 30_000);
         String anchor = "        customer.setLoyaltyPoints(10);";
         String edited = text.replace(anchor, "        customer." + System.lineSeparator() + anchor);
         int line = lineOf(edited, "        customer." + System.lineSeparator());
-        service.openDocument(source, edited);
+        service.changeDocument(source, edited);
 
         List<AutoCompleteItem> items = service.complete(source, edited, line, 18,
                 JdtLsService.CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
@@ -120,6 +123,102 @@ class JdtLsLombokIntegrationTest {
                 "o JDT LS nao reiniciou depois do ciclo de parada");
         service.openDocument(source, text);
         assertTrue(service.documentVersion(source) > JdtLsService.ANY_VERSION);
+    }
+
+    private static Path integrationSdk(JdkService jdks) {
+        String configured = System.getProperty("orion.it.sdk", "");
+        return configured.isBlank() ? jdks.sdkRoot() : Path.of(configured).toAbsolutePath().normalize();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"plain", "maven", "maven-multimodule", "gradle"})
+    void navigationAndLensesRespectBindingsInRealProjects(String layout) throws Exception {
+        Path project = Files.createDirectories(workspace.resolve(layout));
+        String pom = "<project><modelVersion>4.0.0</modelVersion><groupId>demo</groupId>"
+                + "<artifactId>navigation</artifactId><version>1</version><properties>"
+                + "<maven.compiler.source>21</maven.compiler.source><maven.compiler.target>21</maven.compiler.target>"
+                + "</properties></project>";
+        Path module = project;
+        if (layout.equals("maven")) Files.writeString(project.resolve("pom.xml"), pom);
+        if (layout.equals("maven-multimodule")) {
+            Files.writeString(project.resolve("pom.xml"), pom.replace("</project>",
+                    "<packaging>pom</packaging><modules><module>app</module></modules></project>"));
+            module = Files.createDirectories(project.resolve("app"));
+            Files.writeString(module.resolve("pom.xml"), pom.replace("<artifactId>navigation</artifactId>",
+                    "<artifactId>app</artifactId>"));
+        }
+        if (layout.equals("gradle")) {
+            Files.writeString(project.resolve("settings.gradle"), "rootProject.name = 'navigation'\n");
+            Files.writeString(project.resolve("build.gradle"), "plugins { id 'java' }\n"
+                    + "java { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }\n");
+        }
+        Path file = Files.createDirectories(module.resolve("src/main/java/demo")).resolve("Demo.java");
+        String source = """
+                package demo;
+                interface Worker { void run(); }
+                class WorkerImpl implements Worker { public void run() {} }
+                class Demo {
+                    int value;
+                    void update(int value) { this.value = value; }
+                    int read() { return value; }
+                    void call(Worker worker) { worker.run(); }
+                }
+                class Base { int inherited; }
+                class Derived extends Base { int read() { return inherited; } }
+                class Overloads {
+                    void use(int n) {}
+                    void use(String n) {}
+                    void call() { use(1); use(""); }
+                }
+                """;
+        Files.writeString(file, source);
+        JdkService jdks = new JdkService(resourceAt(workspace.resolve("plugin")), null);
+        var jdk = jdks.languageServerJdk();
+        assumeTrue(jdk.isPresent(), "a JDK is required");
+        var provisioner = new JdtLsProvisioner(new SdkDownloader(null), integrationSdk(jdks));
+        assumeTrue(provisioner.find().isPresent(), "set -Dorion.it.sdk to an isolated SDK with JDT LS installed");
+        service = new JdtLsService(jdks, provisioner, null, null);
+        service.start(project, jdk.get(), DownloadProgressListener.NOOP).join();
+        assertTrue(service.awaitReady(READY_TIMEOUT_MS), service.getLastError());
+        await(() -> !service.isWarmingUp(), 15_000);
+        service.openDocument(file, source);
+        int fieldCol = source.lines().toList().get(5).indexOf("this.value") + 5;
+        var field = service.navigation(dtm.ide.navigation.JavaNavigation.Kind.DEFINITION, file, source, 5, fieldCol);
+        assertEquals(1, field.locations().size(), field.toString());
+        assertEquals(4, field.locations().getFirst().range().start().line());
+        int parameterCol = source.lines().toList().get(5).lastIndexOf("value");
+        var parameter = service.navigation(dtm.ide.navigation.JavaNavigation.Kind.DEFINITION, file, source, 5, parameterCol);
+        assertEquals(5, parameter.locations().getFirst().range().start().line());
+        assertEquals(source.lines().toList().get(5).indexOf("value"), parameter.locations().getFirst().range().start().col());
+        var usages = service.navigation(dtm.ide.navigation.JavaNavigation.Kind.REFERENCES, file, source, 4, 8);
+        assertEquals(2, usages.locations().size(), usages.toString());
+        var implementations = service.navigation(dtm.ide.navigation.JavaNavigation.Kind.IMPLEMENTATION, file, source, 1, 11);
+        assertEquals(1, implementations.locations().size(), implementations.toString());
+        assertEquals(2, implementations.locations().getFirst().range().start().line());
+        int runColumn = source.lines().toList().get(7).indexOf("run()");
+        var methodImpl = service.navigation(dtm.ide.navigation.JavaNavigation.Kind.IMPLEMENTATION,
+                file, source, 7, runColumn);
+        assertEquals(1, methodImpl.locations().size(), methodImpl.toString());
+        assertEquals(2, methodImpl.locations().getFirst().range().start().line());
+        int inheritedColumn = source.lines().toList().get(10).indexOf("inherited");
+        var inherited = service.navigation(dtm.ide.navigation.JavaNavigation.Kind.DEFINITION,
+                file, source, 10, inheritedColumn);
+        assertEquals(1, inherited.locations().size(), inherited.toString());
+        assertEquals(9, inherited.locations().getFirst().range().start().line());
+        int useColumn = source.lines().toList().get(12).indexOf("use(");
+        var overload = service.navigation(dtm.ide.navigation.JavaNavigation.Kind.REFERENCES,
+                file, source, 12, useColumn);
+        assertEquals(1, overload.locations().size(), overload.toString());
+        assertEquals(source.lines().toList().get(14).indexOf("use(1)"),
+                overload.locations().getFirst().range().start().col());
+        await(() -> service.codeLenses(file, source).stream().anyMatch(lens ->
+                lens.status() == dtm.ide.navigation.JavaNavigation.Status.COMPLETE
+                        && lens.command().equals("java.show.implementations") && !lens.locations().isEmpty()), 30_000);
+        String edited = source.replace("return value;", "return value + value;");
+        service.changeDocument(file, edited);
+        assertEquals(3, service.navigation(dtm.ide.navigation.JavaNavigation.Kind.REFERENCES,
+                file, edited, 4, 8).locations().size());
+        service.closeDocument(file);
     }
 
     private static int lineOf(String text, String needle) {

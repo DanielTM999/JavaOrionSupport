@@ -6,7 +6,7 @@ projetos Maven e Gradle, execução, depuração, testes e ferramentas Spring em
 ## Principais recursos
 
 - IntelliSense, autoimport, hover, assinatura de métodos e navegação por código.
-- CodeLens para referências, execução, depuração, testes e injeções Spring.
+- CodeLens para referências, implementações, execução, depuração, testes e injeções Spring.
 - Refatorações, ações rápidas, geração de código e Safe Delete com busca de usos.
 - Projetos Maven, Gradle Groovy/Kotlin e Java sem ferramenta de build.
 - Painel **Problemas** com erros navegáveis do Java, Maven, Gradle e JUnit.
@@ -92,9 +92,21 @@ O plugin oferece sugestões locais imediatamente e inicia o Eclipse JDT LS em se
 recursos semânticos. Quando o servidor termina de importar o projeto, diagnósticos, CodeLens,
 referências, refatorações e ações rápidas são atualizados automaticamente.
 
+**Ctrl+clique** em um uso abre a declaração correspondente, distinguindo campos, parâmetros e
+variáveis locais. Na própria declaração, abre a lista de usos no documento atual. **Encontrar usos**
+pesquisa no projeto, e **Ir para implementação** procura implementações de tipos e métodos. Os
+CodeLens de usos e implementações executam essas respectivas buscas e mantêm ocorrências distintas
+na mesma linha.
+
+As buscas consideram o texto ainda não salvo e descartam respostas de versões antigas. Durante a
+indexação ou uma falha do servidor, o status informa a situação; a navegação local pode atender
+variáveis e parâmetros com escopo identificável. Um resultado semântico vazio não é substituído
+por símbolos que apenas tenham o mesmo nome.
+
 Ao excluir uma classe com **Safe Delete**, o plugin procura referências pelo JDT LS e também faz uma
 verificação local de segurança. Se encontrar usos fora da seleção, permite visualizá-los ou cancelar
 a exclusão.
+Uma busca incompleta também é informada antes de confirmar a exclusão.
 
 Consultas JPA em `@Query` recebem realce e sugestões de palavras-chave, entidades, aliases,
 propriedades e parâmetros, inclusive quando o texto está dividido em literais concatenados. JPQL e

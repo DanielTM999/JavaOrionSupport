@@ -86,6 +86,11 @@ import dtm.ide.editor.JavaFastCompletionProvider;
 import dtm.ide.index.JavaLexicalIndex;
 import dtm.ide.index.JavaLexicalSource;
 import dtm.ide.index.JavaLocalScope;
+import dtm.ide.navigation.JavaNavigation;
+import dtm.ide.navigation.JavaNavigation.Kind;
+import dtm.ide.navigation.JavaNavigation.Result;
+import dtm.ide.navigation.JavaNavigation.Status;
+import dtm.ide.navigation.JavaNavigation.Extent;
 import dtm.ide.editor.theme.JavaEditorTheme;
 import dtm.ide.lsp.JdtLsExtensionBundles;
 import dtm.ide.lsp.JdtLsProvisioner;
@@ -282,7 +287,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long COVERAGE_POLL_INTERVAL_MS = 400L;
     private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
-    private static final long LEXICAL_USAGE_BUDGET_MS = 1_500;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
     private static final long RENAME_WAIT_BUDGET_MS = 60_000;
     private static final String RENAME_PROGRESS_ID = "javaRenameWait";
@@ -1600,13 +1604,15 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private boolean confirmUsages(List<Path> targets) {
-        List<Location> usages = findExternalUsages(targets);
-
-        if (usages.isEmpty()) {
+        JavaSafeDeleteScanner.ScanResult result = findExternalUsages(targets);
+        List<Location> usages = result.locations();
+        if (usages.isEmpty() && result.complete()) {
             return true;
         }
 
-        String message = usages.size() == 1
+        String message = !result.complete()
+                ? text("delete.incomplete", "A busca de usos ficou incompleta; nao foi possivel verificar todos os arquivos.")
+                : usages.size() == 1
                 ? text("delete.usagesOne", "1 usage was found outside the selection.")
                 : usages.size() + text("delete.usagesMany", " usages were found outside the selection.");
 
@@ -1621,17 +1627,15 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .show());
 
         if (choice != null && choice == 2) {
-            onUi(() -> {
-                showUsagesPopup(usages, null, null, null, null);
-                return null;
-            });
+            showUsagesPopup(usages, null, null, null, null);
             return false;
         }
 
         return choice != null && choice == 0;
     }
 
-    private List<Location> findExternalUsages(List<Path> targets) {
+    private JavaSafeDeleteScanner.ScanResult findExternalUsages(List<Path> targets) {
+        boolean complete = true;
         JdtLsService lsp = jdtLs;
         Set<Path> deleted = new LinkedHashSet<>(targets);
         Map<String, Location> unique = new LinkedHashMap<>();
@@ -1640,17 +1644,23 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp != null && lsp.isReady()) {
             try {
                 for (Path source : collectJavaSources(targets)) {
-                    String content = readSource(source);
+                    IdeEditorContext openEditor = editorContextFor(source);
+                    String content = openEditor == null ? readSource(source) : onUi(openEditor::getText);
                     if (content == null) {
+                        complete = false;
                         continue;
                     }
                     if (getEditor(source) == null) {
                         temporarilyOpened.add(source);
                     }
                     lsp.openDocument(source, content);
-                    for (Range declaration : declarationRanges(lsp, source, content)) {
-                        for (Location location : lsp.references(source, content,
-                                declaration.start().line(), declaration.start().col())) {
+                    List<Range> declarations = declarationRanges(lsp, source, content);
+                    if (declarations.isEmpty()) complete = false;
+                    for (Range declaration : declarations) {
+                        Result references = lsp.navigation(Kind.REFERENCES, source, content,
+                                declaration.start().line(), declaration.start().col());
+                        complete &= references.status() == Status.COMPLETE;
+                        for (Location location : references.locations()) {
                             Path referenced = pathFromLocation(location);
                             if (referenced == null || isInside(referenced, deleted)) {
                                 continue;
@@ -1664,7 +1674,14 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
         }
 
-        for (Location location : JavaSafeDeleteScanner.findExternalUsages(projectRoot, targets)) {
+        Map<Path, String> buffers = onUi(() -> {
+            Map<Path, String> snapshots = new HashMap<>();
+            javaEditors.forEach((file, editor) -> snapshots.put(file, editor.getText()));
+            return snapshots;
+        });
+        JavaSafeDeleteScanner.ScanResult scan = JavaSafeDeleteScanner.scan(projectRoot, targets, buffers);
+        complete &= scan.complete() && lsp != null && lsp.isReady() && !lsp.isWarmingUp();
+        for (Location location : scan.locations()) {
             Path referenced = pathFromLocation(location);
             if (referenced == null || isInside(referenced, deleted)) {
                 continue;
@@ -1672,7 +1689,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             unique.putIfAbsent(locationKey(location), location);
         }
 
-        return List.copyOf(unique.values());
+        return new JavaSafeDeleteScanner.ScanResult(List.copyOf(unique.values()), complete);
     }
 
     private void registerFileWatcher() {
@@ -1846,7 +1863,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
 
         List<Range> ranges = new ArrayList<>();
-        for (DocumentSymbol symbol : symbols) {
+        List<DocumentSymbol> pendingSymbols = new ArrayList<>(symbols);
+        for (int index = 0; index < pendingSymbols.size(); index++) {
+            DocumentSymbol symbol = pendingSymbols.get(index);
+            if (symbol.children() != null) pendingSymbols.addAll(symbol.children());
             Range range = symbol.selectionRange() == null ? symbol.range() : symbol.selectionRange();
             if (range != null && range.start() != null) {
                 ranges.add(range);
@@ -1976,8 +1996,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp != null) {
             for (JdtLsService.JavaCodeLens lens : lsp.codeLenses(
                     context.filePath(), context.text())) {
-                List<Location> targets = uniqueLocationLines(lens.locations());
-                String lensTitle = codeLensTitle(lens.title(), lens.locations().size(), targets.size());
+                List<Location> targets = uniqueLocations(lens.locations());
+                Kind lensKind = Kind.forLens(lens.command());
+                if (lensKind == null) continue;
+                String lensTitle = lens.status() == Status.COMPLETE
+                        ? targets.size() + " " + (lensKind == Kind.IMPLEMENTATION
+                                ? text("navigation.implementations", "implementacao(oes)")
+                                : text("navigation.usages", "uso(s)"))
+                        : text(lens.status() == Status.FAILED ? "lens.failed" : "lens.loading",
+                                lens.status() == Status.FAILED ? "Tentar novamente" : "Buscando...");
                 if (targets.isEmpty() && lensTitle.stripLeading().startsWith("0 ")) {
                     continue;
                 }
@@ -1987,11 +2014,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                         .text(lensTitle)
                         .tooltip(codeLensTooltip(lensTitle, targets))
                         .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
-                        .onClick(event -> {
-                            MouseEvent mouse = event == null ? null : event.mouseEvent();
-                            Point screen = mouse == null ? null : mouse.getLocationOnScreen();
-                            openLensUsages(targets, context, lensLine, lensCol, screen);
-                        })
+                        .onClick(event -> openLensNavigation(lensKind, context, lensLine, lensCol))
                         .build();
                 lenses.add(CodeLens.inline(lensLine, item));
             }
@@ -2286,37 +2309,21 @@ public class JavaIdeAdapter extends IdeAdapter {
                 : MainClassScanner.inspect(file, source, module, test);
     }
 
-    private void openLensUsages(List<Location> targets, IdeCodeLensContext context,
-                                int line, int col, Point screen) {
-        if (!targets.isEmpty()) {
-            showUsagesPopup(targets, context.filePath(), context.text(),
-                    editorContextFor(context.filePath()), screen);
+    private void openLensNavigation(Kind kind, IdeCodeLensContext context, int line, int col) {
+        IdeEditorContext editor = editorContextFor(context.filePath());
+        if (editor == null) return;
+        if (!Objects.equals(editor.getText(), context.text())) {
+            requestRefreshCodeLenses(context.filePath());
+            setStatusBarText(text("status.navigation.stale", "Java: o codigo mudou; tente novamente"));
             return;
         }
-        if (interactiveServerFor(context.filePath()) == null) {
-            setStatusBarText(text("status.navigation.empty", "Java: nenhum destino encontrado"));
-            return;
-        }
-        background.submit(() -> {
-            List<Location> resolved = resolveReferences(
-                    context.filePath(), context.text(), line, col);
-            SwingUtilities.invokeLater(() -> showUsagesPopup(resolved, context.filePath(),
-                    context.text(), editorContextFor(context.filePath()), screen));
-        });
+        long ticket = beginNavigation(), session = lifecycle.get();
+        background.submit(() -> publishNavigationResult(ticket, session, editor, context.filePath(),
+                context.text(), kind, resolveNavigation(context.filePath(), context.text(), line, col, kind)));
     }
 
     private static String codeLensTooltip(String title, List<Location> locations) {
         return locations.isEmpty() ? title : title + " (" + locations.size() + ")";
-    }
-
-    private String codeLensTitle(String title, int originalCount, int visibleCount) {
-        if (title == null || originalCount == visibleCount
-                || !title.strip().matches("(?i)\\d+\\s+(references?|referencias?|referências?)")) {
-            return title == null ? "" : title;
-        }
-        return visibleCount == 1
-                ? text("lens.referenceOne", "1 referencia")
-                : visibleCount + " " + text("lens.references", "referencias");
     }
 
     private void runTestFromLens(JavaTest test, boolean debug) {
@@ -2337,13 +2344,14 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
                                  IdeEditorContext context, Point screen) {
-        List<UsagesPopup.Item> items = buildUsageItems(locations, currentFile, currentText);
-        String header = switch (items.size()) {
-            case 0 -> text("lens.noReferences", "Nenhum uso encontrado");
-            case 1 -> text("lens.referenceOne", "1 referencia");
-            default -> items.size() + " " + text("lens.references", "referencias");
-        };
-        openUsagesPopup(context, screen, header, items);
+        long session = lifecycle.get();
+        background.submit(() -> {
+            List<UsagesPopup.Item> items = buildUsageItems(locations, currentFile, currentText);
+            String header = items.size() + " " + text("navigation.usages", "uso(s)");
+            SwingUtilities.invokeLater(() -> {
+                if (session == lifecycle.get()) openUsagesPopup(context, screen, header, items);
+            });
+        });
     }
 
     private IdeEditorContext editorContextFor(Path file) {
@@ -2353,25 +2361,40 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void openUsagesPopup(IdeEditorContext context, Point screen, String header,
                                  List<UsagesPopup.Item> items) {
-        if (context == null) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> openUsagesPopup(context, screen, header, items));
             return;
         }
-        SwingUtilities.invokeLater(() -> {
-            Object[] handle = new Object[1];
+        if (context == null) {
+            javax.swing.JComponent[] content = new javax.swing.JComponent[1];
             UsagesPopup.Host host = new UsagesPopup.Host() {
-                @Override
                 public void close() {
-                    context.closeEditorWindow(handle[0]);
+                    java.awt.Window window = SwingUtilities.getWindowAncestor(content[0]);
+                    if (window != null) window.dispose();
                 }
-
-                @Override
-                public void moveTo(int screenX, int screenY) {
-                    context.moveEditorWindow(handle[0], new Point(screenX, screenY));
+                public void moveTo(int x, int y) {
+                    java.awt.Window window = SwingUtilities.getWindowAncestor(content[0]);
+                    if (window != null) window.setLocation(x, y);
                 }
             };
-            handle[0] = context.openEditorPopup(
-                    UsagesPopup.content(header, items, host), screen, true, null);
-        });
+            content[0] = UsagesPopup.content(header, items, host);
+            this.<Boolean>createModernComponentDialogBuilder()
+                    .title(header).component(content[0]).show();
+            return;
+        }
+        Object[] handle = new Object[1];
+        UsagesPopup.Host host = new UsagesPopup.Host() {
+            @Override
+            public void close() {
+                context.closeEditorWindow(handle[0]);
+            }
+            @Override
+            public void moveTo(int screenX, int screenY) {
+                context.moveEditorWindow(handle[0], new Point(screenX, screenY));
+            }
+        };
+        handle[0] = context.openEditorPopup(
+                UsagesPopup.content(header, items, host), screen, true, null);
     }
 
     private List<UsagesPopup.Item> buildUsageItems(List<Location> locations, Path currentFile,
@@ -2403,7 +2426,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             String snippet = sourceLine(path, currentFile, currentText, line, linesByFile);
             Path shown = root != null && path.startsWith(root)
                     ? root.relativize(path) : path.getFileName();
-            String label = (shown == null ? path.toString() : shown.toString()) + ":" + (line + 1);
+            String label = (shown == null ? path.toString() : shown.toString()) + ":" + (line + 1) + ":" + (location.range().start().col() + 1);
             items.add(new UsagesPopup.Item(snippet, label, () -> navigateToLocation(location, path)));
         }
         return List.copyOf(items);
@@ -2423,42 +2446,27 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     static String locationKey(Location location) {
-        if (location == null || location.range() == null) {
-            return "";
-        }
-        Range range = location.range();
-        Path path = pathFromLocation(location);
-        String resource = path == null ? String.valueOf(location.uri())
-                : path.toAbsolutePath().normalize().toUri().normalize().toString();
-        return resource + "|" + range.start().line();
+        return JavaNavigation.key(location);
     }
 
-    private static List<Location> uniqueLocationLines(List<Location> locations) {
-        if (locations == null || locations.isEmpty()) {
-            return List.of();
-        }
-        Map<String, Location> unique = new LinkedHashMap<>();
-        locations.stream().filter(Objects::nonNull)
-                .forEach(location -> unique.putIfAbsent(locationKey(location), location));
-        return List.copyOf(unique.values());
+    private static List<Location> uniqueLocations(List<Location> locations) {
+        return JavaNavigation.unique(locations);
     }
 
-    private static String sourceLine(Path path, Path currentFile, String currentText, int line,
-                                     Map<Path, List<String>> cache) {
-        List<String> lines;
-        if (currentFile != null && currentText != null
-                && path.equals(currentFile.toAbsolutePath().normalize())) {
-            lines = currentText.lines().toList();
-        } else {
-            lines = cache.computeIfAbsent(path, file -> {
-                try {
-                    return Files.readAllLines(file);
-                } catch (IOException ignored) {
-                    return List.of();
-                }
-            });
-        }
-        return line < lines.size() ? lines.get(line).strip() : "";
+    private String sourceLine(Path path, Path currentFile, String currentText, int line,
+                              Map<Path, List<String>> cache) {
+        List<String> lines = cache.computeIfAbsent(path, file -> {
+            if (currentFile != null && currentText != null
+                    && file.equals(currentFile.toAbsolutePath().normalize())) return currentText.lines().toList();
+            IdeEditorContext open = editorContextFor(file);
+            if (open != null) {
+                String snapshot = onUi(open::getText);
+                if (snapshot != null) return snapshot.lines().toList();
+            }
+            try { return Files.readAllLines(file); }
+            catch (IOException unavailable) { return List.of(); }
+        });
+        return line >= 0 && line < lines.size() ? lines.get(line).strip() : "";
     }
 
     private void navigateToLocation(Location location, Path path) {
@@ -2727,20 +2735,12 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private static List<DocumentHighlight> bufferHighlights(String text, int line, int col) {
-        String word = identifierAt(text, line, col);
-        if (word == null || JavaLexicalSource.isKeyword(word)) {
-            return List.of();
-        }
-        String code = JavaLexicalSource.mask(text);
-        int[] lineStarts = JavaLexicalSource.lineStarts(code);
-        List<int[]> spans = JavaLexicalSource.occurrences(code, Set.of(word));
-        List<DocumentHighlight> highlights = new ArrayList<>(spans.size());
-        for (int[] span : spans) {
-            highlights.add(new DocumentHighlight(
-                    JavaLexicalSource.rangeOf(lineStarts, span[0], span[1]),
-                    DocumentHighlight.Kind.TEXT));
-        }
-        return List.copyOf(highlights);
+        JavaLocalScope.Scope scope = JavaLocalScope.at(text, line, col);
+        if (scope == null) return List.of();
+        List<DocumentHighlight> result = new ArrayList<>();
+        result.add(new DocumentHighlight(scope.declaration(), DocumentHighlight.Kind.TEXT));
+        scope.usages().forEach(range -> result.add(new DocumentHighlight(range, DocumentHighlight.Kind.TEXT)));
+        return List.copyOf(result);
     }
 
     @Override
@@ -2974,59 +2974,37 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void onWordClick(IdeWordClickContext context) {
         if (!isCtrlDefinitionClick(context)) return;
-        if (!isNavigationAvailable(context.filePath())) return;
-        long ticket = navigationRequestTicket.incrementAndGet();
+        long ticket = beginNavigation();
+        long session = lifecycle.get();
         background.submit(() -> {
-            JavaLocalScope.Scope scope = JavaLocalScope.at(
-                    context.text(), context.line(), context.col());
-            if (scope != null) {
-                navigateLocalSymbol(ticket, context, scope);
-                return;
+            Result result = resolveNavigation(context.filePath(), context.text(),
+                    context.line(), context.col(), Kind.DEFINITION);
+            Kind kind = Kind.DEFINITION;
+            if (isOwnDeclaration(result.locations(), context)) {
+                kind = Kind.REFERENCES;
+                result = JavaNavigation.restrict(resolveNavigation(context.filePath(), context.text(),
+                        context.line(), context.col(), kind), Extent.DOCUMENT, context.filePath());
             }
-            List<Location> locations = resolveDefinitions(
-                    context.filePath(), context.text(), context.line(), context.col());
-            if (isOwnDeclaration(locations, context)) {
-                List<Location> usages = resolveReferences(
-                        context.filePath(), context.text(), context.line(), context.col());
-                publishNavigationResult(ticket, context.editorContext(), context.text(),
-                        "usages", usages);
-                return;
-            }
-            publishNavigationResult(ticket, context.editorContext(), context.text(),
-                    "definition", locations);
+            publishNavigationResult(ticket, session, context.editorContext(), context.filePath(),
+                    context.text(), kind, result);
         });
     }
 
-    private void navigateLocalSymbol(long ticket, IdeWordClickContext context,
-                                     JavaLocalScope.Scope scope) {
-        if (scope.onDeclaration()) {
-            List<Location> usages = resolveReferences(
-                    context.filePath(), context.text(), context.line(), context.col());
-            publishNavigationResult(ticket, context.editorContext(), context.text(),
-                    "usages", usages);
-            return;
-        }
-        publishNavigationResult(ticket, context.editorContext(), context.text(),
-                "definition", localDeclaration(context.filePath(), scope));
+    private long beginNavigation() {
+        setStatusBarText(text("status.navigation.loading", "Java: buscando destinos..."));
+        return navigationRequestTicket.incrementAndGet();
     }
 
-    private void publishNavigationResult(long ticket, IdeEditorContext editorContext,
-                                         String requestedText, String kind,
-                                         List<Location> locations) {
-        if (ticket != navigationRequestTicket.get()) {
-            log.debug("Navegacao {} descartada: requisicao superada", kind);
-            return;
-        }
+    private void publishNavigationResult(long ticket, long session, IdeEditorContext editor,
+                                         Path file, String requestedText, Kind kind, Result result) {
+        if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
+        // Read snippets off the EDT, including snapshots of other open buffers.
+        List<UsagesPopup.Item> items = buildUsageItems(result.locations(), file, requestedText);
         SwingUtilities.invokeLater(() -> {
-            if (ticket != navigationRequestTicket.get()) {
-                return;
-            }
-            if (editorContext != null && requestedText != null
-                    && !requestedText.equals(editorContext.getText())) {
-                log.debug("Navegacao {} descartada: conteudo do editor mudou", kind);
-                return;
-            }
-            showNavigationResult(editorContext, kind, locations);
+            if (ticket != navigationRequestTicket.get() || session != lifecycle.get()
+                    || editor == null || editorContextFor(file) == null
+                    || !Objects.equals(requestedText, editor.getText())) return;
+            showNavigationResult(editor, kind, result, items);
         });
     }
 
@@ -3036,20 +3014,9 @@ public class JavaIdeAdapter extends IdeAdapter {
                 : List.of(Location.of(file.toUri().toString(), scope.declaration()));
     }
 
-    private static boolean isOwnDeclaration(List<Location> definitions, IdeWordClickContext context) {
-        if (definitions == null || definitions.isEmpty()) {
-            return true;
-        }
-        if (definitions.size() > 1) {
-            return false;
-        }
-        Location target = definitions.getFirst();
-        Path targetPath = pathFromLocation(target);
-        if (targetPath == null || target.range() == null
-                || !targetPath.equals(JavaProjectConventions.normalize(context.filePath()))) {
-            return false;
-        }
-        return target.range().start().line() == context.line();
+    static boolean isOwnDeclaration(List<Location> definitions, IdeWordClickContext context) {
+        return context != null && definitions != null && definitions.size() == 1
+                && JavaNavigation.contains(definitions.getFirst(), context.filePath(), context.line(), context.col());
     }
 
     static boolean isCtrlDefinitionClick(IdeWordClickContext context) {
@@ -3107,73 +3074,47 @@ public class JavaIdeAdapter extends IdeAdapter {
         return lsp == null || !lsp.isInteractive() ? List.of() : lsp.outgoingCalls(item);
     }
 
-    private void navigateFromEditor(IdeEditorContext context, String kind) {
+    private void navigateFromEditor(IdeEditorContext context, String action) {
         if (context == null || !isNavigationAvailable(context.filePath())) return;
         Path file = context.filePath();
         String source = context.getText();
-        int line = context.getCaretLine();
-        int col = context.getCaretCol();
-        long ticket = navigationRequestTicket.incrementAndGet();
-        background.submit(() -> {
-            List<Location> locations = switch (kind) {
-                case "implementation" -> resolveImplementations(file, source, line, col);
-                case "usages" -> resolveReferences(file, source, line, col);
-                default -> resolveDefinitions(file, source, line, col);
-            };
-            publishNavigationResult(ticket, context, source, kind, locations);
-        });
+        int line = context.getCaretLine(), col = context.getCaretCol();
+        long ticket = beginNavigation(), session = lifecycle.get();
+        Kind kind = Kind.forAction(action);
+        background.submit(() -> publishNavigationResult(ticket, session, context, file, source,
+                kind, resolveNavigation(file, source, line, col, kind)));
     }
 
     private boolean isNavigationAvailable(Path filePath) {
-        return JavaProjectConventions.isJava(filePath)
-                && (interactiveServerFor(filePath) != null || !lexicalIndex.isEmpty());
+        return JavaProjectConventions.isJava(filePath);
     }
 
-    private List<Location> resolveImplementations(Path filePath, String text, int line, int col) {
-        if (!JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        long started = System.nanoTime();
-        JdtLsService lsp = interactiveServerFor(filePath);
-        List<Location> precise = lsp == null ? List.of()
-                : lsp.implementationsInteractive(filePath, text, line, col);
-        if (precise != null && !precise.isEmpty()) {
-            logNavigation("implementation", started, "semantico");
-            return precise;
-        }
-        String word = identifierAt(text, line, col);
-        List<Location> approximate = word == null ? List.of() : lexicalIndex.definitions(word);
-        if (!approximate.isEmpty()) {
-            notifyApproximateResult();
-            logNavigation("implementation", started, "aproximado");
-            return approximate;
-        }
-        logNavigation("implementation", started, "sem destino");
-        return precise;
-    }
-
-    private void showNavigationResult(IdeEditorContext context, String kind,
-                                      List<Location> locations) {
-        List<Location> targets = locations == null ? List.of() : locations;
-        if (targets.isEmpty()) {
-            setStatusBarText(text("status.navigation.empty", "Java: nenhum destino encontrado"));
-            return;
-        }
-        if (targets.size() == 1 && !"usages".equals(kind)) {
+    private void showNavigationResult(IdeEditorContext context, Kind kind, Result result,
+                                      List<UsagesPopup.Item> items) {
+        String status = switch (result.status()) {
+            case COMPLETE -> text("status.navigation.empty", "Java: nenhum destino encontrado");
+            case LOCAL -> text("status.navigation.local", "Java: resultado local");
+            case INDEXING -> text("status.navigation.indexing", "Java: indexacao em andamento; tente novamente");
+            case UNAVAILABLE -> text("status.navigation.unavailable", "Java: navegacao semantica indisponivel");
+            case FAILED -> text("status.navigation.failed", "Java: a busca falhou; tente novamente");
+            case STALE -> text("status.navigation.stale", "Java: o codigo mudou; tente novamente");
+        };
+        List<Location> targets = result.locations();
+        setStatusBarText(targets.isEmpty() && result.status() == Status.LOCAL
+                ? text("status.navigation.empty", "Java: nenhum destino encontrado") : status);
+        if (targets.isEmpty()) return;
+        if (result.status() == Status.COMPLETE) setStatusBarText(text("status.navigation.done", "Java: busca concluida"));
+        if (targets.size() == 1 && kind != Kind.REFERENCES) {
             Location target = targets.getFirst();
             navigateToLocation(target, pathFromLocation(target));
             return;
         }
-        List<UsagesPopup.Item> items = buildUsageItems(targets, context.filePath(), context.getText());
-        if (items.isEmpty()) return;
-        String header = switch (kind) {
-            case "implementation" -> items.size() + " "
-                    + text("navigation.implementations", "implementacao(oes)");
-            case "definition" -> items.size() + " "
-                    + text("navigation.definitions", "definicao(oes)");
-            default -> items.size() + " " + text("navigation.usages", "uso(s)");
+        String label = switch (kind) {
+            case IMPLEMENTATION -> text("navigation.implementations", "implementacao(oes)");
+            case DEFINITION -> text("navigation.definitions", "definicao(oes)");
+            case REFERENCES -> text("navigation.usages", "uso(s)");
         };
-        openUsagesPopup(context, null, header, items);
+        openUsagesPopup(context, null, targets.size() + " " + label, items);
     }
 
     @Override
@@ -4082,24 +4023,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp == null) {
             return content;
         }
-        String result = content;
-        if (preferences.isOrganizeImportsOnSave()) {
-            String organized = lsp.organizeImports(filePath, result);
-            if (organized != null) {
-                result = organized;
-            }
-        }
-        if (preferences.isFormatOnSave()) {
-            IdeEditorContext editor = getEditor(filePath);
-            int tabSize = editor == null ? 4 : editor.getTabSize();
-            boolean useSpaces = editor == null || editor.isUseSpacesForTab();
-
-            String formatted = lsp.format(filePath, result, tabSize, useSpaces);
-            if (formatted != null) {
-                result = formatted;
-            }
-        }
-        return result;
+        IdeEditorContext editor = getEditor(filePath);
+        String prepared = lsp.prepareSave(filePath, content, preferences.isOrganizeImportsOnSave(),
+                preferences.isFormatOnSave(), editor == null ? 4 : editor.getTabSize(),
+                editor == null || editor.isUseSpacesForTab());
+        String latest = editor == null ? content : onUi(editor::getText);
+        return latest != null && !Objects.equals(content, latest) ? latest : prepared;
     }
 
     @Override
@@ -4152,52 +4081,30 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private List<Location> resolveDefinitions(Path filePath, String text, int line, int col) {
-        if (!JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        long started = System.nanoTime();
-        SpringNavigation.Target springTarget = springTargetAt(filePath, text, line, col);
-        if (springTarget != null && springTarget.kind() == SpringNavigation.Kind.CONFIG_KEY) {
-            List<Location> keys = configKeyDefinitions(springTarget.token());
-            if (!keys.isEmpty()) {
-                logNavigation("definition", started, "spring-config");
-                return keys;
-            }
-        }
-        if (springTarget != null && springTarget.kind() != SpringNavigation.Kind.INJECTION) {
-            List<Location> anchors = springLocations(springTarget);
-            if (!anchors.isEmpty()) {
-                logNavigation("definition", started, "spring");
-                return anchors;
-            }
-        }
-        JavaLocalScope.Scope scope = JavaLocalScope.at(text, line, col);
-        if (scope != null && !scope.onDeclaration()) {
-            List<Location> local = localDeclaration(filePath, scope);
-            logNavigation("definition", started, "escopo local");
-            return local;
+        return resolveNavigation(filePath, text, line, col, Kind.DEFINITION).locations();
+    }
+
+    Result resolveNavigation(Path filePath, String source, int line, int col, Kind kind) {
+        if (!JavaProjectConventions.isJava(filePath)) return Result.of(Status.UNAVAILABLE);
+        // Spring property literals have their own identity; plain Java symbols belong to JDT LS.
+        SpringNavigation.Target spring = springTargetAt(filePath, source, line, col);
+        if (kind == Kind.DEFINITION && spring != null && spring.kind() == SpringNavigation.Kind.CONFIG_KEY) {
+            List<Location> keys = configKeyDefinitions(spring.token());
+            if (!keys.isEmpty()) return new Result(Status.LOCAL, keys);
         }
         JdtLsService lsp = interactiveServerFor(filePath);
-        List<Location> precise = lsp == null ? List.of()
-                : lsp.definitionsInteractive(filePath, text, line, col);
-        if (precise != null && !precise.isEmpty()) {
-            logNavigation("definition", started, "semantico");
-            return withSpringImplementations(precise, springTarget);
+        Result semantic = lsp == null ? Result.of(isIndexing(filePath) ? Status.INDEXING : Status.UNAVAILABLE)
+                : lsp.navigation(kind, filePath, source, line, col);
+        if (semantic.status() == Status.COMPLETE || semantic.status() == Status.STALE
+                || !semantic.locations().isEmpty()) return semantic;
+        if (kind != Kind.IMPLEMENTATION) {
+            JavaLocalScope.Scope scope = JavaLocalScope.at(source, line, col);
+            if (scope != null) return new Result(Status.LOCAL, kind == Kind.DEFINITION
+                    ? localDeclaration(filePath, scope)
+                    : scope.usages().stream().map(range -> Location.of(
+                            filePath.toAbsolutePath().normalize().toUri().toString(), range)).toList());
         }
-        List<Location> springOnly = springLocations(springTarget);
-        if (!springOnly.isEmpty()) {
-            logNavigation("definition", started, "spring");
-            return springOnly;
-        }
-        String word = identifierAt(text, line, col);
-        List<Location> approximate = word == null ? List.of() : lexicalIndex.definitions(word);
-        if (!approximate.isEmpty()) {
-            notifyApproximateResult();
-            logNavigation("definition", started, "aproximado");
-            return approximate;
-        }
-        logNavigation("definition", started, "sem destino");
-        return precise;
+        return semantic;
     }
 
     private boolean isSpringAnnotationLiteral(String line, int col) {
@@ -4243,34 +4150,10 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .orElse(null);
     }
 
-    private List<Location> springReferences(Path filePath, int line) {
-        if (!isSpringNavigationEnabled()) {
-            return List.of();
-        }
-        return SpringNavigation.references(springIndex.snapshot(), filePath, line)
-                .map(JavaIdeAdapter::springLocations)
-                .orElse(List.of());
-    }
-
     private boolean isSpringNavigationEnabled() {
         JavaProjectDescriptor current = descriptor;
         return current != null && current.spring() && settings().isSpringSupport()
                 && settings().isSpringNavigation();
-    }
-
-    private List<Location> withSpringImplementations(List<Location> precise,
-                                                     SpringNavigation.Target target) {
-        List<Location> extra = springLocations(target);
-        if (extra.isEmpty()) {
-            return precise;
-        }
-        List<Location> merged = new ArrayList<>(precise);
-        for (Location location : extra) {
-            if (!merged.contains(location)) {
-                merged.add(location);
-            }
-        }
-        return merged;
     }
 
     private static List<Location> springLocations(SpringNavigation.Target target) {
@@ -4289,97 +4172,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         return List.copyOf(locations);
     }
 
-    private void logNavigation(String operation, long startedNanos, String source) {
-        log.debug("Navegacao {} resolvida por {} em {} ms", operation, source,
-                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
-    }
-
     private List<Location> resolveReferences(Path filePath, String text, int line, int col) {
-        if (!JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        long started = System.nanoTime();
-        List<Location> springUsages = springReferences(filePath, line);
-        if (!springUsages.isEmpty()) {
-            logNavigation("usages", started, "spring");
-            return springUsages;
-        }
-        JavaLocalScope.Scope scope = JavaLocalScope.at(text, line, col);
-        if (scope != null) {
-            List<Location> local = localUsages(filePath, scope, List.of());
-            logNavigation("usages", started, "escopo local");
-            return local;
-        }
-        JdtLsService lsp = interactiveServerFor(filePath);
-        List<Location> precise = lsp == null ? List.of()
-                : lsp.referencesInteractive(filePath, text, line, col);
-        if (precise != null && !precise.isEmpty()) {
-            logNavigation("usages", started, "semantico");
-            return precise;
-        }
-        String word = identifierAt(text, line, col);
-        List<Location> approximate = word == null ? List.of()
-                : lexicalIndex.usages(word, LEXICAL_USAGE_BUDGET_MS);
-        if (!approximate.isEmpty()) {
-            notifyApproximateResult();
-            logNavigation("usages", started, "aproximado");
-            return approximate;
-        }
-        logNavigation("usages", started, "sem destino");
-        return precise;
-    }
-
-    private static List<Location> localUsages(Path filePath, JavaLocalScope.Scope scope,
-                                              List<Location> references) {
-        Path file = JavaProjectConventions.normalize(filePath);
-        if (file == null) {
-            return List.of();
-        }
-        List<Location> scoped = new ArrayList<>();
-        if (references != null) {
-            for (Location reference : references) {
-                if (isInsideScope(reference, file, scope)) {
-                    scoped.add(reference);
-                }
-            }
-        }
-        if (!scoped.isEmpty()) {
-            return List.copyOf(scoped);
-        }
-        if (references != null && !references.isEmpty()) {
-            return references;
-        }
-        String uri = file.toUri().toString();
-        for (Range range : scope.usages()) {
-            scoped.add(Location.of(uri, range));
-        }
-        return List.copyOf(scoped);
-    }
-
-    private static boolean isInsideScope(Location location, Path file,
-                                         JavaLocalScope.Scope scope) {
-        if (location == null || location.range() == null) {
-            return false;
-        }
-        Path path = pathFromLocation(location);
-        if (path == null || !path.equals(file)) {
-            return false;
-        }
-        int line = location.range().start().line();
-        return line >= scope.startLine() && line <= scope.endLine();
-    }
-
-    private void notifyApproximateResult() {
-        JdtLsService lsp = jdtLs;
-        JdtLsService.State state = lsp == null
-                ? JdtLsService.State.NOT_STARTED : lsp.getState();
-        if (state == JdtLsService.State.STARTING || state == JdtLsService.State.INDEXING) {
-            setStatusBarText(text("status.approximateResult",
-                    "Java: resultado aproximado - indexacao em andamento"));
-            return;
-        }
-        setStatusBarText(text("status.approximateNavigation",
-                "Java: resultado aproximado"));
+        return resolveNavigation(filePath, text, line, col, Kind.REFERENCES).locations();
     }
 
     static String identifierAt(String text, int line, int col) {
