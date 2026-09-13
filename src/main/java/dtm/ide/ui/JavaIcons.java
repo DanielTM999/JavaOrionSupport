@@ -42,6 +42,10 @@ public final class JavaIcons {
     }
 
     public static Icon spring(int size) {
+        return plain("/imgs/wizard-spring.svg", size);
+    }
+
+    public static Icon springExplorer(int size) {
         Color foreground = UIManager.getColor("Label.foreground");
         return colored("/imgs/java-spring.svg", size,
                 foreground == null ? UiTokens.foreground() : foreground);

@@ -6213,7 +6213,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         SpringExplorerPanel panel = new SpringExplorerPanel(new SpringExplorerHost());
         springPanel = panel;
-        springPanelId = registerToolPanel(DockRegion.BOTTOM, "Spring", ToolIconType.INFO, panel);
+        springPanelId = registerToolPanel(DockRegion.BOTTOM, "Spring",
+                JavaIcons.springExplorer(JavaIcons.SMALL), panel);
     }
 
     private final class SpringExplorerHost implements SpringExplorerPanel.Host {
