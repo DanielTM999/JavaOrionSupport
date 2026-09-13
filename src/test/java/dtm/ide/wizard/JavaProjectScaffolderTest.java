@@ -117,6 +117,74 @@ class JavaProjectScaffolderTest {
     }
 
     @Test
+    void turnsAnInitializrProjectIntoASpringMultiModuleReactor() throws Exception {
+        Path generated = workspace.resolve("initializr-output");
+        Files.createDirectories(generated.resolve("src/main/java/com/example/plataforma"));
+        Files.writeString(generated.resolve("pom.xml"), """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                    <modelVersion>4.0.0</modelVersion>
+                    <parent>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-starter-parent</artifactId>
+                        <version>3.5.6</version>
+                        <relativePath/>
+                    </parent>
+                    <groupId>com.example</groupId>
+                    <artifactId>plataforma</artifactId>
+                    <version>2.0.0</version>
+                    <name>plataforma</name>
+                    <dependencies>
+                        <dependency>
+                            <groupId>org.springframework.boot</groupId>
+                            <artifactId>spring-boot-starter-web</artifactId>
+                        </dependency>
+                    </dependencies>
+                    <build>
+                        <plugins>
+                            <plugin>
+                                <groupId>org.springframework.boot</groupId>
+                                <artifactId>spring-boot-maven-plugin</artifactId>
+                            </plugin>
+                        </plugins>
+                    </build>
+                </project>
+                """);
+        Files.writeString(generated.resolve("src/main/java/com/example/plataforma/PlataformaApplication.java"),
+                "package com.example.plataforma; public class PlataformaApplication {}\n");
+        Files.writeString(generated.resolve("mvnw.cmd"), "@echo off\n");
+
+        Path project = workspace.resolve("plataforma-spring");
+        JavaProjectScaffolder.ProjectRequest request = new JavaProjectScaffolder.ProjectRequest(
+                project, JavaTemplate.MAVEN_MULTIMODULE, "com.example", "plataforma", "2.0.0",
+                "Plataforma web", "com.example.plataforma", 21,
+                List.of("web", "core", "persistence"));
+
+        SpringMultiModuleScaffolder.assemble(request, generated);
+
+        String root = Files.readString(project.resolve("pom.xml"));
+        String web = Files.readString(project.resolve("web/pom.xml"));
+        assertTrue(root.contains("<version>3.5.6</version>"));
+        assertTrue(root.contains("<packaging>pom</packaging>"));
+        assertTrue(root.contains("<module>web</module>"));
+        assertTrue(root.contains("<module>core</module>"));
+        assertTrue(root.contains("<dependencyManagement>"));
+        assertTrue(web.contains("<artifactId>spring-boot-starter-web</artifactId>"));
+        assertTrue(web.contains("<artifactId>spring-boot-maven-plugin</artifactId>"));
+        assertTrue(web.contains("<artifactId>core</artifactId>"));
+        assertTrue(web.contains("<relativePath>../pom.xml</relativePath>"));
+        assertTrue(Files.isRegularFile(project.resolve(
+                "web/src/main/java/com/example/plataforma/PlataformaApplication.java")));
+        assertTrue(Files.isRegularFile(project.resolve(
+                "core/src/main/java/com/example/plataforma/core/CoreModule.java")));
+        assertTrue(Files.isRegularFile(project.resolve("mvnw.cmd")));
+
+        JavaProjectDescriptor descriptor = JavaProjectConventions.describe(project);
+        assertEquals(JavaProjectKind.MAVEN_MULTIMODULE, descriptor.kind());
+        assertEquals(4, descriptor.modules().size());
+    }
+
+    @Test
     void theGradleBuildPointsToTheGeneratedMainClass() throws IOException {
         Path project = create(JavaTemplate.GRADLE_APPLICATION, "gradle-app");
 

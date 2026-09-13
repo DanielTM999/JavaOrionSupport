@@ -1,6 +1,8 @@
 package dtm.ide.run.form;
 
 import dtm.ide.ui.PillButtons;
+import dtm.stools.component.inputfields.osfilepicker.DeFilter;
+import dtm.stools.component.inputfields.osfilepicker.OsFilePicker;
 import dtm.stools.component.inputfields.textarea.TextAreaField;
 import dtm.stools.component.inputfields.textfield.MaskedTextField;
 import dtm.stools.configs.UiTokens;
@@ -14,11 +16,9 @@ import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
-import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.Scrollable;
-import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
@@ -163,32 +163,30 @@ public final class RunFormUi {
 
     public static void chooseFile(Component parent, String title, Path start,
                                   String extension, Consumer<Path> onChosen) {
-        JFileChooser chooser = baseChooser(title, start);
-        chooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
-        if (extension != null) {
-            chooser.setFileFilter(new FileNameExtensionFilter(
-                    extension.toUpperCase(java.util.Locale.ROOT), extension));
+        File selected;
+        File initial = existing(start);
+        if (extension == null || extension.isBlank()) {
+            selected = OsFilePicker.openFile(title, initial);
+        } else {
+            DeFilter filter = DeFilter.of(extension.toUpperCase(java.util.Locale.ROOT), extension);
+            selected = OsFilePicker.openFile(title, initial, filter);
         }
-        if (chooser.showOpenDialog(parent) == JFileChooser.APPROVE_OPTION) {
-            onChosen.accept(chooser.getSelectedFile().toPath());
+        if (selected != null) {
+            onChosen.accept(selected.toPath());
         }
     }
 
     public static void chooseDirectory(Component parent, String title, Path start,
                                        Consumer<Path> onChosen) {
-        JFileChooser chooser = baseChooser(title, start);
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        if (chooser.showOpenDialog(parent) == JFileChooser.APPROVE_OPTION) {
-            onChosen.accept(chooser.getSelectedFile().toPath());
+        File selected = OsFilePicker.openDirectory(title, existing(start));
+        if (selected != null) {
+            onChosen.accept(selected.toPath());
         }
     }
 
-    private static JFileChooser baseChooser(String title, Path start) {
-        File directory = start == null ? null : start.toFile();
-        JFileChooser chooser = directory != null && directory.exists()
-                ? new JFileChooser(directory) : new JFileChooser();
-        chooser.setDialogTitle(title);
-        return chooser;
+    private static File existing(Path start) {
+        File file = start == null ? null : start.toFile();
+        return file != null && file.exists() ? file : null;
     }
 
     private static String escape(String value) {

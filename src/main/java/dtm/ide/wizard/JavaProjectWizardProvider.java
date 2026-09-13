@@ -20,6 +20,7 @@ public class JavaProjectWizardProvider extends ProjectWizardProvider {
 
         wizards.add(JavaProjectWizard.springBoot(false));
         wizards.add(JavaProjectWizard.springBoot(true));
+        wizards.add(JavaProjectWizard.springBootMultiModule());
 
         for (JavaTemplate template : JavaTemplate.available()) {
             wizards.add(new JavaProjectWizard(template));

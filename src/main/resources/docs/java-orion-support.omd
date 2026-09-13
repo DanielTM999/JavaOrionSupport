@@ -178,6 +178,7 @@ nativo, a conclusão é assistiva e não substitui a validação semântica do b
 | Template | O que gera |
 |---|---|
 | **Spring Boot (Maven)** | Projeto gerado pelo Spring Initializr, com busca de starters |
+| **Spring Boot multi-módulo (Maven)** | Reactor com módulo executável, bibliotecas e dependências internas gerenciadas |
 | **Spring Boot (Gradle)** | Idem, em Kotlin DSL |
 | Aplicação Maven | `pom.xml`, classe principal, teste JUnit 5 |
 | Biblioteca Maven | Idem, sem classe principal |

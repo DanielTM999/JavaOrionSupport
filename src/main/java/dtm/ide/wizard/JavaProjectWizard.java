@@ -25,9 +25,16 @@ public final class JavaProjectWizard implements ProjectWizard {
                 gradle ? JavaTemplate.GRADLE_APPLICATION : JavaTemplate.MAVEN_APPLICATION, true);
     }
 
+    public static JavaProjectWizard springBootMultiModule() {
+        return new JavaProjectWizard(JavaTemplate.MAVEN_MULTIMODULE, true);
+    }
+
     @Override
     public String getId() {
         if (springBoot) {
+            if (template == JavaTemplate.MAVEN_MULTIMODULE) {
+                return "java-spring-boot-maven-multimodule";
+            }
             return template.isGradle() ? "java-spring-boot-gradle" : "java-spring-boot-maven";
         }
         return "java-" + template.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-');
@@ -36,6 +43,9 @@ public final class JavaProjectWizard implements ProjectWizard {
     @Override
     public String getName() {
         if (springBoot) {
+            if (template == JavaTemplate.MAVEN_MULTIMODULE) {
+                return "Spring Boot multi-modulo (Maven)";
+            }
             return template.isGradle() ? "Spring Boot (Gradle)" : "Spring Boot (Maven)";
         }
         return template.displayName();

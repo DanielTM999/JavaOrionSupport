@@ -10,6 +10,7 @@ import dtm.stools.component.form.FormValues;
 import dtm.stools.component.form.ValidationResult;
 import dtm.stools.component.form.Validator;
 import dtm.stools.component.inputfields.duallistfield.DualListField;
+import dtm.stools.component.inputfields.osfilepicker.OsFilePicker;
 import dtm.stools.component.inputfields.segmentedfield.SegmentedField;
 import dtm.stools.component.inputfields.selectfield.DropdownFieldListener;
 import dtm.stools.component.inputfields.tagfield.TagInputField;
@@ -25,7 +26,6 @@ import javax.swing.DefaultComboBoxModel;
 import javax.swing.DefaultListCellRenderer;
 import javax.swing.JButton;
 import javax.swing.JComponent;
-import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JPanel;
@@ -43,6 +43,7 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Rectangle;
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
@@ -203,6 +204,9 @@ final class JavaProjectWizardView extends JPanel {
 
     private String headline() {
         if (springBoot) {
+            if (isSpringMultiModule()) {
+                return "Spring Boot multi-modulo com Maven";
+            }
             return "Spring Boot com " + (template.isGradle() ? "Gradle" : "Maven");
         }
         return template.displayName();
@@ -268,8 +272,11 @@ final class JavaProjectWizardView extends JPanel {
         if (template == JavaTemplate.MAVEN_MULTIMODULE) {
             form.addWide(new TagFormField("modules", text("field.modules", "Modulos"), modules)
                     .setRequired(true)
-                    .setHelperText(text("helper.modules",
-                            "Enter adiciona um modulo; ao menos um e necessario")));
+                    .setHelperText(isSpringMultiModule()
+                            ? text("helper.springModules",
+                                    "O primeiro modulo sera o executavel Spring Boot")
+                            : text("helper.modules",
+                                    "Enter adiciona um modulo; ao menos um e necessario")));
         }
 
         return stepCard(text("section.coordinates", "Coordenadas do artefato"),
@@ -376,7 +383,7 @@ final class JavaProjectWizardView extends JPanel {
                 .setPreferredHeight(UiTokens.scale(WizardUi.FIELD_HEIGHT))
                 .setSelectedIndex(0, false);
         modules.setPlaceholder(text("placeholder.modules", "core, app"));
-        modules.setTags(List.of("core", "app"));
+        modules.setTags(isSpringMultiModule() ? List.of("web", "core") : List.of("core", "app"));
     }
 
     private void wireDerivedFields() {
@@ -657,11 +664,18 @@ final class JavaProjectWizardView extends JPanel {
     }
 
     private void chooseLocation() {
-        JFileChooser chooser = new JFileChooser(location.getText());
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setDialogTitle(text("action.browse", "Escolher pasta"));
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            location.setText(chooser.getSelectedFile().getAbsolutePath());
+        File start = null;
+        try {
+            File candidate = Path.of(location.getText()).toFile();
+            if (candidate.exists()) {
+                start = candidate;
+            }
+        } catch (InvalidPathException ignored) {
+            // O seletor abre no diretorio padrao quando o texto ainda nao forma um caminho valido.
+        }
+        File selected = OsFilePicker.openDirectory(text("action.browse", "Escolher pasta"), start);
+        if (selected != null) {
+            location.setText(selected.getAbsolutePath());
         }
     }
 
@@ -699,12 +713,22 @@ final class JavaProjectWizardView extends JPanel {
         List<String> selected = starterSelector.getSelected().stream()
                 .map(SpringInitializrClient.Starter::id).toList();
         SpringInitializrClient.Option boot = bootVersion.getValue(SpringInitializrClient.Option.class);
-        return initializr.generate(new SpringInitializrClient.GenerateRequest(
+        SpringInitializrClient.GenerateRequest initializrRequest =
+                new SpringInitializrClient.GenerateRequest(
                 SpringInitializrClient.projectTypeOf(template.isGradle()), "java",
                 boot == null ? "" : boot.id(), groupId.getText().trim(), artifactId.getText().trim(),
                 effectiveVersion(), projectName.getText().trim(), descriptionField.getText().trim(),
                 packageName.getText().trim(), String.valueOf(selectedJavaVersion()),
-                String.valueOf(packaging.getSelectedValue()), selected), directory);
+                String.valueOf(packaging.getSelectedValue()), selected);
+        if (isSpringMultiModule()) {
+            JavaProjectScaffolder.ProjectRequest projectRequest =
+                    new JavaProjectScaffolder.ProjectRequest(directory, template,
+                            groupId.getText().trim(), artifactId.getText().trim(), effectiveVersion(),
+                            descriptionField.getText().trim(), packageName.getText().trim(),
+                            selectedJavaVersion(), selectedModules());
+            return SpringMultiModuleScaffolder.create(projectRequest, initializrRequest, initializr);
+        }
+        return initializr.generate(initializrRequest, directory);
     }
 
     private void setBusy(boolean running, String message) {
@@ -743,6 +767,10 @@ final class JavaProjectWizardView extends JPanel {
 
     private boolean needsCoordinates() {
         return springBoot || template.needsCoordinates();
+    }
+
+    private boolean isSpringMultiModule() {
+        return springBoot && template == JavaTemplate.MAVEN_MULTIMODULE;
     }
 
     private int selectedJavaVersion() {

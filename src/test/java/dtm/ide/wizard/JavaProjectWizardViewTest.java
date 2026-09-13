@@ -30,6 +30,19 @@ class JavaProjectWizardViewTest {
                 assertNotNull(new JavaProjectWizard(template).getIcon(), template.name()));
         assertNotNull(JavaProjectWizard.springBoot(false).getIcon());
         assertNotNull(JavaProjectWizard.springBoot(true).getIcon());
+        assertNotNull(JavaProjectWizard.springBootMultiModule().getIcon());
+        assertEquals("java-spring-boot-maven-multimodule",
+                JavaProjectWizard.springBootMultiModule().getId());
+    }
+
+    @Test
+    void providerRegistersTheSpringMultiModuleWizardWithoutDuplicateIds() {
+        var wizards = new JavaProjectWizardProvider().getProjectWizards();
+
+        assertTrue(wizards.stream().anyMatch(wizard ->
+                "java-spring-boot-maven-multimodule".equals(wizard.getId())));
+        assertEquals(wizards.size(),
+                wizards.stream().map(wizard -> wizard.getId()).distinct().count());
     }
 
     @Test
@@ -87,6 +100,17 @@ class JavaProjectWizardViewTest {
         assertTrue(count(view, JList.class) >= 2, "uma lista de disponiveis e uma de selecionadas");
         assertTrue(field(view, "boot").isPresent());
         assertTrue(field(view, "packaging").isPresent());
+        assertEquals(4, steps(view).getSteps().size(),
+                "projeto, coordenadas, dependencias e revisao");
+    }
+
+    @Test
+    void springMultiModuleWizardCombinesDependenciesAndModules() {
+        JPanel view = view(JavaTemplate.MAVEN_MULTIMODULE, true);
+
+        FormField modules = field(view, "modules").orElseThrow();
+        assertEquals(List.of("web", "core"), ((TagInputField) modules.getControl()).getTags());
+        assertTrue(contains(view, DualListField.class));
         assertEquals(4, steps(view).getSteps().size(),
                 "projeto, coordenadas, dependencias e revisao");
     }

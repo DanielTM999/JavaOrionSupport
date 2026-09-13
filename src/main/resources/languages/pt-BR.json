@@ -438,6 +438,7 @@
   "JavaProjectWizardView.header.spring": "Projeto pronto para produção gerado pelo Spring Initializr.",
   "JavaProjectWizardView.helper.location": "Pasta onde a pasta do projeto será criada",
   "JavaProjectWizardView.helper.modules": "Enter adiciona um módulo; ao menos um é necessário",
+  "JavaProjectWizardView.helper.springModules": "O primeiro módulo será o executável Spring Boot; Enter adiciona outro módulo",
   "JavaProjectWizardView.helper.optional": "Opcional",
   "JavaProjectWizardView.helper.package": "Derivado do group e do nome",
   "JavaProjectWizardView.helper.packagePlain": "Pacote base das fontes",

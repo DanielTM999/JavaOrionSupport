@@ -3,6 +3,7 @@ package dtm.ide.ui;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
 import dtm.stools.component.feedback.badge.BadgeLabel;
+import dtm.stools.component.inputfields.osfilepicker.OsFilePicker;
 import dtm.stools.component.panels.card.CardPanel;
 import dtm.stools.component.panels.toolbar.ToolBarPanel;
 import dtm.stools.configs.UiTokens;
@@ -11,7 +12,6 @@ import dtm.stools.i18n.I18n;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
-import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
@@ -163,13 +163,12 @@ public final class JdkManagerPanel extends JPanel {
     }
 
     private void addExistingFromDisk() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setDialogTitle(text("chooser.title", "Selecione o diretorio da JDK"));
-        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+        java.io.File selected = OsFilePicker.openDirectory(
+                text("chooser.title", "Selecione o diretorio da JDK"));
+        if (selected == null) {
             return;
         }
-        Path home = chooser.getSelectedFile().toPath();
+        Path home = selected.toPath();
         status.setTone(BadgeLabel.Tone.INFO);
         setBusy(true, text("status.inspecting", "Verificando") + " " + home + "...");
         host.addExisting(home, error -> SwingUtilities.invokeLater(() -> {
