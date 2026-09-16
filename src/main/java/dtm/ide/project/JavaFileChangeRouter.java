@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -15,11 +16,14 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
+import java.util.stream.Stream;
 
 @Slf4j
 public final class JavaFileChangeRouter {
 
     private static final long DEBOUNCE_MS = 250;
+    private static final int MAX_SCAN_DEPTH = 24;
+    private static final long MAX_SCAN_FILES = 2_000;
 
     private static final Set<String> IGNORED_SEGMENTS = Set.of(
             "target", "build", "out", "bin", ".git", ".gradle", ".mvn", ".idea",
@@ -38,7 +42,7 @@ public final class JavaFileChangeRouter {
     }
 
     public interface Listener {
-        void onProjectFileChanged(Path file, FileRole role, Change change);
+        void onProjectFileChanged(Path file, FileRole role, Change change, boolean editorManaged);
     }
 
     private final Listener listener;
@@ -49,7 +53,8 @@ public final class JavaFileChangeRouter {
     private boolean closed;
     private long generation;
 
-    private record Pending(ScheduledFuture<?> task, boolean created, long generation) {
+    private record Pending(ScheduledFuture<?> task, boolean created, boolean directory,
+                           long generation) {
     }
 
     public JavaFileChangeRouter(Listener listener, Predicate<Path> editorManaged) {
@@ -67,14 +72,22 @@ public final class JavaFileChangeRouter {
             return;
         }
         Path file = changedPath.toAbsolutePath().normalize();
-        if (isIgnored(file) || roleOf(file) == null) {
+        if (isIgnored(file)) {
+            return;
+        }
+        if (kind == StandardWatchEventKinds.OVERFLOW) {
+            schedule(file, false, true);
             return;
         }
         boolean created = kind == StandardWatchEventKinds.ENTRY_CREATE;
-        if (kind == StandardWatchEventKinds.ENTRY_MODIFY && editorManaged.test(file)) {
+        if (created && Files.isDirectory(file)) {
+            schedule(file, true, true);
             return;
         }
-        schedule(file, created);
+        if (roleOf(file) == null) {
+            return;
+        }
+        schedule(file, created, false);
     }
 
     public void acceptCreated(Path createdPath) {
@@ -85,10 +98,21 @@ public final class JavaFileChangeRouter {
         if (roleOf(file) == null) {
             return;
         }
-        schedule(file, true);
+        schedule(file, true, false);
     }
 
-    private synchronized void schedule(Path file, boolean created) {
+    public void acceptDirectory(Path directory) {
+        if (directory == null) {
+            return;
+        }
+        Path root = directory.toAbsolutePath().normalize();
+        if (isIgnored(root)) {
+            return;
+        }
+        schedule(root, false, true);
+    }
+
+    private synchronized void schedule(Path file, boolean created, boolean directory) {
         if (closed) return;
         pending.compute(file, (path, previous) -> {
             boolean wasCreated = created || (previous != null && previous.created());
@@ -98,14 +122,24 @@ public final class JavaFileChangeRouter {
             long ticket = ++generation;
             ScheduledFuture<?> task = scheduler.schedule(() -> dispatch(path, ticket),
                     DEBOUNCE_MS, TimeUnit.MILLISECONDS);
-            return new Pending(task, wasCreated, ticket);
+            return new Pending(task, wasCreated, directory, ticket);
         });
     }
 
-    synchronized void dispatch(Path file, long ticket) {
-        Pending removed = pending.get(file);
-        if (closed || removed == null || removed.generation() != ticket) return;
-        pending.remove(file, removed);
+    private synchronized Pending claim(Path file, long ticket) {
+        Pending current = pending.get(file);
+        if (closed || current == null || current.generation() != ticket) return null;
+        pending.remove(file, current);
+        return current;
+    }
+
+    void dispatch(Path file, long ticket) {
+        Pending removed = claim(file, ticket);
+        if (removed == null) return;
+        if (removed.directory()) {
+            scanDirectory(file, removed.created());
+            return;
+        }
         FileRole role = roleOf(file);
         if (role == null) {
             return;
@@ -113,16 +147,34 @@ public final class JavaFileChangeRouter {
         Change change;
         if (!Files.exists(file)) {
             change = Change.DELETED;
-        } else if (removed != null && removed.created()) {
+        } else if (removed.created()) {
             change = Change.CREATED;
         } else {
             change = Change.MODIFIED;
         }
         try {
-            listener.onProjectFileChanged(file, role, change);
+            listener.onProjectFileChanged(file, role, change, editorManaged.test(file));
         } catch (Exception e) {
             log.warn("Falha ao tratar a mudanca de {}", file, e);
         }
+    }
+
+    private void scanDirectory(Path directory, boolean created) {
+        if (!Files.isDirectory(directory)) {
+            return;
+        }
+        List<Path> found;
+        try (Stream<Path> walk = Files.walk(directory, MAX_SCAN_DEPTH)) {
+            found = walk.filter(Files::isRegularFile)
+                    .filter(path -> !isIgnored(path))
+                    .filter(path -> roleOf(path) != null)
+                    .limit(MAX_SCAN_FILES)
+                    .toList();
+        } catch (Exception e) {
+            log.debug("Falha ao varrer {}: {}", directory, e.getMessage());
+            return;
+        }
+        found.forEach(path -> schedule(path, created, false));
     }
 
     public synchronized void shutdown() {

@@ -36,6 +36,8 @@ class JdtLsProtocolTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Path FILE = Path.of("src/main/java/demo/Demo.java").toAbsolutePath();
+    private static final Path OTHER_FILE =
+            Path.of("src/main/java/demo/Foo.java").toAbsolutePath();
     private static final String TEXT = "package demo;\nclass Demo { void run() { } }\n";
 
     private JdtLsService service;
@@ -427,6 +429,76 @@ class JdtLsProtocolTest {
         responses.put("textDocument/definition", "[]");
         assertEquals(Status.COMPLETE, service.navigation(Kind.DEFINITION, FILE, edited, 1, 6).status());
         assertEquals(2, service.documentVersion(FILE));
+    }
+
+    @Test
+    void umaClasseCriadaNoDiscoForcaAReaberturaDosBuffers() throws Exception {
+        service.setExternalResyncDelayMs(40);
+        service.openDocument(FILE, TEXT);
+        int opened = service.documentVersion(FILE);
+        drainNotifications();
+
+        service.pathCreated(OTHER_FILE);
+
+        JsonNode watched = awaitRequest("workspace/didChangeWatchedFiles");
+        JsonNode change = watched.path("params").path("changes").get(0);
+        assertEquals(OTHER_FILE.toUri().toString().toLowerCase(java.util.Locale.ROOT),
+                change.path("uri").asText().toLowerCase(java.util.Locale.ROOT));
+        assertEquals(1, change.path("type").asInt());
+
+        awaitRequest("textDocument/didClose");
+        JsonNode reopened = awaitRequest("textDocument/didOpen");
+        assertEquals(FILE.toUri().toString(),
+                reopened.path("params").path("textDocument").path("uri").asText());
+        assertTrue(reopened.path("params").path("textDocument").path("version").asInt() > opened);
+    }
+
+    @Test
+    void mudancasExternasSeguidasViramUmaUnicaNotificacao() throws Exception {
+        service.setExternalResyncDelayMs(120);
+        service.openDocument(FILE, TEXT);
+        drainNotifications();
+
+        for (int index = 0; index < 5; index++) {
+            service.pathChanged(FILE.getParent().resolve("Outro" + index + ".java"));
+        }
+
+        JsonNode watched = awaitRequest("workspace/didChangeWatchedFiles");
+        assertEquals(5, watched.path("params").path("changes").size());
+        assertEquals(1, count("workspace/didChangeWatchedFiles"));
+    }
+
+    @Test
+    void aRessincronizacaoExternaNaoApagaOsDiagnosticosPublicados() throws Exception {
+        service.setExternalResyncDelayMs(40);
+        service.openDocument(FILE, TEXT);
+        drainNotifications();
+        service.onPublishDiagnostics(diagnostics(service.documentVersion(FILE),
+                "Foo cannot be resolved", 1, 0, 1, 5));
+
+        service.pathCreated(OTHER_FILE);
+        awaitRequest("textDocument/didOpen");
+
+        assertEquals("Foo cannot be resolved",
+                service.diagnostics(FILE).iterator().next().message());
+    }
+
+    @Test
+    void eventosRecebidosAntesDoServidorFicarProntoSaoReenviados() throws Exception {
+        service.setExternalResyncDelayMs(40);
+        set("state", JdtLsService.State.STARTING);
+
+        service.pathCreated(OTHER_FILE);
+        Thread.sleep(200);
+        assertEquals(0, count("workspace/didChangeWatchedFiles"));
+
+        set("state", JdtLsService.State.READY);
+        service.drainPendingWatchedFiles();
+
+        JsonNode watched = awaitRequest("workspace/didChangeWatchedFiles");
+        assertEquals(OTHER_FILE.toUri().toString().toLowerCase(java.util.Locale.ROOT),
+                watched.path("params").path("changes").get(0).path("uri").asText()
+                        .toLowerCase(java.util.Locale.ROOT));
     }
 
     private JsonNode awaitRequest(String method) throws InterruptedException {

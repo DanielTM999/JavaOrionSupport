@@ -49,7 +49,7 @@ class JavaFileChangeRouterTest {
     }
 
     private record Event(Path file, JavaFileChangeRouter.FileRole role,
-                         JavaFileChangeRouter.Change change) {
+                         JavaFileChangeRouter.Change change, boolean editorManaged) {
     }
 
     @Test
@@ -126,15 +126,72 @@ class JavaFileChangeRouterTest {
     }
 
     @Test
-    void skipsModificationsOfFilesOwnedByAnOpenEditor(@TempDir Path dir) throws Exception {
+    void reportsModificationsOfFilesOwnedByAnOpenEditorAsManaged(@TempDir Path dir) throws Exception {
         Path file = Files.writeString(dir.resolve("Cliente.java"), "class Cliente {}");
         List<Event> events = new CopyOnWriteArrayList<>();
-        JavaFileChangeRouter router = router(events, new CountDownLatch(1), path -> true);
+        CountDownLatch latch = new CountDownLatch(1);
+        JavaFileChangeRouter router = router(events, latch, path -> true);
 
         router.accept(file, StandardWatchEventKinds.ENTRY_MODIFY);
-        Thread.sleep(500);
 
-        assertTrue(events.isEmpty());
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        assertEquals(JavaFileChangeRouter.Change.MODIFIED, events.getFirst().change());
+        assertTrue(events.getFirst().editorManaged());
+        router.shutdown();
+    }
+
+    @Test
+    void anOverflowScansTheDirectoryItReportsAbout(@TempDir Path dir) throws Exception {
+        Path sources = Files.createDirectories(dir.resolve("src").resolve("com"));
+        Files.writeString(sources.resolve("A.java"), "class A {}");
+        Files.writeString(Files.createDirectories(sources.resolve("sub")).resolve("B.java"),
+                "class B {}");
+        Files.writeString(Files.createDirectories(dir.resolve("target")).resolve("C.java"),
+                "class C {}");
+        List<Event> events = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(2);
+        JavaFileChangeRouter router = router(events, latch, path -> false);
+
+        router.accept(dir, StandardWatchEventKinds.OVERFLOW);
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+        Thread.sleep(400);
+        assertEquals(2, events.size());
+        assertTrue(events.stream().noneMatch(event -> event.file().toString().contains("target")));
+        router.shutdown();
+    }
+
+    @Test
+    void aCreatedDirectoryReportsTheFilesAlreadyInsideIt(@TempDir Path dir) throws Exception {
+        Path pkg = Files.createDirectories(dir.resolve("com").resolve("example"));
+        Files.writeString(pkg.resolve("Novo.java"), "class Novo {}");
+        List<Event> events = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        JavaFileChangeRouter router = router(events, latch, path -> false);
+
+        router.accept(dir.resolve("com"), StandardWatchEventKinds.ENTRY_CREATE);
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, events.size());
+        assertEquals(JavaFileChangeRouter.Change.CREATED, events.getFirst().change());
+        router.shutdown();
+    }
+
+    @Test
+    void anExplicitDirectoryScanReportsTheJavaFilesUnderIt(@TempDir Path dir) throws Exception {
+        Path pkg = Files.createDirectories(dir.resolve("src"));
+        Files.writeString(pkg.resolve("A.java"), "class A {}");
+        Files.writeString(pkg.resolve("notas.txt"), "nada");
+        List<Event> events = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        JavaFileChangeRouter router = router(events, latch, path -> false);
+
+        router.acceptDirectory(dir);
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+        Thread.sleep(400);
+        assertEquals(1, events.size());
+        assertEquals(JavaFileChangeRouter.Change.MODIFIED, events.getFirst().change());
         router.shutdown();
     }
 
@@ -168,8 +225,8 @@ class JavaFileChangeRouterTest {
 
     private static JavaFileChangeRouter router(List<Event> events, CountDownLatch latch,
                                                java.util.function.Predicate<Path> editorManaged) {
-        return new JavaFileChangeRouter((file, role, change) -> {
-            events.add(new Event(file, role, change));
+        return new JavaFileChangeRouter((file, role, change, managed) -> {
+            events.add(new Event(file, role, change, managed));
             latch.countDown();
         }, editorManaged);
     }

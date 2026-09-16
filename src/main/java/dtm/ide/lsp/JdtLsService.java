@@ -68,6 +68,11 @@ public class JdtLsService {
         void onStatus(String message, int percent);
     }
 
+    enum ResyncMode {
+        REOPEN,
+        TOUCH
+    }
+
     public static final String APPLY_CODE_ACTION_COMMAND = "java/applyCodeAction";
     public static final String OVERRIDE_METHODS_PROMPT = "java.action.overrideMethodsPrompt";
     public static final String HASHCODE_EQUALS_PROMPT = "java.action.hashCodeEqualsPrompt";
@@ -119,6 +124,11 @@ public class JdtLsService {
     private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
     private static final long SERVICE_READY_POLL_MS = 250;
     private static final long DOCUMENT_RECOVERY_COOLDOWN_MS = 5_000;
+    private static final long EXTERNAL_RESYNC_DELAY_MS = 350;
+    private static final long EXTERNAL_RESYNC_MAX_DELAY_MS = 2_000;
+    private static final long PROJECT_CONFIGURATION_COOLDOWN_MS = 2_000;
+    private static final int MAX_PENDING_WATCHED_FILES = 512;
+    private static final int MAX_REOPEN_DOCUMENTS = 30;
     private static final int MAX_COMPLETION_ITEMS = 80;
     public static final int ANY_VERSION = -1;
     private static final int MAX_CODE_LENS_RESOLVE = 8;
@@ -157,6 +167,13 @@ public class JdtLsService {
     private final Set<String> workspaceWorkTokens = ConcurrentHashMap.newKeySet();
     private final AtomicLong workspaceRevision = new AtomicLong();
     private final AtomicLong lastDocumentRecovery = new AtomicLong();
+    private final AtomicLong lastProjectConfigurationUpdate = new AtomicLong();
+    private final AtomicLong watchedFlushTicket = new AtomicLong();
+    private final AtomicLong resyncTicket = new AtomicLong();
+    private final WatchedFileBatch watchedFiles = new WatchedFileBatch(
+            MAX_PENDING_WATCHED_FILES,
+            TimeUnit.MILLISECONDS.toNanos(EXTERNAL_RESYNC_MAX_DELAY_MS));
+    private volatile long externalResyncDelayMs = EXTERNAL_RESYNC_DELAY_MS;
     private final AtomicLong lastCodeLensWorkRefresh = new AtomicLong();
     private final Object processLock = new Object();
 
@@ -421,6 +438,7 @@ public class JdtLsService {
             state = State.INDEXING;
             statusListener.onStatus("Java: indexando projeto...", -1);
             flushOpenDocuments();
+            drainPendingWatchedFiles();
             provisionBundlesInBackground(progress);
             awaitWorkspaceReady();
             if (startupFailure != null) {
@@ -437,6 +455,7 @@ public class JdtLsService {
                     WARM_UP_TIMEOUT_MS, TimeUnit.MILLISECONDS, executor));
             flushOpenDocuments();
             refreshOpenDocuments();
+            drainPendingWatchedFiles();
             readyLatch.countDown();
             statusListener.onStatus("Java: IntelliSense pronto", -1);
         } catch (Exception e) {
@@ -699,6 +718,9 @@ public class JdtLsService {
             rpc.close();
         }
         documents.clearSyncState();
+        watchedFiles.clear();
+        watchedFlushTicket.incrementAndGet();
+        resyncTicket.incrementAndGet();
         diagnosticsByPath.clear();
         rawDiagnosticsByPath.clear();
         symbolCache.clear();
@@ -1116,34 +1138,116 @@ public class JdtLsService {
 
     /** Tells JDT LS that a source appeared on disk outside the editor. */
     public void pathCreated(Path createdPath) {
-        notifyWatchedFile(createdPath, 1);
+        queueWatchedFile(createdPath, WatchedFileBatch.CREATED);
     }
 
     /** Tells JDT LS that a source changed on disk outside the editor. */
     public void pathChanged(Path changedPath) {
-        notifyWatchedFile(changedPath, 2);
+        queueWatchedFile(changedPath, WatchedFileBatch.CHANGED);
     }
 
-    private void notifyWatchedFile(Path path, int changeType) {
+    public void requestExternalResync() {
+        scheduleExternalResync();
+    }
+
+    public void resynchronizeWithDisk() {
+        if (!canSyncDocuments()) {
+            return;
+        }
+        invalidateWorkspaceNavigation();
+        executor.execute(() -> resynchronizeOpenDocuments(ResyncMode.REOPEN, true,
+                "Java: sincronizado com o disco"));
+    }
+
+    public String documentContent(Path filePath) {
+        return filePath == null ? null : documents.content(LspConversions.toUri(filePath));
+    }
+
+    private void queueWatchedFile(Path path, int changeType) {
         if (path == null) {
             return;
         }
         Path target = normalizePath(path);
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || rpc.isClosed() || !canSyncDocuments()) {
-            return;
-        }
         String uri = LspConversions.toUri(target);
-        if (documents.isSynced(uri)) {
-            return;
-        }
         symbolCache.remove(uri);
         discardCodeLenses(uri);
         completionCache.remove(uri);
         invalidateWorkspaceNavigation();
-        rpc.notify("workspace/didChangeWatchedFiles", Map.of("changes", List.of(Map.of(
-                "uri", uri,
-                "type", changeType))));
+
+        watchedFiles.add(target, changeType, System.nanoTime());
+        if (canSyncDocuments()) {
+            scheduleWatchedFlush();
+        }
+    }
+
+    private void scheduleWatchedFlush() {
+        long ticket = watchedFlushTicket.incrementAndGet();
+        long delay = TimeUnit.NANOSECONDS.toMillis(watchedFiles.delayNanos(System.nanoTime(),
+                TimeUnit.MILLISECONDS.toNanos(externalResyncDelayMs)));
+        CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS, executor)
+                .execute(() -> flushWatchedFiles(ticket));
+    }
+
+    private void flushWatchedFiles(long ticket) {
+        if (ticket != watchedFlushTicket.get()) {
+            return;
+        }
+        drainWatchedFiles();
+    }
+
+    private void drainWatchedFiles() {
+        LspJsonRpcClient rpc = client;
+        if (rpc == null || rpc.isClosed() || !canSyncDocuments()) {
+            return;
+        }
+        if (!watchedFiles.isPending()) {
+            return;
+        }
+        boolean overflowed = watchedFiles.isOverflowed();
+        List<WatchedFileBatch.Entry> entries = watchedFiles.drain();
+        if (!overflowed) {
+            List<Map<String, Object>> changes = new ArrayList<>(entries.size());
+            for (WatchedFileBatch.Entry entry : entries) {
+                String uri = LspConversions.toUri(entry.path());
+                if (entry.changeType() != WatchedFileBatch.DELETED && documents.isSynced(uri)) {
+                    continue;
+                }
+                changes.add(Map.of("uri", uri, "type", entry.changeType()));
+            }
+            if (!changes.isEmpty()) {
+                rpc.notify("workspace/didChangeWatchedFiles", Map.of("changes", changes));
+            }
+        } else {
+            log.debug("Lote de mudancas externas estourou; ressincronizando tudo");
+        }
+        scheduleExternalResync();
+    }
+
+    private void scheduleExternalResync() {
+        if (!canSyncDocuments()) {
+            return;
+        }
+        long ticket = resyncTicket.incrementAndGet();
+        CompletableFuture.delayedExecutor(externalResyncDelayMs, TimeUnit.MILLISECONDS, executor)
+                .execute(() -> runExternalResync(ticket));
+    }
+
+    private void runExternalResync(long ticket) {
+        if (ticket != resyncTicket.get() || !canSyncDocuments()) {
+            return;
+        }
+        resynchronizeOpenDocuments(resyncMode(), false, null);
+    }
+
+    void setExternalResyncDelayMs(long delayMs) {
+        externalResyncDelayMs = Math.max(0, delayMs);
+    }
+
+    void drainPendingWatchedFiles() {
+        if (!watchedFiles.isPending()) {
+            return;
+        }
+        drainWatchedFiles();
     }
 
     /** Asks JDT LS to reread the build files of the project. */
@@ -1152,6 +1256,12 @@ public class JdtLsService {
         LspJsonRpcClient rpc = client;
         Path root = projectRoot;
         if (rpc == null || rpc.isClosed() || root == null || !isInteractive()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long previous = lastProjectConfigurationUpdate.get();
+        if (now - previous < PROJECT_CONFIGURATION_COOLDOWN_MS
+                || !lastProjectConfigurationUpdate.compareAndSet(previous, now)) {
             return;
         }
         rpc.notify("java/projectConfigurationUpdate",
@@ -1181,18 +1291,8 @@ public class JdtLsService {
             onDiagnosticsPublished.accept(path);
         });
 
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || rpc.isClosed()) {
-            return;
-        }
-        rpc.notify("workspace/didChangeWatchedFiles", Map.of("changes", List.of(Map.of(
-                "uri", LspConversions.toUri(deleted),
-                "type", 3))));
-        Path root = projectRoot;
-        if (root != null && isInteractive()) {
-            rpc.notify("java/projectConfigurationUpdate",
-                    Map.of("uri", LspConversions.toUri(root)));
-        }
+        queueWatchedFile(deleted, WatchedFileBatch.DELETED);
+        projectConfigurationUpdate();
     }
 
     public synchronized void saveDocument(Path filePath, String text) {
@@ -1255,7 +1355,18 @@ public class JdtLsService {
                 .execute(this::performDocumentResynchronization);
     }
 
-    private synchronized void performDocumentResynchronization() {
+    private void performDocumentResynchronization() {
+        log.warn("JDT LS perdeu a posicao de um documento; resincronizando {} buffer(s)",
+                documents.size());
+        resynchronizeOpenDocuments(ResyncMode.REOPEN, true, "Java: documentos resincronizados");
+    }
+
+    private ResyncMode resyncMode() {
+        return documents.size() > MAX_REOPEN_DOCUMENTS ? ResyncMode.TOUCH : ResyncMode.REOPEN;
+    }
+
+    private synchronized void resynchronizeOpenDocuments(ResyncMode mode, boolean clearDiagnostics,
+                                                         String statusMessage) {
         if (!canSyncDocuments()) {
             return;
         }
@@ -1263,28 +1374,36 @@ public class JdtLsService {
         if (rpc == null) {
             return;
         }
-        log.warn("JDT LS perdeu a posicao de um documento; resincronizando {} buffer(s)",
-                documents.size());
         documents.forEach((uri, content) -> {
-            if (documents.unmarkSynced(uri)) {
-                rpc.notify("textDocument/didClose", Map.of("textDocument", Map.of("uri", uri)));
+            cancelInFlightForUri(uri);
+            if (mode == ResyncMode.REOPEN) {
+                if (documents.unmarkSynced(uri)) {
+                    rpc.notify("textDocument/didClose", Map.of("textDocument", Map.of("uri", uri)));
+                }
+                documents.incrementVersion(uri);
+                if (documents.markSynced(uri)) {
+                    sendDidOpen(uri, content);
+                }
+            } else if (documents.isSynced(uri)) {
+                sendDidChange(uri, content, content);
             }
-            documents.incrementVersion(uri);
-            if (documents.markSynced(uri)) {
-                sendDidOpen(uri, content);
-            }
+            symbolCache.remove(uri);
+            discardCodeLenses(uri);
+            completionCache.remove(uri);
             Path path = LspConversions.toPath(uri);
-            if (path != null) {
+            if (path == null) {
+                return;
+            }
+            if (clearDiagnostics) {
                 diagnosticsByPath.remove(normalizePath(path));
                 rawDiagnosticsByPath.remove(normalizePath(path));
-                symbolCache.remove(uri);
-                discardCodeLenses(uri);
-                completionCache.remove(uri);
                 onDiagnosticsPublished.accept(path);
-                onCodeLensRefresh.accept(path);
             }
+            onCodeLensRefresh.accept(path);
         });
-        statusListener.onStatus("Java: documentos resincronizados", -1);
+        if (statusMessage != null) {
+            statusListener.onStatus(statusMessage, -1);
+        }
     }
 
     private void refreshOpenDocuments() {

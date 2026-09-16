@@ -272,6 +272,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 @Slf4j
 @Singleton
@@ -289,6 +290,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
     private static final long RENAME_WAIT_BUDGET_MS = 60_000;
+    private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
+    private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
     private static final String RENAME_PROGRESS_ID = "javaRenameWait";
     private static final String BUILD_PROGRESS_ID = "javaBuild";
     private static final String RUN_BUILD_PROGRESS_ID = "javaRunBuild";
@@ -424,6 +427,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile IdeEditorContext codeActionLampContext;
     private volatile IdeEditorContext activeJavaEditor;
     private final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
+    private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
+    private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
     private final AtomicBoolean languageServerReadyHandled = new AtomicBoolean();
     private volatile RunConfigurationData selectedRunConfig;
     private volatile List<RunConfigurationData> staticRunConfigurations = List.of();
@@ -504,6 +509,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         clearCoverage();
         detachAllCoverageGutters();
         javaEditors.clear();
+        diskBaseline.clear();
         lspProgress.set(0);
         hideProgress(LSP_PROGRESS_ID);
         SwingUtilities.invokeLater(this::hideCodeActionLamp);
@@ -1735,15 +1741,16 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void onWatchedFileChanged(Path file, JavaFileChangeRouter.FileRole role,
-                                      JavaFileChangeRouter.Change change) {
+                                      JavaFileChangeRouter.Change change, boolean editorManaged) {
         switch (role) {
-            case JAVA -> onWatchedJavaFile(file, change);
+            case JAVA -> onWatchedJavaFile(file, change, editorManaged);
             case SPRING_CONFIG -> onWatchedSpringConfigFile(file, change);
             case BUILD -> onWatchedBuildFile(file, change);
         }
     }
 
-    private void onWatchedJavaFile(Path file, JavaFileChangeRouter.Change change) {
+    private void onWatchedJavaFile(Path file, JavaFileChangeRouter.Change change,
+                                   boolean editorManaged) {
         if (change == JavaFileChangeRouter.Change.DELETED) {
             forgetJavaFile(file);
             JdtLsService lsp = jdtLs;
@@ -1753,6 +1760,10 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         String content = JavaProjectConventions.readOrEmpty(file);
+        if (editorManaged) {
+            onExternalChangeToOpenFile(file, content);
+            return;
+        }
         lexicalIndex.refreshFile(file, content);
         refreshSpringIndexFor(file, content);
 
@@ -1760,11 +1771,68 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp != null) {
             if (change == JavaFileChangeRouter.Change.CREATED) {
                 lsp.pathCreated(file);
+                if (!insideKnownSourceRoot(file)) {
+                    requestProjectConfigurationUpdate();
+                }
             } else {
                 lsp.pathChanged(file);
             }
         }
         requestRefreshCodeLenses(file);
+    }
+
+    private void onExternalChangeToOpenFile(Path file, String diskContent) {
+        JdtLsService lsp = jdtLs;
+        if (lsp == null) {
+            return;
+        }
+        String mirrored = lsp.documentContent(file);
+        if (mirrored == null) {
+            lexicalIndex.refreshFile(file, diskContent);
+            lsp.pathChanged(file);
+            return;
+        }
+        if (diskContent.equals(mirrored)) {
+            return;
+        }
+        lexicalIndex.refreshFile(file, diskContent);
+        Path normalized = JavaProjectConventions.normalize(file);
+        IdeEditorContext editor = javaEditors.get(normalized);
+        String baseline = diskBaseline.get(normalized);
+        if (editor == null || baseline == null || !baseline.equals(mirrored)) {
+            lsp.requestExternalResync();
+            return;
+        }
+        diskBaseline.put(normalized, diskContent);
+        SwingUtilities.invokeLater(() -> editor.setText(diskContent));
+    }
+
+    private boolean insideKnownSourceRoot(Path file) {
+        JavaProjectDescriptor current = descriptor;
+        if (current == null) {
+            return true;
+        }
+        Path normalized = JavaProjectConventions.normalize(file);
+        return current.moduleOf(normalized)
+                .map(module -> Stream.concat(module.sourceRoots().stream(),
+                                module.testRoots().stream())
+                        .anyMatch(normalized::startsWith))
+                .orElse(false);
+    }
+
+    private void requestProjectConfigurationUpdate() {
+        long now = System.currentTimeMillis();
+        long previous = lastConfigurationUpdateRequest.get();
+        if (now - previous < PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS
+                || !lastConfigurationUpdateRequest.compareAndSet(previous, now)) {
+            return;
+        }
+        background.schedule(() -> {
+            JdtLsService lsp = jdtLs;
+            if (lsp != null) {
+                lsp.projectConfigurationUpdate();
+            }
+        }, PROJECT_CONFIGURATION_REQUEST_DELAY_MS, TimeUnit.MILLISECONDS);
     }
 
     private void onWatchedSpringConfigFile(Path file, JavaFileChangeRouter.Change change) {
@@ -3576,6 +3644,8 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         javaEditors.put(JavaProjectConventions.normalize(editorContext.filePath()), editorContext);
+        diskBaseline.put(JavaProjectConventions.normalize(editorContext.filePath()),
+                editorContext.getText());
         if (activeJavaEditor == null) {
             activeJavaEditor = editorContext;
         }
@@ -4007,6 +4077,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (JavaProjectConventions.isJava(filePath)) {
             detachCoverageGutter(filePath);
             javaEditors.remove(JavaProjectConventions.normalize(filePath));
+            diskBaseline.remove(JavaProjectConventions.normalize(filePath));
             if (lsp != null) {
                 lsp.closeDocument(filePath);
             }
@@ -4034,6 +4105,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void onAfterFileSave(Path filePath, String content) {
         JdtLsService lsp = jdtLs;
+        if (JavaProjectConventions.isJava(filePath)) {
+            diskBaseline.put(JavaProjectConventions.normalize(filePath), content);
+        }
         if (lsp != null && JavaProjectConventions.isJava(filePath)) {
             lsp.saveDocument(filePath, content);
         }
@@ -4490,6 +4564,12 @@ public class JavaIdeAdapter extends IdeAdapter {
                         .tooltip(text("menu.sync.tip",
                                 "Reler o pom ou o build.gradle e atualizar o classpath"))
                         .onClick(event -> syncProject()))
+                .add(MenuNode.item("javaSyncWithDisk",
+                                text("menu.syncDisk", "Ressincronizar com o disco"))
+                        .icon(JavaIcons.refresh(JavaIcons.SMALL))
+                        .tooltip(text("menu.syncDisk.tip",
+                                "Reler as mudancas feitas fora do editor e reanalisar os arquivos abertos"))
+                        .onClick(event -> syncWithDisk()))
                 .add(MenuNode.item("javaReanalyzeDiagnostics",
                                 text("menu.reanalyzeDiagnostics", "Limpar e rediagnosticar"))
                         .icon(JavaIcons.refresh(JavaIcons.SMALL))
@@ -5689,6 +5769,30 @@ public class JavaIdeAdapter extends IdeAdapter {
         Set<Path> affected = problems.clearBuild();
         affected.forEach(this::requestRefreshDiagnostics);
         refreshProblemsPanel();
+    }
+
+    private void syncWithDisk() {
+        Path root = projectRoot;
+        JdtLsService lsp = jdtLs;
+        if (root == null || lsp == null) {
+            setStatusBarText(text("status.noProject", "Java: nenhum projeto aberto"));
+            return;
+        }
+        setStatusBarText(text("status.syncingWithDisk",
+                "Java: relendo as mudancas feitas fora do editor..."));
+        background.submit(() -> {
+            JavaFileChangeRouter router = fileChangeRouter;
+            if (router != null) {
+                router.acceptDirectory(root);
+            }
+            lsp.resynchronizeWithDisk();
+            javaEditors.keySet().forEach(path -> {
+                requestRefreshDiagnostics(path);
+                requestRefreshCodeLenses(path);
+                requestRefreshInlayHints(path);
+                requestRefreshSemanticTokens(path);
+            });
+        });
     }
 
     private void reanalyzeDiagnostics() {
