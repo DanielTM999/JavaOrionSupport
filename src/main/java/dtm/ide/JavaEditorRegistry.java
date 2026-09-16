@@ -15,10 +15,8 @@ import java.util.Locale;
 public final class JavaEditorRegistry {
 
     private final JavaTokenizerProvider java = new JavaTokenizerProvider();
-    private final ConfigTokenizerProvider properties =
-            new ConfigTokenizerProvider(ConfigTokenizerProvider.Mode.PROPERTIES);
-    private final ConfigTokenizerProvider yaml =
-            new ConfigTokenizerProvider(ConfigTokenizerProvider.Mode.YAML);
+    private final ConfigTokenizerProvider properties = new ConfigTokenizerProvider(ConfigTokenizerProvider.Mode.PROPERTIES);
+    private final ConfigTokenizerProvider yaml = new ConfigTokenizerProvider(ConfigTokenizerProvider.Mode.YAML);
     private final GradleTokenizerProvider gradle = new GradleTokenizerProvider();
     private final XmlTokenizerProvider xml = new XmlTokenizerProvider();
 
@@ -42,7 +40,7 @@ public final class JavaEditorRegistry {
                     FoldRule.pair("/*", "*/"));
             case "gradle" -> List.of(FoldRule.pair('{', '}'), FoldRule.pair("/*", "*/"));
             case "xml" -> JavaProjectConventions.isMavenPom(filePath)
-                    ? List.of(FoldRule.pair("<!--", "-->"))
+                    ? List.of(FoldRule.xmlTags(), FoldRule.pair("<!--", "-->"))
                     : List.of();
             case "kts" -> isGradleScript(filePath)
                     ? List.of(FoldRule.pair('{', '}'), FoldRule.pair("/*", "*/"))

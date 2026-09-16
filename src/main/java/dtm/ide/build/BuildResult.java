@@ -25,10 +25,10 @@ public record BuildResult(
     }
 
     public String summary() {
-        long seconds = Math.max(0, duration.toMillis()) / 1000;
         if (successful()) {
-            return "build ok (" + seconds + "s)";
+            return "";
         }
+        long seconds = Math.max(0, duration.toMillis()) / 1000;
         int errorCount = errors().size();
         return errorCount > 0
                 ? "build falhou: " + errorCount + " erro(s) (" + seconds + "s)"

@@ -39,7 +39,8 @@ public class JavaTestRunner {
 
         public String summary() {
             if (results.isEmpty()) {
-                return buildResult == null ? "nenhum teste executado" : buildResult.summary();
+                String build = buildResult == null ? "" : buildResult.summary();
+                return build.isEmpty() ? "nenhum teste executado" : build;
             }
             return passed() + " passou, " + failed() + " falhou, " + skipped() + " pulado";
         }

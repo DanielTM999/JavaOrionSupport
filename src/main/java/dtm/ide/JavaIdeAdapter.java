@@ -738,7 +738,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 return;
             }
             publishBuildDiagnostics(result, true);
-            setStatusBarText("Java: " + result.summary());
+            setStatusBarText(result.summary().isEmpty() ? "" : "Java: " + result.summary());
         } finally {
             startupBuilder.set(null);
             BuildProgressTracker.Update completed = progress.completed();
@@ -5841,7 +5841,9 @@ public class JavaIdeAdapter extends IdeAdapter {
                 BuildResult result = build.executeToolCommand(module, goals,
                         line -> writeOutput(output, line));
                 publishBuildDiagnostics(result, true);
-                writeOutput(output, result.summary());
+                if (!result.summary().isEmpty()) {
+                    writeOutput(output, result.summary());
+                }
                 JavaBuildToolsPanel panel = buildToolsPanel;
                 if (panel != null) {
                     panel.finished(result.summary(), result.successful());
@@ -5876,7 +5878,9 @@ public class JavaIdeAdapter extends IdeAdapter {
                 BuildResult result = build.executeToolCommand(command.module(), command.command(),
                         line -> writeOutput(output, line));
                 publishBuildDiagnostics(result, true);
-                writeOutput(output, result.summary());
+                if (!result.summary().isEmpty()) {
+                    writeOutput(output, result.summary());
+                }
                 JavaBuildToolsPanel panel = buildToolsPanel;
                 if (panel != null) {
                     panel.finished(result.summary(), result.successful());
@@ -6331,7 +6335,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     return;
                 }
                 publishBuildDiagnostics(result, true);
-                setStatusBarText("Java: " + result.summary());
+                setStatusBarText(result.summary().isEmpty() ? "" : "Java: " + result.summary());
             } finally {
                 BuildProgressTracker.Update completed = progress.completed();
                 updateProgress(BUILD_PROGRESS_ID, completed.label(), completed.percent());
