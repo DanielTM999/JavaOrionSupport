@@ -215,6 +215,34 @@ class JavaLocalScopeTest {
         assertNull(at(source, 7, "value"));
     }
 
+    @Test
+    void cacheSurvivesNavigationAcrossManyFiles() {
+        for (int i = 0; i < 24; i++) {
+            String source = "class F" + i + " { void m() { int value" + i + " = " + i + "; use(value" + i + "); } }";
+            assertNotNull(JavaLocalScope.at(source, 0, source.indexOf("value" + i + " =")));
+        }
+        String first = "class F0 { void m() { int value0 = 0; use(value0); } }";
+        long before = JavaLocalScope.PARSES.get();
+        assertNotNull(JavaLocalScope.at(first, 0, first.indexOf("value0 =")));
+        assertEquals(before, JavaLocalScope.PARSES.get());
+    }
+
+    @Test
+    void preloadFeedsTheCacheUsedByNavigation() {
+        String source = "class Preloaded { void m() { int amount = 3; use(amount); } }";
+        JavaLocalScope.preload(source);
+        long before = JavaLocalScope.PARSES.get();
+        assertNotNull(JavaLocalScope.at(source, 0, source.indexOf("amount =")));
+        assertEquals(before, JavaLocalScope.PARSES.get());
+    }
+
+    @Test
+    void warmUpDoesNotBreakSubsequentParses() {
+        JavaLocalScope.warmUp();
+        String source = "class AfterWarmUp { void m() { int total = 7; use(total); } }";
+        assertNotNull(JavaLocalScope.at(source, 0, source.indexOf("total =")));
+    }
+
     private static JavaLocalScope.Scope at(String source, int line, String token) {
         String text = source.lines().toList().get(line);
         return JavaLocalScope.at(source, line, text.indexOf(token));

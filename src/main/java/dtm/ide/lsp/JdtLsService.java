@@ -1463,11 +1463,17 @@ public class JdtLsService {
         });
     }
 
+    private void invalidateNavigationForEdit(Path filePath) {
+        workspaceRevision.incrementAndGet();
+        navigationCache.clear();
+        if (filePath != null) onCodeLensRefresh.accept(filePath);
+    }
+
     private void documentContentChanged(Path filePath, String uri) {
         symbolCache.remove(uri);
         discardCodeLenses(uri);
         completionCache.remove(uri);
-        invalidateWorkspaceNavigation();
+        invalidateNavigationForEdit(filePath);
         cancelInFlightForUri(uri);
         Path key = normalizePath(filePath);
         boolean hadDiagnostics = diagnosticsByPath.remove(key) != null;
@@ -1682,12 +1688,18 @@ public class JdtLsService {
         String key = method + "|" + uri + "|" + version + "|" + line + "|" + col + "|" + revision;
         List<Location> cached = navigationCache.get(key);
         if (cached != null && isReady() && !isWarmingUp() && workspaceWorkTokens.isEmpty()) {
+            log.debug("navegacao {} servida do cache para {}", method, uri);
             return new Result(Status.COMPLETE, cached);
         }
         Map<String, Object> params = positionParams(filePath, line, col);
         if (extraParams != null) params.putAll(extraParams);
         // Explicit navigation runs off the EDT and needs more time than hover/completion.
+        long requestStart = System.nanoTime();
         JsonNode response = requestCoalesced(method, params, timeoutMs, key, interactive);
+        if (log.isDebugEnabled()) {
+            log.debug("navegacao {} para {} respondeu em {}ms (cache miss)",
+                    method, uri, (System.nanoTime() - requestStart) / 1_000_000L);
+        }
         if (documents.version(uri) != version || workspaceRevision.get() != revision) {
             return Result.of(Status.STALE);
         }

@@ -10,16 +10,25 @@ import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaFileObject;
 import javax.tools.SimpleJavaFileObject;
+import javax.tools.JavaCompiler;
+import javax.tools.StandardJavaFileManager;
 import javax.tools.ToolProvider;
 import java.net.URI;
 import java.util.*;
 
-/** Syntax-only fallback: no attribution, classpath lookup or annotation processing. */
 public final class JavaLocalScope {
-    private static final Map<String, List<Scope>> CACHE = new LinkedHashMap<>(8, .75f, true);
+    private static final int CACHE_LIMIT = 32;
+    private static final Map<String, List<Scope>> CACHE = new LinkedHashMap<>(CACHE_LIMIT, .75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, List<Scope>> eldest) {
+            return size() > CACHE_LIMIT;
+        }
+    };
+    private static final Object PARSE_LOCK = new Object();
+    static final java.util.concurrent.atomic.AtomicLong PARSES = new java.util.concurrent.atomic.AtomicLong();
+    private static JavaCompiler compiler;
+    private static StandardJavaFileManager fileManager;
 
-    public record Scope(String name, Range declaration, boolean onDeclaration,
-                        int startLine, int endLine, List<Range> usages) { }
+    public record Scope(String name, Range declaration, boolean onDeclaration, int startLine, int endLine, List<Range> usages) { }
 
     private JavaLocalScope() { }
 
@@ -39,42 +48,57 @@ public final class JavaLocalScope {
         return range.start().line() == line && col >= range.start().col() && col < range.end().col();
     }
 
+    public static void warmUp() {
+        scopes("class Warmup { void run() { int value = 0; } }");
+    }
+
+    public static void preload(String source) {
+        if (source == null || source.isEmpty()) return;
+        scopes(source);
+    }
+
     private static List<Scope> scopes(String source) {
         synchronized (CACHE) {
             List<Scope> cached = CACHE.get(source);
             if (cached != null) return cached;
         }
-        List<Scope> parsed = parse(source);
-        synchronized (CACHE) {
-            CACHE.put(source, parsed);
-            while (CACHE.size() > 8) CACHE.remove(CACHE.keySet().iterator().next());
+        synchronized (PARSE_LOCK) {
+            synchronized (CACHE) {
+                List<Scope> cached = CACHE.get(source);
+                if (cached != null) return cached;
+            }
+            List<Scope> parsed = parse(source);
+            synchronized (CACHE) {
+                CACHE.put(source, parsed);
+            }
+            return parsed;
         }
-        return parsed;
     }
 
     private static List<Scope> parse(String source) {
+        PARSES.incrementAndGet();
         try {
-            var compiler = ToolProvider.getSystemJavaCompiler();
+            if (compiler == null) compiler = ToolProvider.getSystemJavaCompiler();
             if (compiler == null) return List.of();
             var diagnostics = new DiagnosticCollector<JavaFileObject>();
             JavaFileObject file = new SimpleJavaFileObject(URI.create("string:///Buffer.java"),
                     JavaFileObject.Kind.SOURCE) {
                 @Override public CharSequence getCharContent(boolean ignored) { return source; }
             };
-            try (var manager = compiler.getStandardFileManager(diagnostics, null, null)) {
-                JavacTask task = (JavacTask) compiler.getTask(null, manager, diagnostics,
-                        List.of("-proc:none"), null, List.of(file));
-                CompilationUnitTree unit = task.parse().iterator().next();
-                // Broken syntax can change nesting. Never guess a binding in that case.
-                if (diagnostics.getDiagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR)) {
-                    return List.of();
-                }
-                Scanner scanner = new Scanner(source, unit, Trees.instance(task).getSourcePositions());
-                scanner.scan(unit, null);
-                return scanner.symbols.stream().map(Symbol::snapshot).toList();
+            if (fileManager == null) fileManager = compiler.getStandardFileManager(null, null, null);
+            JavacTask task = (JavacTask) compiler.getTask(null, fileManager, diagnostics,
+                    List.of("-proc:none"), null, List.of(file));
+            CompilationUnitTree unit = task.parse().iterator().next();
+            // Broken syntax can change nesting. Never guess a binding in that case.
+            if (diagnostics.getDiagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR)) {
+                return List.of();
             }
+            Scanner scanner = new Scanner(source, unit, Trees.instance(task).getSourcePositions());
+            scanner.scan(unit, null);
+            return scanner.symbols.stream().map(Symbol::snapshot).toList();
         } catch (Exception | LinkageError unavailable) {
             // A host runtime without jdk.compiler still has semantic navigation through JDT LS.
+            fileManager = null;
             return List.of();
         }
     }

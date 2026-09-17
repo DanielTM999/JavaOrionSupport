@@ -458,6 +458,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void onProjectOpened(IdeProjectContext context) {
         log.info("onProjectOpened chamado na thread {}", Thread.currentThread().getName());
+        background.submit(JavaLocalScope::warmUp);
         bind(context);
     }
 
@@ -3044,17 +3045,22 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!isCtrlDefinitionClick(context)) return;
         long ticket = beginNavigation();
         long session = lifecycle.get();
+        long clickStart = System.nanoTime();
         background.submit(() -> {
             Result result = resolveNavigation(context.filePath(), context.text(),
                     context.line(), context.col(), Kind.DEFINITION);
             Kind kind = Kind.DEFINITION;
-            if (isOwnDeclaration(result.locations(), context)) {
+            if (isResolved(result) && isOwnDeclaration(result.locations(), context)) {
                 kind = Kind.REFERENCES;
                 result = JavaNavigation.restrict(resolveNavigation(context.filePath(), context.text(),
                         context.line(), context.col(), kind), Extent.DOCUMENT, context.filePath());
             }
             publishNavigationResult(ticket, session, context.editorContext(), context.filePath(),
                     context.text(), kind, result);
+            if (log.isDebugEnabled()) {
+                log.debug("ctrl+click resolvido em {}ms ({} destinos)",
+                        elapsedMs(clickStart), result.locations().size());
+            }
         });
     }
 
@@ -3067,7 +3073,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                                          Path file, String requestedText, Kind kind, Result result) {
         if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
         // Read snippets off the EDT, including snapshots of other open buffers.
-        List<UsagesPopup.Item> items = buildUsageItems(result.locations(), file, requestedText);
+        List<UsagesPopup.Item> items = needsUsagesPopup(kind, result.locations())
+                ? buildUsageItems(result.locations(), file, requestedText) : List.of();
         SwingUtilities.invokeLater(() -> {
             if (ticket != navigationRequestTicket.get() || session != lifecycle.get()
                     || editor == null || editorContextFor(file) == null
@@ -3076,10 +3083,19 @@ public class JavaIdeAdapter extends IdeAdapter {
         });
     }
 
+    private static boolean needsUsagesPopup(Kind kind, List<Location> targets) {
+        return targets != null && !targets.isEmpty()
+                && (targets.size() > 1 || kind == Kind.REFERENCES);
+    }
+
     private static List<Location> localDeclaration(Path filePath, JavaLocalScope.Scope scope) {
         Path file = JavaProjectConventions.normalize(filePath);
         return file == null ? List.of()
                 : List.of(Location.of(file.toUri().toString(), scope.declaration()));
+    }
+
+    static boolean isResolved(Result result) {
+        return result != null && (result.status() == Status.COMPLETE || result.status() == Status.LOCAL);
     }
 
     static boolean isOwnDeclaration(List<Location> definitions, IdeWordClickContext context) {
@@ -3644,14 +3660,15 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         javaEditors.put(JavaProjectConventions.normalize(editorContext.filePath()), editorContext);
-        diskBaseline.put(JavaProjectConventions.normalize(editorContext.filePath()),
-                editorContext.getText());
+        String openedText = editorContext.getText();
+        diskBaseline.put(JavaProjectConventions.normalize(editorContext.filePath()), openedText);
         if (activeJavaEditor == null) {
             activeJavaEditor = editorContext;
         }
         if (lsp != null) {
-            lsp.openDocument(editorContext.filePath(), editorContext.getText());
+            lsp.openDocument(editorContext.filePath(), openedText);
         }
+        background.submit(() -> JavaLocalScope.preload(openedText));
         SwingUtilities.invokeLater(editorContext::refreshCodeLenses);
     }
 
@@ -4161,24 +4178,47 @@ public class JavaIdeAdapter extends IdeAdapter {
     Result resolveNavigation(Path filePath, String source, int line, int col, Kind kind) {
         if (!JavaProjectConventions.isJava(filePath)) return Result.of(Status.UNAVAILABLE);
         // Spring property literals have their own identity; plain Java symbols belong to JDT LS.
+        long springStart = System.nanoTime();
         SpringNavigation.Target spring = springTargetAt(filePath, source, line, col);
+        long springMs = elapsedMs(springStart);
         if (kind == Kind.DEFINITION && spring != null && spring.kind() == SpringNavigation.Kind.CONFIG_KEY) {
             List<Location> keys = configKeyDefinitions(spring.token());
             if (!keys.isEmpty()) return new Result(Status.LOCAL, keys);
         }
         JdtLsService lsp = interactiveServerFor(filePath);
+        long lspStart = System.nanoTime();
         Result semantic = lsp == null ? Result.of(isIndexing(filePath) ? Status.INDEXING : Status.UNAVAILABLE)
                 : lsp.navigation(kind, filePath, source, line, col);
+        long lspMs = elapsedMs(lspStart);
         if (semantic.status() == Status.COMPLETE || semantic.status() == Status.STALE
-                || !semantic.locations().isEmpty()) return semantic;
+                || !semantic.locations().isEmpty()) {
+            logNavigationTiming(kind, filePath, semantic.status(), springMs, lspMs, 0);
+            return semantic;
+        }
         if (kind != Kind.IMPLEMENTATION) {
+            long scopeStart = System.nanoTime();
             JavaLocalScope.Scope scope = JavaLocalScope.at(source, line, col);
+            long scopeMs = elapsedMs(scopeStart);
+            logNavigationTiming(kind, filePath, semantic.status(), springMs, lspMs, scopeMs);
             if (scope != null) return new Result(Status.LOCAL, kind == Kind.DEFINITION
                     ? localDeclaration(filePath, scope)
                     : scope.usages().stream().map(range -> Location.of(
                             filePath.toAbsolutePath().normalize().toUri().toString(), range)).toList());
+            return semantic;
         }
+        logNavigationTiming(kind, filePath, semantic.status(), springMs, lspMs, 0);
         return semantic;
+    }
+
+    private static long elapsedMs(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000L;
+    }
+
+    private static void logNavigationTiming(Kind kind, Path filePath, Status status,
+                                            long springMs, long lspMs, long scopeMs) {
+        if (!log.isDebugEnabled()) return;
+        log.debug("navegacao {} em {}: status={} spring={}ms lsp={}ms localScope={}ms",
+                kind, filePath == null ? "?" : filePath.getFileName(), status, springMs, lspMs, scopeMs);
     }
 
     private boolean isSpringAnnotationLiteral(String line, int col) {
@@ -6368,7 +6408,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                                 actuator.beans(baseUrl),
                                 actuator.environment(baseUrl),
                                 actuator.mappings(baseUrl));
-                        adoptRuntimeBeans(data.beans());
+                         adoptRuntimeBeans(data.beans());
                     }
                 } catch (Exception e) {
                     log.debug("Falha ao consultar o Actuator: {}", e.getMessage());
