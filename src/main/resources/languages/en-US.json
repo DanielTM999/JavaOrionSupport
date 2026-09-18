@@ -846,5 +846,7 @@
   "JavaIdeAdapter.status.navigation.loading": "Java: finding targets...",
   "JavaIdeAdapter.status.navigation.local": "Java: local result",
   "JavaIdeAdapter.status.navigation.stale": "Java: code changed; try again",
-  "JavaIdeAdapter.status.navigation.unavailable": "Java: semantic navigation unavailable"
+  "JavaIdeAdapter.status.navigation.unavailable": "Java: semantic navigation unavailable",
+  "JavaIdeAdapter.action.clearBuild": "Clear build",
+  "JavaIdeAdapter.action.clearBuild.tip": "Clear the problems from the last build"
 }

@@ -846,5 +846,7 @@
   "JavaIdeAdapter.status.navigation.loading": "Java: buscando destinos...",
   "JavaIdeAdapter.status.navigation.local": "Java: resultado local",
   "JavaIdeAdapter.status.navigation.stale": "Java: o código mudou; tente novamente",
-  "JavaIdeAdapter.status.navigation.unavailable": "Java: navegação semântica indisponível"
+  "JavaIdeAdapter.status.navigation.unavailable": "Java: navegação semântica indisponível",
+  "JavaIdeAdapter.action.clearBuild": "Limpar build",
+  "JavaIdeAdapter.action.clearBuild.tip": "Limpar os problemas do ultimo build"
 }

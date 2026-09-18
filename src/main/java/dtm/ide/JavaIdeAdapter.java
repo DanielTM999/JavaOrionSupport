@@ -49,6 +49,7 @@ import dtm.ide.api.project.editor.NativeEditorType;
 import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
 import dtm.ide.api.theme.EditorTheme;
 import dtm.ide.api.project.diagnostics.IdeProblem;
+import dtm.ide.api.project.diagnostics.ProblemsActionHandle;
 import dtm.ide.build.BuildDiagnostic;
 import dtm.ide.build.BuildProgressTracker;
 import dtm.ide.build.BuildRequest;
@@ -291,6 +292,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
     private static final String BUILD_PROBLEMS_OWNER = "java.build";
     private static final String LSP_PROBLEMS_OWNER = "java.lsp";
+    private volatile ProblemsActionHandle clearBuildAction;
     private static final long RENAME_WAIT_BUDGET_MS = 60_000;
     private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
     private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
@@ -520,6 +522,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void onUnload() {
         lifecycle.incrementAndGet();
+        ProblemsActionHandle action = clearBuildAction;
+        clearBuildAction = null;
+        if (action != null) {
+            action.unregister();
+        }
         JdtLsService lsp = jdtLs;
         jdtLs = null;
         if (lsp != null) {
@@ -5764,8 +5771,27 @@ public class JavaIdeAdapter extends IdeAdapter {
                 }
                 publishProblems(BUILD_PROBLEMS_OWNER, build);
                 publishProblems(LSP_PROBLEMS_OWNER, live);
+                ProblemsActionHandle action = ensureClearBuildAction();
+                if (action != null) {
+                    action.setEnabled(!build.isEmpty());
+                }
             });
         }, PROBLEMS_REFRESH_DELAY_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private ProblemsActionHandle ensureClearBuildAction() {
+        ProblemsActionHandle handle = clearBuildAction;
+        if (handle != null) {
+            return handle;
+        }
+        handle = registerProblemsAction(
+                BUILD_PROBLEMS_OWNER,
+                text("action.clearBuild", "Limpar build"),
+                text("action.clearBuild.tip", "Limpar os problemas do ultimo build"),
+                JavaIcons.error(JavaIcons.SMALL),
+                this::clearBuildProblems);
+        clearBuildAction = handle;
+        return handle;
     }
 
     private static List<IdeProblem> toIdeProblems(List<BuildDiagnostic> problems) {
