@@ -56,7 +56,7 @@ class IncrementalJavaBuilderTest {
 
         assertTrue(result.successful());
         assertEquals(1, build.requests.size());
-        assertFalse(build.requests.getFirst().alsoMake());
+        assertTrue(build.requests.getFirst().alsoMake());
         assertTrue(javacCalls.isEmpty());
         assertTrue(Files.isRegularFile(root.resolve(".orion/incremental/web.state")));
     }
@@ -186,12 +186,42 @@ class IncrementalJavaBuilderTest {
         builder(descriptorWith("web", "persistence")).build(module(), false, line -> {
         });
 
-        assertEquals(List.of("persistence", "web"),
-                build.requests.stream().map(request -> request.module().artifactId()).toList());
+        assertEquals(1, build.requests.size());
+        assertTrue(build.requests.getFirst().alsoMake());
+        assertEquals(List.of("persistence", "web"), build.requests.getFirst().modules().stream()
+                .map(JavaModule::artifactId).toList());
     }
 
     @Test
-    void theModuleListenerFollowsTheDependencyOrder() {
+    void onlyTheModulesNeedingAFullBuildEnterTheBatch() {
+        pom("persistence");
+        write(root.resolve("persistence/src/main/java/a/Cliente.java"),
+                "package a; public class Cliente {}");
+        write(pomFile(), webPomWithPersistence(""));
+        source("Lojista.java", "package a; public class Lojista {}");
+        builder(descriptorWith("web", "persistence")).build(module(), false, line -> {
+        });
+        build.requests.clear();
+        write(pomFile(), webPomWithPersistence("<!-- nova dependencia -->"));
+
+        builder(descriptorWith("web", "persistence")).build(module(), false, line -> {
+        });
+
+        assertEquals(1, build.requests.size());
+        assertEquals(List.of("web"), build.requests.getFirst().modules().stream()
+                .map(JavaModule::artifactId).toList());
+        assertTrue(javacCalls.isEmpty());
+    }
+
+    private String webPomWithPersistence(String extra) {
+        return "<project><groupId>com.example</groupId><artifactId>web</artifactId>"
+                + "<dependencies><dependency><groupId>com.example</groupId>"
+                + "<artifactId>persistence</artifactId></dependency></dependencies>"
+                + extra + "</project>";
+    }
+
+    @Test
+    void theModuleListenerAnnouncesTheBatchOnItsFirstModule() {
         pom("persistence");
         write(pomFile(), "<project><groupId>com.example</groupId><artifactId>web</artifactId>"
                 + "<dependencies><dependency><groupId>com.example</groupId>"
@@ -205,7 +235,7 @@ class IncrementalJavaBuilderTest {
                 .build(module(), false, line -> {
                 });
 
-        assertEquals(List.of("persistence 1/2", "web 2/2"), steps);
+        assertEquals(List.of("persistence 1/2"), steps);
     }
 
     @Test
@@ -395,9 +425,11 @@ class IncrementalJavaBuilderTest {
         @Override
         public BuildResult execute(BuildRequest request, Consumer<String> output) {
             requests.add(request);
-            try {
-                Files.createDirectories(request.module().outputDir());
-            } catch (Exception ignored) {
+            for (JavaModule module : request.selection()) {
+                try {
+                    Files.createDirectories(module.outputDir());
+                } catch (Exception ignored) {
+                }
             }
             return new BuildResult(0, List.of(), Duration.ZERO, "maven");
         }

@@ -295,16 +295,32 @@ public final class MavenBuildService implements BuildSystem {
     }
 
     private void appendModuleSelection(List<String> command, JavaModule module) {
-        appendModuleSelection(command, module, true);
+        appendModuleSelection(command, module == null ? List.of() : List.of(module), true);
     }
 
-    private void appendModuleSelection(List<String> command, JavaModule module, boolean alsoMake) {
-        if (module != null && !module.root().equals(descriptor.root())) {
-            command.add("-pl");
-            command.add(relativeModulePath(module));
-            if (alsoMake) {
-                command.add("-am");
+    private void appendModuleSelection(List<String> command, BuildRequest request) {
+        appendModuleSelection(command, request.selection(), request.alsoMake());
+    }
+
+    private void appendModuleSelection(List<String> command, List<JavaModule> selection,
+                                       boolean alsoMake) {
+        List<String> paths = new ArrayList<>();
+        for (JavaModule module : selection) {
+            if (module == null || module.root().equals(descriptor.root())) {
+                continue;
             }
+            String path = relativeModulePath(module);
+            if (!paths.contains(path)) {
+                paths.add(path);
+            }
+        }
+        if (paths.isEmpty()) {
+            return;
+        }
+        command.add("-pl");
+        command.add(String.join(",", paths));
+        if (alsoMake) {
+            command.add("-am");
         }
     }
 
@@ -312,7 +328,7 @@ public final class MavenBuildService implements BuildSystem {
         List<String> command = new ArrayList<>(baseCommand());
         command.addAll(goalsFor(request.action()));
 
-        appendModuleSelection(command, request.module(), request.alsoMake());
+        appendModuleSelection(command, request);
         Set<String> profiles = new LinkedHashSet<>(request.profiles());
         profiles.addAll(activeProfiles());
         if (!profiles.isEmpty()) {

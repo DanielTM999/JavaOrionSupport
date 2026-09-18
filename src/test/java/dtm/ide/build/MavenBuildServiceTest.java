@@ -58,6 +58,31 @@ class MavenBuildServiceTest {
         assertFalse(command.contains("-am"));
     }
 
+    @Test
+    void severalModulesAreSelectedInASingleReactor() {
+        JavaModule core = module(root.resolve("core"));
+        JavaModule api = module(root.resolve("api"));
+        MavenBuildService service = service(descriptor(rootModule(), core, api));
+
+        List<String> command = service.buildCommand(BuildRequest.of(
+                BuildSystem.BuildAction.COMPILE, api).withModules(List.of(core, api)));
+
+        assertTrue(command.contains("-pl"));
+        assertEquals("core,api", command.get(command.indexOf("-pl") + 1));
+        assertTrue(command.contains("-am"));
+    }
+
+    @Test
+    void theAggregatorIsDroppedFromTheModuleSelection() {
+        JavaModule api = module(root.resolve("api"));
+        MavenBuildService service = service(descriptor(rootModule(), api));
+
+        List<String> command = service.buildCommand(BuildRequest.of(
+                BuildSystem.BuildAction.COMPILE, api).withModules(List.of(rootModule(), api)));
+
+        assertEquals("api", command.get(command.indexOf("-pl") + 1));
+    }
+
     private MavenBuildService service(JavaProjectDescriptor descriptor) {
         BuildToolProvisioner provisioner = new BuildToolProvisioner(null, null) {
             @Override

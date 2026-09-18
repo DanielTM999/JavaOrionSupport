@@ -86,13 +86,46 @@ public final class IncrementalJavaBuilder {
     public BuildResult build(JavaModule target, boolean includeTests, Consumer<String> output) {
         Instant start = Instant.now();
         List<JavaModule> order = WorkspaceModuleGraph.of(descriptor).buildOrderFor(target);
-        List<BuildDiagnostic> diagnostics = new ArrayList<>();
-        int total = order.size() + (includeTests ? 1 : 0);
+        List<ModulePlan> plans = new ArrayList<>();
+        List<ModulePlan> pending = new ArrayList<>();
+        for (JavaModule module : order) {
+            ModulePlan plan = planOf(module, false);
+            plans.add(plan);
+            if (plan.full()) {
+                pending.add(plan);
+            }
+        }
 
-        for (int index = 0; index < order.size(); index++) {
-            JavaModule module = order.get(index);
-            moduleListener.starting(module, index + 1, total);
-            BuildResult result = buildModule(module, false, output);
+        List<BuildDiagnostic> diagnostics = new ArrayList<>();
+        int total = plans.size() + (includeTests ? 1 : 0);
+
+        if (!pending.isEmpty()) {
+            List<JavaModule> modules = new ArrayList<>();
+            for (ModulePlan plan : pending) {
+                modules.add(plan.module());
+            }
+            moduleListener.starting(pending.getFirst().module(), 1, total);
+            BuildResult result = delegateAll(modules, false, output, pending.getFirst().reason());
+            diagnostics.addAll(result.diagnostics());
+            if (!result.successful()) {
+                return new BuildResult(result.exitCode(), diagnostics,
+                        Duration.between(start, Instant.now()), result.command());
+            }
+            for (ModulePlan plan : pending) {
+                if (plan.fingerprint() != null) {
+                    refreshState(plan.module(), false, plan.state(), plan.fingerprint(),
+                            plan.stateFile());
+                }
+            }
+        }
+
+        for (int index = 0; index < plans.size(); index++) {
+            ModulePlan plan = plans.get(index);
+            if (plan.full()) {
+                continue;
+            }
+            moduleListener.starting(plan.module(), index + 1, total);
+            BuildResult result = buildIncremental(plan, false, output);
             diagnostics.addAll(result.diagnostics());
             if (!result.successful()) {
                 return new BuildResult(result.exitCode(), diagnostics,
@@ -120,24 +153,39 @@ public final class IncrementalJavaBuilder {
         return runner.isRunning();
     }
 
-    private BuildResult buildModule(JavaModule module, boolean test, Consumer<String> output) {
-        Path outputDir = outputDirOf(module, test);
-        Optional<String> classpath = classpathOf(module, test);
-        if (classpath.isEmpty()) {
-            return delegate(module, test, output, "classpath nao resolvido");
-        }
+    private record ModulePlan(JavaModule module, String classpath, ModuleBuildState state,
+                              String fingerprint, Path stateFile, boolean full, String reason) {
+    }
 
+    private ModulePlan planOf(JavaModule module, boolean test) {
         Path stateFile = stateFileOf(module, test);
         ModuleBuildState state = ModuleBuildState.load(stateFile);
-        String fingerprint = fingerprintOf(module, classpath.get());
-        if (!state.isUsable(fingerprint) || !Files.isDirectory(outputDir)) {
-            BuildResult result = delegate(module, test, output, "estado incremental ausente");
-            if (result.successful()) {
-                refreshState(module, test, state, fingerprint, stateFile);
-            }
-            return result;
+        Optional<String> classpath = classpathOf(module, test);
+        if (classpath.isEmpty()) {
+            return new ModulePlan(module, null, state, null, stateFile, true,
+                    "classpath nao resolvido");
         }
+        String fingerprint = fingerprintOf(module, classpath.get());
+        boolean full = !state.isUsable(fingerprint) || !Files.isDirectory(outputDirOf(module, test));
+        return new ModulePlan(module, classpath.get(), state, fingerprint, stateFile, full,
+                full ? "estado incremental ausente" : null);
+    }
 
+    private BuildResult buildModule(JavaModule module, boolean test, Consumer<String> output) {
+        ModulePlan plan = planOf(module, test);
+        if (!plan.full()) {
+            return buildIncremental(plan, test, output);
+        }
+        BuildResult result = delegate(module, test, output, plan.reason());
+        if (result.successful() && plan.fingerprint() != null) {
+            refreshState(module, test, plan.state(), plan.fingerprint(), plan.stateFile());
+        }
+        return result;
+    }
+
+    private BuildResult buildIncremental(ModulePlan plan, boolean test, Consumer<String> output) {
+        JavaModule module = plan.module();
+        ModuleBuildState state = plan.state();
         List<Path> sources = collectSources(module, test);
         ModuleBuildState.Changes changes = state.changes(module.root(), sources);
         if (changes.isEmpty()) {
@@ -153,7 +201,8 @@ public final class IncrementalJavaBuilder {
             return ok();
         }
 
-        BuildResult result = compile(module, test, toCompile, classpath.get(), outputDir, output);
+        BuildResult result = compile(module, test, toCompile, plan.classpath(),
+                outputDirOf(module, test), output);
         if (result.successful()) {
             applyDeletions(module, test, state, changes);
             for (Path source : toCompile) {
@@ -167,8 +216,8 @@ public final class IncrementalJavaBuilder {
         }
         log.info("javac falhou sem diagnosticos em {}; voltando para o Maven", module.artifactId());
         BuildResult fallback = delegate(module, test, output, "javac indisponivel");
-        if (fallback.successful()) {
-            refreshState(module, test, state, fingerprint, stateFile);
+        if (fallback.successful() && plan.fingerprint() != null) {
+            refreshState(module, test, state, plan.fingerprint(), plan.stateFile());
         }
         return fallback;
     }
@@ -250,18 +299,32 @@ public final class IncrementalJavaBuilder {
 
     private BuildResult delegate(JavaModule module, boolean test, Consumer<String> output,
                                  String reason) {
+        return delegateAll(List.of(module), test, output, reason);
+    }
+
+    private BuildResult delegateAll(List<JavaModule> modules, boolean test,
+                                    Consumer<String> output, String reason) {
         BuildSystem build = buildSupplier.get();
         if (build == null) {
             return new BuildResult(-1, List.of(new BuildDiagnostic(null, 0, 0, null,
                     "Nenhum build system disponivel.", "build")), Duration.ZERO, "maven");
         }
-        emit(output, "[" + module.artifactId() + "] build completo (" + reason + ")");
+        emit(output, "[" + labelOf(modules) + "] build completo (" + reason + ")");
         BuildSystem.BuildAction action = test
                 ? BuildSystem.BuildAction.TEST_COMPILE
                 : BuildSystem.BuildAction.COMPILE;
-        return build.execute(BuildRequest.of(action, module)
-                .withSkipTests(true)
-                .withAlsoMake(false), output);
+        JavaModule last = modules.isEmpty() ? null : modules.getLast();
+        return build.execute(BuildRequest.of(action, last)
+                .withModules(modules)
+                .withSkipTests(true), output);
+    }
+
+    private static String labelOf(List<JavaModule> modules) {
+        List<String> names = new ArrayList<>();
+        for (JavaModule module : modules) {
+            names.add(module.artifactId());
+        }
+        return String.join(", ", names);
     }
 
     private void refreshState(JavaModule module, boolean test, ModuleBuildState state,
