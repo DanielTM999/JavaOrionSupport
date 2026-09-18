@@ -29,6 +29,11 @@ public record BuildDiagnostic(
         return file != null && line > 0;
     }
 
+    public dtm.ide.api.project.diagnostics.IdeProblem toIdeProblem() {
+        return new dtm.ide.api.project.diagnostics.IdeProblem(
+                file, line, column, severity, message, source, "");
+    }
+
     public dtm.stools.component.panels.editor.code.diagnostics.Diagnostic toEditorDiagnostic() {
         int editorLine = Math.max(0, line - 1);
         int editorColumn = Math.max(0, column - 1);

@@ -48,6 +48,7 @@ import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.NativeEditorType;
 import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
 import dtm.ide.api.theme.EditorTheme;
+import dtm.ide.api.project.diagnostics.IdeProblem;
 import dtm.ide.build.BuildDiagnostic;
 import dtm.ide.build.BuildProgressTracker;
 import dtm.ide.build.BuildRequest;
@@ -180,7 +181,6 @@ import dtm.ide.todo.TodoScanner;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaProjectStructurePanel;
 import dtm.ide.ui.JavaTodoPanel;
-import dtm.ide.ui.JavaProblemsPanel;
 import dtm.ide.ui.JavaIcons;
 import dtm.ide.ui.JavaDebugValuePopup;
 import dtm.ide.ui.JavaEvaluateDialog;
@@ -289,6 +289,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
+    private static final String BUILD_PROBLEMS_OWNER = "java.build";
+    private static final String LSP_PROBLEMS_OWNER = "java.lsp";
     private static final long RENAME_WAIT_BUDGET_MS = 60_000;
     private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
     private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
@@ -408,8 +410,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicLong todoRefreshTicket = new AtomicLong();
     private volatile JavaTodoPanel todoPanel;
     private volatile String todoPanelId;
-    private volatile JavaProblemsPanel problemsPanel;
-    private volatile String problemsPanelId;
     private volatile JavaProjectStructurePanel structurePanel;
     private volatile JavaBuildToolsPanel buildToolsPanel;
     private volatile String buildToolsPanelId;
@@ -5745,64 +5745,40 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private void ensureProblemsPanel() {
-        if (problemsPanel != null) {
-            refreshProblemsPanel();
-            return;
-        }
-        JavaProblemsPanel panel = new JavaProblemsPanel(new ProblemsHost());
-        problemsPanel = panel;
-        Icon icon = JavaIcons.error(JavaIcons.SMALL);
-        problemsPanelId = icon == null
-                ? registerToolPanel(DockRegion.BOTTOM, text("panel.problems", "Problemas"),
-                        ToolIconType.INFO, panel, new Dimension(920, 320))
-                : registerToolPanel(DockRegion.BOTTOM, text("panel.problems", "Problemas"),
-                        icon, panel, new Dimension(920, 320));
-        refreshProblemsPanel();
-    }
-
     private void openProblemsPanel() {
-        ensureProblemsPanel();
-        if (problemsPanelId != null) {
-            requestOpenToolPanel(problemsPanelId);
-        }
+        refreshProblemsPanel();
+        requestOpenProblemsPanel();
     }
 
     private void refreshProblemsPanel() {
-        if (problemsPanel == null) {
-            return;
-        }
         long ticket = problemsRefreshTicket.incrementAndGet();
         background.schedule(() -> {
             if (ticket != problemsRefreshTicket.get()) {
                 return;
             }
-            List<BuildDiagnostic> build = problems.buildProblems();
-            List<BuildDiagnostic> live = problems.liveProblems();
-            Path root = projectRoot;
+            List<IdeProblem> build = toIdeProblems(problems.buildProblems());
+            List<IdeProblem> live = toIdeProblems(problems.liveProblems());
             SwingUtilities.invokeLater(() -> {
-                JavaProblemsPanel panel = problemsPanel;
-                if (panel != null && ticket == problemsRefreshTicket.get()) {
-                    panel.setProblems(build, live, root);
+                if (ticket != problemsRefreshTicket.get()) {
+                    return;
                 }
+                publishProblems(BUILD_PROBLEMS_OWNER, build);
+                publishProblems(LSP_PROBLEMS_OWNER, live);
             });
         }, PROBLEMS_REFRESH_DELAY_MS, TimeUnit.MILLISECONDS);
     }
 
-    private final class ProblemsHost implements JavaProblemsPanel.Host {
-        @Override
-        public void open(BuildDiagnostic problem) {
-            if (problem == null || problem.file() == null) {
-                return;
+    private static List<IdeProblem> toIdeProblems(List<BuildDiagnostic> problems) {
+        if (problems == null || problems.isEmpty()) {
+            return List.of();
+        }
+        List<IdeProblem> converted = new ArrayList<>(problems.size());
+        for (BuildDiagnostic problem : problems) {
+            if (problem != null) {
+                converted.add(problem.toIdeProblem());
             }
-            getEditor(problem.file(), true, editor -> editor.setCaretPosition(
-                    Math.max(0, problem.line() - 1), Math.max(0, problem.column() - 1)));
         }
-
-        @Override
-        public void clearBuildProblems() {
-            JavaIdeAdapter.this.clearBuildProblems();
-        }
+        return converted;
     }
 
     private void clearBuildProblems() {
@@ -6532,16 +6508,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         Set<Path> affected = problems.replaceBuild(published);
         affected.forEach(this::requestRefreshDiagnostics);
 
-        SwingUtilities.invokeLater(() -> {
-            if (revealOnFailure && !result.successful()) {
-                ensureProblemsPanel();
-            } else {
-                refreshProblemsPanel();
-            }
-            if (revealOnFailure && !result.successful() && problemsPanelId != null) {
-                requestOpenToolPanel(problemsPanelId);
-            }
-        });
+        refreshProblemsPanel();
+        if (revealOnFailure && !result.successful()) {
+            SwingUtilities.invokeLater(this::requestOpenProblemsPanel);
+        }
     }
 
     private void writeOutput(OutputPanelHandle panel, String line) {
