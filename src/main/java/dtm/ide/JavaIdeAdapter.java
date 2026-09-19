@@ -273,6 +273,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Slf4j
@@ -289,6 +290,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long COVERAGE_POLL_INTERVAL_MS = 400L;
     private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
+    private static final int CODE_LENS_TOOLTIP_TARGETS = 8;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
     private static final String BUILD_PROBLEMS_OWNER = "java.build";
     private static final String LSP_PROBLEMS_OWNER = "java.lsp";
@@ -1641,7 +1643,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .show());
 
         if (choice != null && choice == 2) {
-            showUsagesPopup(usages, null, null, null, null);
+            showUsagesPopup(usages, null, null, null, null, Kind.REFERENCES);
             return false;
         }
 
@@ -2075,24 +2077,9 @@ public class JavaIdeAdapter extends IdeAdapter {
                 List<Location> targets = uniqueLocations(lens.locations());
                 Kind lensKind = Kind.forLens(lens.command());
                 if (lensKind == null) continue;
-                String lensTitle = lens.status() == Status.COMPLETE
-                        ? targets.size() + " " + (lensKind == Kind.IMPLEMENTATION
-                                ? text("navigation.implementations", "implementacao(oes)")
-                                : text("navigation.usages", "uso(s)"))
-                        : text(lens.status() == Status.FAILED ? "lens.failed" : "lens.loading",
-                                lens.status() == Status.FAILED ? "Tentar novamente" : "Buscando...");
-                if (targets.isEmpty() && lensTitle.stripLeading().startsWith("0 ")) {
-                    continue;
-                }
-                int lensLine = Math.max(0, lens.range().start().line());
-                int lensCol = Math.max(0, lens.range().start().col());
-                CodeLensItem item = CodeLensItem.builder()
-                        .text(lensTitle)
-                        .tooltip(codeLensTooltip(lensTitle, targets))
-                        .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
-                        .onClick(event -> openLensNavigation(lensKind, context, lensLine, lensCol))
-                        .build();
-                lenses.add(CodeLens.inline(lensLine, item));
+                CodeLensItem item = lensItem(lensKind, lens.status(), targets, context);
+                if (item == null) continue;
+                lenses.add(CodeLens.inline(Math.max(0, lens.range().start().line()), item));
             }
         }
 
@@ -2272,6 +2259,62 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
+    private CodeLensItem lensItem(Kind kind, Status status, List<Location> targets,
+                                  IdeCodeLensContext context) {
+        if (status == Status.COMPLETE) {
+            if (targets.isEmpty()) return null;
+            return CodeLensItem.builder()
+                    .text(countLabel(kind, targets.size()))
+                    .tooltip(codeLensTooltip(targets))
+                    .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+                    .onClick(event -> openLensTargets(kind, context, targets, event))
+                    .build();
+        }
+        if (status == Status.FAILED) {
+            return CodeLensItem.builder()
+                    .text(text("lens.failed", "Tentar novamente"))
+                    .tooltip(text("status.navigation.failed", "Java: a busca falhou; tente novamente"))
+                    .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+                    .onClick(event -> requestRefreshCodeLenses(context.filePath()))
+                    .build();
+        }
+        return CodeLensItem.builder()
+                .text(text("lens.loading", "Buscando..."))
+                .tooltip(text("status.navigation.indexing",
+                        "Java: indexacao em andamento; tente novamente"))
+                .build();
+    }
+
+    private String countLabel(Kind kind, int count) {
+        boolean one = count == 1;
+        String key = switch (kind) {
+            case IMPLEMENTATION -> one ? "navigation.implementation" : "navigation.implementations";
+            case DEFINITION -> one ? "navigation.definition" : "navigation.definitions";
+            case REFERENCES -> one ? "navigation.usage" : "navigation.usages";
+        };
+        String fallback = switch (kind) {
+            case IMPLEMENTATION -> one ? "implementacao" : "implementacoes";
+            case DEFINITION -> one ? "definicao" : "definicoes";
+            case REFERENCES -> one ? "uso" : "usos";
+        };
+        return count + " " + text(key, fallback);
+    }
+
+    private void openLensTargets(Kind kind, IdeCodeLensContext context, List<Location> targets,
+                                 CodeLensClickEvent event) {
+        if (targets.isEmpty()) return;
+        if (targets.size() == 1 && kind != Kind.REFERENCES) {
+            Location target = targets.getFirst();
+            navigateToLocation(target, pathFromLocation(target));
+            return;
+        }
+        IdeEditorContext editor = editorContextFor(context.filePath());
+        MouseEvent mouse = event == null ? null : event.mouseEvent();
+        Point screen = mouse == null ? null : mouse.getLocationOnScreen();
+        showUsagesPopup(targets, context.filePath(),
+                editor == null ? context.text() : editor.getText(), editor, screen, kind);
+    }
+
     private void openSpringTargets(List<Location> targets, IdeCodeLensContext context,
                                    CodeLensClickEvent event) {
         if (targets.isEmpty()) {
@@ -2281,7 +2324,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         MouseEvent mouse = event == null ? null : event.mouseEvent();
         Point screen = mouse == null ? null : mouse.getLocationOnScreen();
         showUsagesPopup(targets, context.filePath(), context.text(),
-                editorContextFor(context.filePath()), screen);
+                editorContextFor(context.filePath()), screen, Kind.REFERENCES);
     }
 
     private void addRunLens(List<CodeLens> lenses, IdeCodeLensContext context) {
@@ -2385,21 +2428,23 @@ public class JavaIdeAdapter extends IdeAdapter {
                 : MainClassScanner.inspect(file, source, module, test);
     }
 
-    private void openLensNavigation(Kind kind, IdeCodeLensContext context, int line, int col) {
-        IdeEditorContext editor = editorContextFor(context.filePath());
-        if (editor == null) return;
-        if (!Objects.equals(editor.getText(), context.text())) {
-            requestRefreshCodeLenses(context.filePath());
-            setStatusBarText(text("status.navigation.stale", "Java: o codigo mudou; tente novamente"));
-            return;
-        }
-        long ticket = beginNavigation(), session = lifecycle.get();
-        background.submit(() -> publishNavigationResult(ticket, session, editor, context.filePath(),
-                context.text(), kind, resolveNavigation(context.filePath(), context.text(), line, col, kind)));
+    private static String codeLensTooltip(List<Location> locations) {
+        String body = locations.stream()
+                .limit(CODE_LENS_TOOLTIP_TARGETS)
+                .map(location -> escapeHtml(locationLabel(location)))
+                .collect(Collectors.joining("<br>"));
+        return "<html>" + (locations.size() > CODE_LENS_TOOLTIP_TARGETS ? body + "<br>…" : body)
+                + "</html>";
     }
 
-    private static String codeLensTooltip(String title, List<Location> locations) {
-        return locations.isEmpty() ? title : title + " (" + locations.size() + ")";
+    private static String escapeHtml(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    private static String locationLabel(Location location) {
+        Path path = JavaNavigation.path(location);
+        String name = path == null ? location.uri() : path.getFileName().toString();
+        return name + ":" + (location.range().start().line() + 1);
     }
 
     private void runTestFromLens(JavaTest test, boolean debug) {
@@ -2419,11 +2464,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
-                                 IdeEditorContext context, Point screen) {
+                                 IdeEditorContext context, Point screen, Kind kind) {
         long session = lifecycle.get();
         background.submit(() -> {
             List<UsagesPopup.Item> items = buildUsageItems(locations, currentFile, currentText);
-            String header = items.size() + " " + text("navigation.usages", "uso(s)");
+            String header = countLabel(kind, items.size());
             SwingUtilities.invokeLater(() -> {
                 if (session == lifecycle.get()) openUsagesPopup(context, screen, header, items);
             });
@@ -2553,7 +2598,11 @@ public class JavaIdeAdapter extends IdeAdapter {
             navigateToClassFile(location);
             return;
         }
-        if (path == null) return;
+        if (path == null) {
+            setStatusBarText(text("status.navigation.unsupportedTarget",
+                    "Java: nao foi possivel abrir este destino"));
+            return;
+        }
         getEditor(path, true, editor -> editor.setCaretPosition(
                 location.range().start().line(), location.range().start().col()));
     }
@@ -3083,9 +3132,17 @@ public class JavaIdeAdapter extends IdeAdapter {
         List<UsagesPopup.Item> items = needsUsagesPopup(kind, result.locations())
                 ? buildUsageItems(result.locations(), file, requestedText) : List.of();
         SwingUtilities.invokeLater(() -> {
-            if (ticket != navigationRequestTicket.get() || session != lifecycle.get()
-                    || editor == null || editorContextFor(file) == null
-                    || !Objects.equals(requestedText, editor.getText())) return;
+            if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
+            if (editor == null || editorContextFor(file) == null) {
+                setStatusBarText(text("status.navigation.unavailable",
+                        "Java: navegacao semantica indisponivel"));
+                return;
+            }
+            if (!Objects.equals(requestedText, editor.getText())) {
+                setStatusBarText(text("status.navigation.stale",
+                        "Java: o codigo mudou; tente novamente"));
+                return;
+            }
             showNavigationResult(editor, kind, result, items);
         });
     }
@@ -3200,12 +3257,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             navigateToLocation(target, pathFromLocation(target));
             return;
         }
-        String label = switch (kind) {
-            case IMPLEMENTATION -> text("navigation.implementations", "implementacao(oes)");
-            case DEFINITION -> text("navigation.definitions", "definicao(oes)");
-            case REFERENCES -> text("navigation.usages", "uso(s)");
-        };
-        openUsagesPopup(context, null, targets.size() + " " + label, items);
+        openUsagesPopup(context, null, countLabel(kind, items.size()), items);
     }
 
     @Override
