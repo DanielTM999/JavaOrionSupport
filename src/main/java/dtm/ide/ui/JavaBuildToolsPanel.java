@@ -640,6 +640,13 @@ public final class JavaBuildToolsPanel extends JPanel {
     }
 
     private void showSelectionDetail() {
+        List<String> goals = selectedGoals();
+        if (goals.size() > 1) {
+            String summary = String.join(", ", goals);
+            selection.setText(summary);
+            selection.setToolTipText(summary);
+            return;
+        }
         TreeNode<BuildToolModel.Node> selected = tree.getSelectedNode();
         BuildToolModel.Node value = selected == null ? null : selected.getData();
         if (value == null) {

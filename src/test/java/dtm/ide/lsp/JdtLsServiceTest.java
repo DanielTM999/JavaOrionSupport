@@ -181,6 +181,51 @@ class JdtLsServiceTest {
     }
 
     @Test
+    void codeLensRefreshAfterTypingIsDebounced() throws Exception {
+        JdtLsService service = new JdtLsService(null, null, null, null);
+        Path source = root.resolve("Debounced.java").toAbsolutePath().normalize();
+        service.openDocument(source, "class Debounced {}");
+        java.util.concurrent.atomic.AtomicInteger refreshed = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<String> latestText =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        service.setCodeLensRefreshListener(path -> {
+            refreshed.incrementAndGet();
+            latestText.set(service.documentContent(path));
+        });
+        try {
+            service.changeDocument(source, "class Debounced {");
+            service.changeDocument(source, "class Debounced {}");
+
+            assertEquals(0, refreshed.get());
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+            while (refreshed.get() == 0 && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+            assertEquals(1, refreshed.get());
+            assertEquals("class Debounced {}", latestText.get());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void closingDocumentCancelsPendingCodeLensRefresh() throws Exception {
+        JdtLsService service = new JdtLsService(null, null, null, null);
+        Path source = root.resolve("Closed.java").toAbsolutePath().normalize();
+        service.openDocument(source, "class Closed {}");
+        java.util.concurrent.atomic.AtomicInteger refreshed = new java.util.concurrent.atomic.AtomicInteger();
+        service.setCodeLensRefreshListener(path -> refreshed.incrementAndGet());
+        try {
+            service.changeDocument(source, "class Closed { }");
+            service.closeDocument(source);
+            Thread.sleep(1_000);
+            assertEquals(0, refreshed.get());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void createsMinimalIncrementalDocumentChange() {
         var change = JdtLsService.incrementalDocumentChange(

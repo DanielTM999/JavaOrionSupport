@@ -135,6 +135,7 @@ public class JdtLsService {
     private static final long CODE_LENS_RETRY_TIMEOUT_MS = 20_000;
     private static final int MAX_CODE_LENS_RETRIES = 2;
     private static final long CODE_LENS_WORK_REFRESH_COOLDOWN_MS = 2_000;
+    private static final long CODE_LENS_EDIT_REFRESH_DELAY_MS = 800;
     private static final long WARM_UP_TIMEOUT_MS = 8_000;
 
     private static final List<String> TOKEN_TYPES = List.of(
@@ -160,6 +161,7 @@ public class JdtLsService {
     private final Map<Path, List<JsonNode>> rawDiagnosticsByPath = new ConcurrentHashMap<>();
     private final Map<String, SymbolCache> symbolCache = new ConcurrentHashMap<>();
     private final Map<String, LensWork> codeLensCache = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> codeLensRefreshTickets = new ConcurrentHashMap<>();
     private final Map<String, CompletionCache> completionCache = new ConcurrentHashMap<>();
     private final Map<String, List<Location>> navigationCache = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<JsonNode>> inFlightRequests = new ConcurrentHashMap<>();
@@ -726,6 +728,7 @@ public class JdtLsService {
         symbolCache.clear();
         codeLensCache.values().forEach(LensWork::cancel);
         codeLensCache.clear();
+        codeLensRefreshTickets.clear();
         completionCache.clear();
         inFlightRequests.clear();
         workspaceWorkTokens.clear();
@@ -1081,7 +1084,7 @@ public class JdtLsService {
         String content = text == null ? "" : text;
         String previous = documents.put(uri, content);
         if (!content.equals(previous)) {
-            documentContentChanged(filePath, uri);
+            documentContentChanged(filePath, uri, false);
         }
         if (!canSyncDocuments()) {
             return;
@@ -1103,7 +1106,7 @@ public class JdtLsService {
             return;
         }
         String previous = documents.put(uri, content);
-        documentContentChanged(filePath, uri);
+        documentContentChanged(filePath, uri, true);
 
         if (!canSyncDocuments()) {
             return;
@@ -1120,6 +1123,7 @@ public class JdtLsService {
             return;
         }
         String uri = LspConversions.toUri(filePath);
+        codeLensRefreshTickets.remove(uri);
         boolean wasSynced = documents.unmarkSynced(uri);
         documents.remove(uri);
         diagnosticsByPath.remove(normalizePath(filePath));
@@ -1463,17 +1467,16 @@ public class JdtLsService {
         });
     }
 
-    private void invalidateNavigationForEdit(Path filePath) {
+    private void invalidateNavigationForEdit() {
         workspaceRevision.incrementAndGet();
         navigationCache.clear();
-        if (filePath != null) onCodeLensRefresh.accept(filePath);
     }
 
-    private void documentContentChanged(Path filePath, String uri) {
+    private void documentContentChanged(Path filePath, String uri, boolean deferCodeLensRefresh) {
         symbolCache.remove(uri);
         discardCodeLenses(uri);
         completionCache.remove(uri);
-        invalidateNavigationForEdit(filePath);
+        invalidateNavigationForEdit();
         cancelInFlightForUri(uri);
         Path key = normalizePath(filePath);
         boolean hadDiagnostics = diagnosticsByPath.remove(key) != null;
@@ -1481,6 +1484,28 @@ public class JdtLsService {
         if (hadDiagnostics) {
             onDiagnosticsPublished.accept(filePath);
         }
+        if (deferCodeLensRefresh) {
+            scheduleCodeLensRefresh(filePath, uri);
+        } else if (filePath != null) {
+            onCodeLensRefresh.accept(filePath);
+        }
+    }
+
+    private void scheduleCodeLensRefresh(Path filePath, String uri) {
+        if (filePath == null || uri == null) {
+            return;
+        }
+        AtomicLong ticket = codeLensRefreshTickets.computeIfAbsent(uri, ignored -> new AtomicLong());
+        long currentTicket = ticket.incrementAndGet();
+        CompletableFuture.delayedExecutor(CODE_LENS_EDIT_REFRESH_DELAY_MS, TimeUnit.MILLISECONDS, executor)
+                .execute(() -> {
+                    AtomicLong latest = codeLensRefreshTickets.get(uri);
+                    if (latest != ticket || latest.get() != currentTicket
+                            || documents.content(uri) == null) {
+                        return;
+                    }
+                    onCodeLensRefresh.accept(filePath);
+                });
     }
 
     static Map<String, Object> incrementalDocumentChange(String previous, String current) {

@@ -192,6 +192,20 @@ class JavaBuildToolsPanelTest {
     }
 
     @Test
+    void selectionSummaryShowsAllSelectedGoals() throws Exception {
+        BuildToolModel model = modelWithCommands("demo", "clean", "compile", "install");
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(hostReturning(model)));
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 5);
+
+        onEdtRun(() -> tree.selectNodes(List.of(
+                goalNodes(tree).get(2), goalNodes(tree).get(0), goalNodes(tree).get(1))));
+
+        assertEquals("clean, compile, install",
+                onEdt(() -> findLabelWithText(panel, "clean, compile, install").getText()));
+    }
+
+    @Test
     void theContextMenuRunsTheWholeSelectionJustLikeThePlayButton() throws Exception {
         AtomicReference<String> executed = new AtomicReference<>();
         BuildToolModel model = modelWithCommands("demo", "clean", "compile", "install");
@@ -446,6 +460,32 @@ class JavaBuildToolsPanelTest {
             }
             if (component instanceof Container child) {
                 T found = findOrNull(child, type);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static javax.swing.JLabel findLabelWithText(Container root, String expected) {
+        javax.swing.JLabel found = findLabelWithTextOrNull(root, expected);
+        if (found == null) {
+            throw new AssertionError("label not found: " + expected);
+        }
+        return found;
+    }
+
+    private static javax.swing.JLabel findLabelWithTextOrNull(Container root, String expected) {
+        if (root instanceof javax.swing.JLabel label && expected.equals(label.getText())) {
+            return label;
+        }
+        for (Component component : root.getComponents()) {
+            if (component instanceof javax.swing.JLabel label && expected.equals(label.getText())) {
+                return label;
+            }
+            if (component instanceof Container child) {
+                javax.swing.JLabel found = findLabelWithTextOrNull(child, expected);
                 if (found != null) {
                     return found;
                 }
