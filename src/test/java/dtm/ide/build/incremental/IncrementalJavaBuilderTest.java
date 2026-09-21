@@ -67,6 +67,7 @@ class IncrementalJavaBuilderTest {
         builder().build(module(), false, line -> {
         });
         build.requests.clear();
+        int resolutionsAfterFirstBuild = build.classpathResolutions;
 
         BuildResult result = builder().build(module(), false, line -> {
         });
@@ -74,6 +75,34 @@ class IncrementalJavaBuilderTest {
         assertTrue(result.successful());
         assertTrue(build.requests.isEmpty());
         assertTrue(javacCalls.isEmpty());
+        assertEquals(resolutionsAfterFirstBuild, build.classpathResolutions);
+    }
+
+    @Test
+    void missingCompiledOutputForcesAFullBuild() throws Exception {
+        source("Lojista.java", "package a; public class Lojista {}");
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+        Files.delete(module().outputDir().resolve("a/Lojista.class"));
+
+        builder().build(module(), false, line -> { });
+
+        assertEquals(1, build.requests.size());
+    }
+
+    @Test
+    void republishedJarAtTheSamePathInvalidatesTheState() throws Exception {
+        source("Lojista.java", "package a; public class Lojista {}");
+        Path dependency = Files.writeString(root.resolve("dependency.jar"), "first",
+                StandardCharsets.UTF_8);
+        build.classpath = dependency.toString();
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+
+        Files.writeString(dependency, "a different artifact payload", StandardCharsets.UTF_8);
+        builder().build(module(), false, line -> { });
+
+        assertEquals(1, build.requests.size());
     }
 
     @Test
@@ -415,7 +444,8 @@ class IncrementalJavaBuilderTest {
     private final class RecordingBuildSystem implements BuildSystem {
 
         private final List<BuildRequest> requests = new ArrayList<>();
-        private final String classpath = "classpath-resolvido";
+        private String classpath = "classpath-resolvido";
+        private int classpathResolutions;
 
         @Override
         public String name() {
@@ -428,10 +458,29 @@ class IncrementalJavaBuilderTest {
             for (JavaModule module : request.selection()) {
                 try {
                     Files.createDirectories(module.outputDir());
+                    writeClassOutputs(module);
                 } catch (Exception ignored) {
                 }
             }
             return new BuildResult(0, List.of(), Duration.ZERO, "maven");
+        }
+
+        private void writeClassOutputs(JavaModule module) throws Exception {
+            for (Path sourceRoot : module.existingSourceRoots()) {
+                try (var paths = Files.walk(sourceRoot)) {
+                    for (Path source : paths.filter(Files::isRegularFile)
+                            .filter(path -> path.getFileName().toString().endsWith(".java"))
+                            .toList()) {
+                        Path relative = sourceRoot.relativize(source);
+                        String name = relative.getFileName().toString();
+                        Path classRelative = relative.resolveSibling(
+                                name.substring(0, name.length() - 5) + ".class");
+                        Path classFile = module.outputDir().resolve(classRelative);
+                        Files.createDirectories(classFile.getParent());
+                        Files.writeString(classFile, "", StandardCharsets.UTF_8);
+                    }
+                }
+            }
         }
 
         @Override
@@ -445,6 +494,7 @@ class IncrementalJavaBuilderTest {
 
         @Override
         public Optional<String> resolveRuntimeClasspath(JavaModule module) {
+            classpathResolutions++;
             return Optional.of(classpath);
         }
 

@@ -43,10 +43,10 @@ public final class BuildProgressTracker implements Consumer<String> {
     }
 
     public Update initial() {
-        if (modules.size() == 1) {
-            return new Update(moduleLabel(modules.getFirst(), 1), -1);
+        if (modules.isEmpty()) {
+            return new Update(action, -1);
         }
-        return new Update(action, modules.isEmpty() ? -1 : 0);
+        return new Update(moduleLabel(modules.getFirst(), 1), modules.size() > 1 ? 0 : -1);
     }
 
     @Override

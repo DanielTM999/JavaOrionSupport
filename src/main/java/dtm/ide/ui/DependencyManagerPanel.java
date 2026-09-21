@@ -92,6 +92,11 @@ public final class DependencyManagerPanel extends JPanel {
 
         void updateVersion(JavaModule module, ManagedDependency dependency, String version,
                            Consumer<Boolean> onDone);
+
+        default void refreshDependencies(JavaModule module, DependencyCoordinate dependency,
+                                         Consumer<Boolean> onDone) {
+            onDone.accept(false);
+        }
     }
 
     public enum RemoteStatus { OK, FAILED, SKIPPED }
@@ -153,6 +158,10 @@ public final class DependencyManagerPanel extends JPanel {
             PillButtons.secondary(text("action.updateAll", "Atualizar todas"), null);
 
     private final BadgeLabel status = new BadgeLabel(" ", BadgeLabel.Tone.NEUTRAL);
+    private final JButton refreshSelectedButton =
+            PillButtons.secondary(text("action.redownload", "Baixar novamente"), null);
+    private final JButton refreshProjectButton =
+            PillButtons.secondary(text("action.refreshDependencies", "Atualizar pacotes"), null);
     private final Timer searchDebounce = new Timer(SEARCH_DEBOUNCE_MS, event -> runSearch());
 
     private List<DependencySearchResult> searchResults = List.of();
@@ -375,6 +384,8 @@ public final class DependencyManagerPanel extends JPanel {
         actions.add(addButton);
         actions.add(updateButton);
         actions.add(removeButton);
+        actions.add(refreshSelectedButton);
+        actions.add(refreshProjectButton);
         actions.add(updateAllButton);
         capHeight(actions);
         form.add(actions);
@@ -471,6 +482,8 @@ public final class DependencyManagerPanel extends JPanel {
         updateButton.addActionListener(event -> updateSelected());
         updateAllButton.addActionListener(event -> updateAll());
 
+        refreshSelectedButton.addActionListener(event -> refreshSelectedArtifact());
+        refreshProjectButton.addActionListener(event -> refreshProjectArtifacts());
         applyTabState();
     }
 
@@ -514,6 +527,7 @@ public final class DependencyManagerPanel extends JPanel {
         scopeSelector.setEnabled(tab == Tab.BROWSE);
         editForm.setVisible(tab != Tab.HEALTH);
         updateAllButton.setEnabled(tab == Tab.UPDATES && hasApplicableUpdates());
+        refreshSelectedButton.setVisible(tab == Tab.INSTALLED || tab == Tab.UPDATES);
     }
 
     public void reloadModules() {
@@ -1206,6 +1220,38 @@ public final class DependencyManagerPanel extends JPanel {
         }
         updateAllButton.setEnabled(false);
         applyNextUpdate(module, pending, 0, 0);
+    }
+
+    private void refreshSelectedArtifact() {
+        DependencyCoordinate dependency = selectedCoordinate();
+        JavaModule module = selectedModule();
+        if (dependency == null || module == null) {
+            return;
+        }
+        refreshSelectedButton.setEnabled(false);
+        host.refreshDependencies(module, dependency, successful -> onUi(() -> {
+            refreshSelectedButton.setEnabled(true);
+            reportRefresh(successful, text("status.redownloaded", "Dependencia baixada novamente:")
+                    + " " + dependency.notation());
+        }));
+    }
+
+    private void refreshProjectArtifacts() {
+        refreshProjectButton.setEnabled(false);
+        host.refreshDependencies(null, null, successful -> onUi(() -> {
+            refreshProjectButton.setEnabled(true);
+            reportRefresh(successful,
+                    text("status.dependenciesRefreshed", "Pacotes do projeto atualizados"));
+        }));
+    }
+
+    private void reportRefresh(boolean successful, String message) {
+        setStatus(successful ? message
+                        : text("status.refreshDependenciesFailed", "Falha ao atualizar os pacotes"),
+                successful ? BadgeLabel.Tone.SUCCESS : BadgeLabel.Tone.DANGER);
+        if (successful) {
+            reloadInstalled();
+        }
     }
 
     private boolean confirmUpdate(String preview) {

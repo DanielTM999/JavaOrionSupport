@@ -1,5 +1,6 @@
 package dtm.ide.build;
 
+import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.project.JavaModule;
 
 import java.util.List;
@@ -30,6 +31,11 @@ public interface BuildSystem {
 
     default Optional<String> resolveTestClasspath(JavaModule module) {
         return resolveRuntimeClasspath(module);
+    }
+
+    default BuildResult refreshDependencies(JavaModule module, DependencyCoordinate dependency,
+                                            Consumer<String> output) {
+        return BuildResult.failed(name(), "Atualizacao forcada de dependencias nao suportada.");
     }
 
     void invalidateClasspathCache();

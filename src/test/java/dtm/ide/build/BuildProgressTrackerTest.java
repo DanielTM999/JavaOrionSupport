@@ -69,6 +69,17 @@ class BuildProgressTrackerTest {
     }
 
     @Test
+    void aMultiModuleBuildImmediatelyNamesTheFirstModule() {
+        Fixture fixture = fixture();
+        BuildProgressTracker tracker = new BuildProgressTracker(
+                "Compilando", fixture.descriptor(), null, update -> { });
+
+        assertEquals(new BuildProgressTracker.Update("Compilando - orders (1/2)", 0),
+                tracker.initial());
+    }
+
+
+    @Test
     void ordinaryOutputDoesNotReplaceTheProgressMessage() {
         Fixture fixture = fixture();
         List<BuildProgressTracker.Update> updates = new ArrayList<>();

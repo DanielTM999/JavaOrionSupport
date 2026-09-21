@@ -1,5 +1,6 @@
 package dtm.ide.build;
 
+import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.sdk.BuildToolProvisioner;
@@ -237,6 +238,28 @@ public final class MavenBuildService implements BuildSystem {
     @Override
     public void invalidateClasspathCache() {
         classpathCache.clear();
+    }
+
+    @Override
+    public BuildResult refreshDependencies(JavaModule module, DependencyCoordinate dependency,
+                                           Consumer<String> output) {
+        BuildResult result = executeToolCommand(module, dependencyRefreshArguments(dependency), output);
+        if (result.successful()) {
+            invalidateClasspathCache();
+        }
+        return result;
+    }
+
+    List<String> dependencyRefreshArguments(DependencyCoordinate dependency) {
+        List<String> arguments = new ArrayList<>();
+        arguments.add("-U");
+        arguments.add("dependency:purge-local-repository");
+        if (dependency != null && dependency.isValid()) {
+            arguments.add("-DmanualInclude=" + dependency.key());
+        }
+        arguments.add("-DreResolve=true");
+        arguments.add("dependency:resolve");
+        return arguments;
     }
 
     @Override

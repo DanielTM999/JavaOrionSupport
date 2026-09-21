@@ -1,6 +1,7 @@
 package dtm.ide.build;
 
 import dtm.ide.project.JavaModule;
+import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.project.JavaProjectKind;
 import dtm.ide.sdk.BuildToolProvisioner;
@@ -83,6 +84,24 @@ class MavenBuildServiceTest {
         assertEquals("api", command.get(command.indexOf("-pl") + 1));
     }
 
+    @Test
+    void selectedDependencyRefreshUsesTargetedPurgeAndForcesResolution() {
+        MavenBuildService service = service(descriptor(rootModule()));
+        List<String> arguments = service.dependencyRefreshArguments(
+                DependencyCoordinate.of("com.github.demo", "library", "1.0"));
+
+        assertTrue(arguments.contains("-U"));
+        assertTrue(arguments.contains("dependency:purge-local-repository"));
+        assertTrue(arguments.contains("-DmanualInclude=com.github.demo:library"));
+        assertTrue(arguments.contains("dependency:resolve"));
+    }
+
+    @Test
+    void projectRefreshDoesNotRestrictThePurgeToOneArtifact() {
+        List<String> arguments = service(descriptor(rootModule())).dependencyRefreshArguments(null);
+
+        assertFalse(arguments.stream().anyMatch(argument -> argument.startsWith("-DmanualInclude=")));
+    }
     private MavenBuildService service(JavaProjectDescriptor descriptor) {
         BuildToolProvisioner provisioner = new BuildToolProvisioner(null, null) {
             @Override

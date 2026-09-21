@@ -266,6 +266,21 @@ final class DependencyManagerCoordinator implements DependencyManagerPanel.Host,
         mutate(service -> service.updateVersion(module, dependency, version), onDone);
     }
 
+    @Override
+    public void refreshDependencies(JavaModule module, DependencyCoordinate dependency,
+                                    Consumer<Boolean> onDone) {
+        tasks.submit(() -> {
+            BuildSystem build = buildSystem.get();
+            boolean successful = build != null
+                    && build.refreshDependencies(module, dependency, line -> { }).successful();
+            if (successful) {
+                resetLocalRepository();
+                afterChange.accept(true);
+            }
+            onDone.accept(successful);
+        });
+    }
+
     private void mutate(java.util.function.Predicate<DependencyService> mutation,
                         Consumer<Boolean> onDone) {
         tasks.submit(() -> {

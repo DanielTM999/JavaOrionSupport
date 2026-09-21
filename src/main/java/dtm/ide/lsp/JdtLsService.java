@@ -2638,11 +2638,18 @@ public class JdtLsService {
             openDocument(filePath, text);
             return true;
         }
-        boolean currentSnapshot = current.equals(text);
-        if (!currentSnapshot) {
-            log.debug("Requisicao descartada para {}: snapshot do editor desatualizado", uri);
+        if (!current.equals(text)) {
+            // Um snapshot ja visto e diferente do atual pertence a uma requisicao atrasada.
+            if (documents.hasSeen(uri, text)) {
+                log.debug("Requisicao descartada para {}: revisao anterior do editor", uri);
+                return false;
+            }
+            // Um snapshot novo vindo de uma acao interativa e autoritativo. Eventos de digitacao
+            // podem estar enfileirados em outro executor, sobretudo antes de Ctrl+click/definition.
+            log.debug("Sincronizando {} antes da requisicao interativa", uri);
+            changeDocument(filePath, text);
         }
-        return currentSnapshot;
+        return true;
     }
 
     private JsonNode request(String method, Object params, long timeoutMs) {

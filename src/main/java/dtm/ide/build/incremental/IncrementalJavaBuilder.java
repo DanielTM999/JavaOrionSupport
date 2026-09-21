@@ -4,6 +4,7 @@ import dtm.ide.build.BuildDiagnostic;
 import dtm.ide.build.BuildDiagnosticParser;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
+import dtm.ide.build.ClasspathValidation;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.build.JavacCommands;
 import dtm.ide.build.ProcessRunner;
@@ -114,7 +115,7 @@ public final class IncrementalJavaBuilder {
             for (ModulePlan plan : pending) {
                 if (plan.fingerprint() != null) {
                     refreshState(plan.module(), false, plan.state(), plan.fingerprint(),
-                            plan.stateFile());
+                            plan.classpath(), plan.stateFile());
                 }
             }
         }
@@ -160,15 +161,28 @@ public final class IncrementalJavaBuilder {
     private ModulePlan planOf(JavaModule module, boolean test) {
         Path stateFile = stateFileOf(module, test);
         ModuleBuildState state = ModuleBuildState.load(stateFile);
+        String localFingerprint = localFingerprintOf(module);
+        String storedClasspath = state.classpath();
+        if (state.isLocallyUsable(localFingerprint)
+                && outputIsComplete(module, test)
+                && !storedClasspath.isBlank()
+                && !ClasspathValidation.hasMissingJar(storedClasspath)
+                && state.classpathFingerprint().equals(
+                        ClasspathValidation.fingerprint(storedClasspath))) {
+            return new ModulePlan(module, storedClasspath, state,
+                    fingerprintOf(localFingerprint, storedClasspath), stateFile, false, null);
+        }
+
         Optional<String> classpath = classpathOf(module, test);
         if (classpath.isEmpty()) {
             return new ModulePlan(module, null, state, null, stateFile, true,
                     "classpath nao resolvido");
         }
         String fingerprint = fingerprintOf(module, classpath.get());
-        boolean full = !state.isUsable(fingerprint) || !Files.isDirectory(outputDirOf(module, test));
+        boolean outputComplete = outputIsComplete(module, test);
+        boolean full = !state.isUsable(fingerprint) || !outputComplete;
         return new ModulePlan(module, classpath.get(), state, fingerprint, stateFile, full,
-                full ? "estado incremental ausente" : null);
+                full ? outputComplete ? "estado incremental ausente" : "saida incompleta" : null);
     }
 
     private BuildResult buildModule(JavaModule module, boolean test, Consumer<String> output) {
@@ -178,7 +192,7 @@ public final class IncrementalJavaBuilder {
         }
         BuildResult result = delegate(module, test, output, plan.reason());
         if (result.successful() && plan.fingerprint() != null) {
-            refreshState(module, test, plan.state(), plan.fingerprint(), plan.stateFile());
+            refreshState(module, test, plan.state(), plan.fingerprint(), plan.classpath(), plan.stateFile());
         }
         return result;
     }
@@ -217,7 +231,7 @@ public final class IncrementalJavaBuilder {
         log.info("javac falhou sem diagnosticos em {}; voltando para o Maven", module.artifactId());
         BuildResult fallback = delegate(module, test, output, "javac indisponivel");
         if (fallback.successful() && plan.fingerprint() != null) {
-            refreshState(module, test, state, plan.fingerprint(), plan.stateFile());
+            refreshState(module, test, state, plan.fingerprint(), plan.classpath(), plan.stateFile());
         }
         return fallback;
     }
@@ -328,8 +342,9 @@ public final class IncrementalJavaBuilder {
     }
 
     private void refreshState(JavaModule module, boolean test, ModuleBuildState state,
-                              String fingerprint, Path stateFile) {
-        state.reset(fingerprint);
+                              String fingerprint, String classpath, Path stateFile) {
+        state.reset(fingerprint, localFingerprintOf(module), classpath,
+                ClasspathValidation.fingerprint(classpath));
         for (Path source : collectSources(module, test)) {
             state.record(module.root(), source);
         }
@@ -389,16 +404,47 @@ public final class IncrementalJavaBuilder {
     }
 
     private String fingerprintOf(JavaModule module, String classpath) {
+        return fingerprintOf(localFingerprintOf(module), classpath);
+    }
+
+    private static String fingerprintOf(String localFingerprint, String classpath) {
+        return ModuleBuildState.fingerprintOf(localFingerprint,
+                ClasspathValidation.fingerprint(classpath));
+    }
+
+    private String localFingerprintOf(JavaModule module) {
         JdkInstallation jdk = jdkSupplier.get();
         return ModuleBuildState.fingerprintOf(
                 ModuleBuildState.FORMAT_VERSION,
                 hashOfFile(module.root().resolve(JavaProjectConventions.POM_FILE)),
                 hashOfFile(descriptor.root().resolve(JavaProjectConventions.POM_FILE)),
                 resourcesFingerprint(module),
-                classpath,
                 jdk == null ? "" : jdk.home().toString());
     }
 
+    private boolean outputIsComplete(JavaModule module, boolean test) {
+        Path outputDir = outputDirOf(module, test);
+        if (!Files.isDirectory(outputDir)) {
+            return false;
+        }
+        for (Path source : collectSources(module, test)) {
+            Optional<Path> relative = relativeToSourceRoot(module, test, source);
+            if (relative.isEmpty()) {
+                continue;
+            }
+            Path parent = relative.get().getParent();
+            for (String type : declaredTypesOf(source)) {
+                Path classFile = parent == null
+                        ? outputDir.resolve(type + ".class")
+                        : outputDir.resolve(parent).resolve(type + ".class");
+                if (!Files.isRegularFile(classFile)) {
+                    log.debug("Saida incremental incompleta: {} nao existe", classFile);
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
     private static String hashOfFile(Path file) {
         try {
             return Files.isRegularFile(file)

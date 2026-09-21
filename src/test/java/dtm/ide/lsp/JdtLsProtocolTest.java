@@ -265,7 +265,9 @@ class JdtLsProtocolTest {
         service.openDocument(FILE.resolveSibling("Other.java"), "class Other { Demo value; }");
         service.navigation(Kind.REFERENCES, FILE, TEXT, 1, 6);
         assertEquals(2, count("textDocument/references"));
-        assertEquals(Status.STALE, service.navigation(Kind.REFERENCES, FILE, TEXT + "old", 1, 6).status());
+        assertEquals(Status.COMPLETE,
+                service.navigation(Kind.REFERENCES, FILE, TEXT + "old", 1, 6).status());
+        assertEquals(1, count("textDocument/didChange"));
     }
 
     @Test

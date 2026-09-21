@@ -52,6 +52,7 @@ import dtm.ide.api.project.diagnostics.IdeProblem;
 import dtm.ide.api.project.diagnostics.ProblemsActionHandle;
 import dtm.ide.build.BuildDiagnostic;
 import dtm.ide.build.BuildProgressTracker;
+import dtm.ide.build.ClasspathValidation;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.incremental.IncrementalJavaBuilder;
@@ -930,11 +931,27 @@ public class JavaIdeAdapter extends IdeAdapter {
             return List.of();
         }
         return lsp.runtimeClasspath(current.root())
-                .map(classpath -> Arrays.stream(classpath.split(Pattern.quote(File.pathSeparator)))
-                        .filter(entry -> !entry.isBlank())
-                        .map(Path::of)
-                        .toList())
+                .map(classpath -> {
+                    if (ClasspathValidation.hasMissingJar(classpath)) {
+                        requestJdtLsProjectConfigurationRefresh(lsp);
+                        return List.<Path>of();
+                    }
+                    return Arrays.stream(classpath.split(Pattern.quote(File.pathSeparator)))
+                            .filter(entry -> !entry.isBlank())
+                            .map(Path::of)
+                            .toList();
+                })
                 .orElse(List.of());
+    }
+
+    private void requestJdtLsProjectConfigurationRefresh() {
+        requestJdtLsProjectConfigurationRefresh(jdtLs);
+    }
+
+    private void requestJdtLsProjectConfigurationRefresh(JdtLsService lsp) {
+        if (lsp != null && lsp.isInteractive()) {
+            lsp.projectConfigurationUpdate();
+        }
     }
 
     private void onLombokStatusChanged(LombokSupportStatus status, String detail) {
@@ -6353,7 +6370,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp != null && lsp.isReady()) {
             java.util.Optional<String> fromServer = lsp.runtimeClasspath(module.root());
             if (fromServer.isPresent() && !fromServer.get().isBlank()) {
-                return fromServer;
+                if (!ClasspathValidation.hasMissingJar(fromServer.get())) {
+                    return fromServer;
+                }
+                requestJdtLsProjectConfigurationRefresh(lsp);
             }
         }
         return build.resolveRuntimeClasspath(module);
@@ -7090,6 +7110,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         } else if (created instanceof GradleBuildService gradle) {
             gradle.setActiveProfiles(() ->
                     new BuildRunConfigurations(projectRoot).activeProfiles());
+            gradle.setStaleClasspathListener(this::requestJdtLsProjectConfigurationRefresh);
         }
         buildSystem = created;
         return created;

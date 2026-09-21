@@ -1,5 +1,6 @@
 package dtm.ide.build;
 
+import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.sdk.BuildToolProvisioner;
@@ -33,6 +34,8 @@ public final class GradleBuildService implements BuildSystem {
     private final ProcessRunner runner = new ProcessRunner();
     private final Map<String, String> classpathCache = new ConcurrentHashMap<>();
 
+    private volatile Runnable staleClasspathListener = () -> {
+    };
     private volatile Supplier<Set<String>> activeProfiles;
 
     public GradleBuildService(JavaProjectDescriptor descriptor, BuildToolProvisioner provisioner,
@@ -46,6 +49,12 @@ public final class GradleBuildService implements BuildSystem {
 
     public void setActiveProfiles(Supplier<Set<String>> supplier) {
         this.activeProfiles = supplier;
+    }
+
+    /** Installs an internal hook used to ask the language server to reread the build model. */
+    public void setStaleClasspathListener(Runnable listener) {
+        this.staleClasspathListener = listener == null ? () -> {
+        } : listener;
     }
 
     private Set<String> activeProfiles() {
@@ -117,8 +126,16 @@ public final class GradleBuildService implements BuildSystem {
         }
         String key = cacheKey(module, test);
         String cached = classpathCache.get(key);
+        boolean staleCache = false;
         if (cached != null) {
-            return Optional.of(cached);
+            if (!ClasspathValidation.hasMissingJar(cached)) {
+                return Optional.of(cached);
+            }
+            staleCache = classpathCache.remove(key, cached);
+            if (staleCache) {
+                log.debug("Classpath Gradle obsoleto para {}: dependencia JAR ausente; resolvendo novamente",
+                        module.root());
+            }
         }
         Path initScript = null;
         Path outputFile = null;
@@ -136,20 +153,42 @@ public final class GradleBuildService implements BuildSystem {
             int exitCode = runner.run(command, descriptor.root(), Map.of(), line -> {
             });
             if (exitCode != 0) {
+                notifyStaleClasspath(staleCache);
                 return Optional.empty();
             }
             String classpath = Files.readString(outputFile).trim();
             if (classpath.isBlank()) {
+                notifyStaleClasspath(staleCache);
+                return Optional.empty();
+            }
+            if (ClasspathValidation.hasMissingJar(classpath)) {
+                log.debug("Classpath Gradle ainda contem JAR ausente para {}; nao armazenando o resultado",
+                        module.root());
+                notifyStaleClasspath(staleCache);
                 return Optional.empty();
             }
             classpathCache.put(key, classpath);
+            notifyStaleClasspath(staleCache);
             return Optional.of(classpath);
         } catch (Exception e) {
             log.debug("Falha ao resolver o classpath Gradle de {}: {}", module.root(), e.getMessage());
+            notifyStaleClasspath(staleCache);
             return Optional.empty();
         } finally {
             deleteQuietly(initScript);
             deleteQuietly(outputFile);
+        }
+    }
+
+    private void notifyStaleClasspath(boolean staleCache) {
+        if (!staleCache) {
+            return;
+        }
+        try {
+            staleClasspathListener.run();
+        } catch (Exception e) {
+            log.debug("Falha ao atualizar o servidor Java apos classpath obsoleto: {}",
+                    e.getMessage());
         }
     }
 
@@ -160,6 +199,19 @@ public final class GradleBuildService implements BuildSystem {
     @Override
     public void invalidateClasspathCache() {
         classpathCache.clear();
+    }
+
+    @Override
+    public BuildResult refreshDependencies(JavaModule module, DependencyCoordinate dependency,
+                                           Consumer<String> output) {
+        // O cache de modulos do Gradle e compartilhado pelo build; a opcao oficial atualiza
+        // todas as configuracoes mesmo quando a acao nasceu de uma dependencia selecionada.
+        BuildResult result = executeToolCommand(null,
+                List.of("dependencies", "--refresh-dependencies"), output);
+        if (result.successful()) {
+            invalidateClasspathCache();
+        }
+        return result;
     }
 
     @Override

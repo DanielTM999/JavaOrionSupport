@@ -4,10 +4,13 @@ import dtm.ide.index.JavaLexicalSource;
 import lombok.extern.slf4j.Slf4j;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -17,7 +20,7 @@ import java.util.Set;
 @Slf4j
 public final class ModuleBuildState {
 
-    static final String FORMAT_VERSION = "1";
+    public static final String FORMAT_VERSION = "2";
 
     private static final String HEADER = "#orion-incremental";
     private static final String FIELD_SEPARATOR = "\t";
@@ -42,6 +45,9 @@ public final class ModuleBuildState {
 
     private final Path stateFile;
     private final Map<String, Entry> entries = new LinkedHashMap<>();
+    private String localFingerprint = "";
+    private String classpath = "";
+    private String classpathFingerprint = "";
 
     private String fingerprint = "";
     private boolean loaded;
@@ -54,6 +60,26 @@ public final class ModuleBuildState {
         ModuleBuildState state = new ModuleBuildState(stateFile);
         state.read();
         return state;
+    }
+
+    public boolean isLocallyUsable(String expectedLocalFingerprint) {
+        return loaded && localFingerprint.equals(expectedLocalFingerprint) && !entries.isEmpty();
+    }
+
+    public String classpath() {
+        return classpath;
+    }
+
+    public String classpathFingerprint() {
+        return classpathFingerprint;
+    }
+
+    public void reset(String newFingerprint, String newLocalFingerprint,
+                      String newClasspath, String newClasspathFingerprint) {
+        reset(newFingerprint);
+        localFingerprint = newLocalFingerprint == null ? "" : newLocalFingerprint;
+        classpath = newClasspath == null ? "" : newClasspath;
+        classpathFingerprint = newClasspathFingerprint == null ? "" : newClasspathFingerprint;
     }
 
     public boolean isUsable(String expectedFingerprint) {
@@ -151,6 +177,9 @@ public final class ModuleBuildState {
             Files.createDirectories(stateFile.getParent());
             StringBuilder content = new StringBuilder();
             content.append(HEADER).append(' ').append(FORMAT_VERSION).append(System.lineSeparator());
+            content.append(localFingerprint).append(System.lineSeparator());
+            content.append(classpathFingerprint).append(System.lineSeparator());
+            content.append(Base64.getEncoder().encodeToString(classpath.getBytes(StandardCharsets.UTF_8))).append(System.lineSeparator());
             content.append(fingerprint).append(System.lineSeparator());
             for (Map.Entry<String, Entry> entry : entries.entrySet()) {
                 Entry value = entry.getValue();
@@ -162,7 +191,14 @@ public final class ModuleBuildState {
                         .append(String.join(VALUE_SEPARATOR, value.references()))
                         .append(System.lineSeparator());
             }
-            Files.writeString(stateFile, content.toString(), StandardCharsets.UTF_8);
+            Path temporary = stateFile.resolveSibling(stateFile.getFileName() + ".tmp");
+            Files.writeString(temporary, content.toString(), StandardCharsets.UTF_8);
+            try {
+                Files.move(temporary, stateFile, StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temporary, stateFile, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (Exception e) {
             log.debug("Nao foi possivel gravar {}: {}", stateFile, e.getMessage());
         }
@@ -190,11 +226,14 @@ public final class ModuleBuildState {
         }
         try {
             List<String> lines = Files.readAllLines(stateFile, StandardCharsets.UTF_8);
-            if (lines.size() < 2 || !lines.get(0).equals(HEADER + " " + FORMAT_VERSION)) {
+            if (lines.size() < 5 || !lines.get(0).equals(HEADER + " " + FORMAT_VERSION)) {
                 return;
             }
-            fingerprint = lines.get(1);
-            for (String line : lines.subList(2, lines.size())) {
+            localFingerprint = lines.get(1);
+            classpathFingerprint = lines.get(2);
+            classpath = new String(Base64.getDecoder().decode(lines.get(3)), StandardCharsets.UTF_8);
+            fingerprint = lines.get(4);
+            for (String line : lines.subList(5, lines.size())) {
                 String[] fields = line.split(FIELD_SEPARATOR, -1);
                 if (fields.length < 6) {
                     continue;
