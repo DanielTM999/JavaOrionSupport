@@ -50,6 +50,8 @@ public final class JpaQueryLiteralScanner {
         }
     }
 
+    public static final Scan EMPTY = new Scan(Map.of(), List.of());
+
     private JpaQueryLiteralScanner() {
     }
 

@@ -38,6 +38,9 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
             "Comparable", "CharSequence", "StringBuilder", "StringBuffer", "Void"
     );
 
+    private volatile String lastScanSource;
+    private volatile JpaQueryLiteralScanner.Scan lastScan;
+
     @Override
     public boolean supportsIncremental() {
         return true;
@@ -56,7 +59,9 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
     public Collection<Token> tokenize(String text, TokenClassifierCodeEditorProvider classifier) {
         String source = text == null ? "" : text;
         List<Token> tokens = new ArrayList<>(Math.max(16, source.length() / 4));
-        JpaQueryLiteralScanner.Scan queryLiterals = JpaQueryLiteralScanner.scan(source);
+        JpaQueryLiteralScanner.Scan queryLiterals = mentionsQuery(source)
+                ? scanOf(source)
+                : JpaQueryLiteralScanner.EMPTY;
 
         int i = 0;
         while (i < source.length()) {
@@ -127,15 +132,37 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
         return tokens;
     }
 
-    private static boolean queryAnnotationChanged(TokenizeChange change) {
+    private boolean queryAnnotationChanged(TokenizeChange change) {
         String oldText = change.oldText() == null ? "" : change.oldText();
         String newText = change.newText() == null ? "" : change.newText();
+        if (!mentionsQuery(oldText) && !mentionsQuery(newText)) {
+            return false;
+        }
         int start = Math.max(0, change.changeOffset());
         int oldEnd = Math.min(oldText.length(), start + Math.max(0, change.removedLength()));
         int newEnd = Math.min(newText.length(), start
                 + (change.insertedText() == null ? 0 : change.insertedText().length()));
-        return JpaQueryLiteralScanner.scan(oldText).intersects(start, oldEnd)
-                || JpaQueryLiteralScanner.scan(newText).intersects(start, newEnd);
+        return scanOf(oldText).intersects(start, oldEnd)
+                || scanOf(newText).intersects(start, newEnd);
+    }
+
+    private static boolean mentionsQuery(String text) {
+        return text != null && text.indexOf("Query") >= 0;
+    }
+
+    private JpaQueryLiteralScanner.Scan scanOf(String source) {
+        String cachedSource = lastScanSource;
+        JpaQueryLiteralScanner.Scan cached = lastScan;
+
+        if (cached != null && source.equals(cachedSource)) {
+            return cached;
+        }
+
+        JpaQueryLiteralScanner.Scan scan = JpaQueryLiteralScanner.scan(source);
+        lastScanSource = source;
+        lastScan = scan;
+
+        return scan;
     }
 
     private static void addQueryTokens(List<Token> tokens, String source,

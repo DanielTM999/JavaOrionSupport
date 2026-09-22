@@ -18,7 +18,7 @@ import dtm.ide.api.extension.runconfig.RunExecutionContext;
 import dtm.ide.api.extension.runconfig.RunProcessHandle;
 import dtm.ide.api.extension.event.BreakpointChangedEvent;
 import dtm.ide.api.project.editor.FileAssociated;
-import dtm.ide.api.project.editor.DocumentHighlight;
+import dtm.stools.component.panels.editor.code.documenthighlight.DocumentHighlight;
 import dtm.ide.api.project.editor.FormatCodeContext;
 import dtm.ide.api.project.editor.IdeCodeActionContext;
 import dtm.ide.api.extension.NotificationContext;
@@ -224,10 +224,8 @@ import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenRenderPr
 import dtm.request_actions.http.download.core.DownloadObserver;
 import dtm.stools.utils.ImageUtils;
 import lombok.extern.slf4j.Slf4j;
-
 import javax.swing.*;
 import javax.swing.text.JTextComponent;
-
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Cursor;
@@ -358,10 +356,11 @@ public class JavaIdeAdapter extends IdeAdapter {
             this::isIdleCompletionEligible,
             this::isIdleCompletionReady,
             this::currentIdleCaret,
-            this::fireIdleCompletion);
+            this::fireIdleCompletion
+    );
 
     private static final Color DELETE_ACCENT = new Color(220, 53, 69);
-
+    
     private volatile Path projectRoot;
     private volatile JavaProjectDescriptor descriptor;
     private volatile IdeProjectContext projectContext;

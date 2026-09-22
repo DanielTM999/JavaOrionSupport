@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
-import dtm.ide.api.project.editor.DocumentHighlight;
+import dtm.stools.component.panels.editor.code.documenthighlight.DocumentHighlight;
 import dtm.ide.api.project.editor.SemanticToken;
 import dtm.ide.inspection.DiagnosticRanges;
 import dtm.ide.navigation.JavaNavigation;
@@ -26,7 +26,6 @@ import dtm.stools.component.panels.editor.code.hover.HoverInfo;
 import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
 import lombok.extern.slf4j.Slf4j;
-
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -106,8 +105,7 @@ public class JdtLsService {
     public record OverrideStatus(String type, List<SourceItem> methods) {
     }
 
-    public record FieldsStatus(String type, List<SourceItem> fields,
-                               List<String> existingMethods, boolean exists) {
+    public record FieldsStatus(String type, List<SourceItem> fields, List<String> existingMethods, boolean exists) {
     }
 
     public record ConstructorsStatus(List<SourceItem> constructors, List<SourceItem> fields) {
@@ -142,7 +140,8 @@ public class JdtLsService {
             "namespace", "class", "interface", "enum", "enumMember", "type", "typeParameter",
             "method", "property", "variable", "parameter", "record", "recordComponent",
             "annotation", "annotationMember", "modifier", "keyword", "comment", "string",
-            "number", "operator");
+            "number", "operator"
+    );
 
     private static final List<String> TOKEN_MODIFIERS = List.of(
             "abstract", "static", "final", "deprecated", "declaration", "documentation",
