@@ -14,7 +14,9 @@ import dtm.ide.navigation.JavaNavigation.Status;
 import dtm.ide.sdk.DownloadProgressListener;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
+import dtm.ide.sdk.JdkVendor;
 import dtm.ide.sdk.SdkDownloader;
+import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
@@ -67,6 +69,10 @@ public class JdtLsService {
         void onStatus(String message, int percent);
     }
 
+    public interface WorkListener {
+        void onWork(String message, int percent, boolean active);
+    }
+
     enum ResyncMode {
         REOPEN,
         TOUCH
@@ -116,11 +122,16 @@ public class JdtLsService {
 
     private static final long REQUEST_TIMEOUT_MS = 4_000;
     private static final long INTERACTIVE_TIMEOUT_MS = 800;
+    private static final long INDEXING_INTERACTIVE_TIMEOUT_MS = 2_000;
+    private static final long RENAME_TIMEOUT_MS = 60_000;
     private static final long INDEXING_COMPLETION_TIMEOUT_MS = 750;
     private static final long READY_COMPLETION_TIMEOUT_MS = 1_500;
     private static final long INITIALIZE_TIMEOUT_MS = 120_000;
     private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
     private static final long SERVICE_READY_POLL_MS = 250;
+    private static final int MIN_AUTO_SHARED_ARCHIVE_MAJOR = 19;
+    private static final long SHUTDOWN_TIMEOUT_MS = 10_000;
+    private static final long EXIT_TIMEOUT_MS = 5_000;
     private static final long DOCUMENT_RECOVERY_COOLDOWN_MS = 5_000;
     private static final long EXTERNAL_RESYNC_DELAY_MS = 350;
     private static final long EXTERNAL_RESYNC_MAX_DELAY_MS = 2_000;
@@ -190,10 +201,14 @@ public class JdtLsService {
     private volatile StatusListener statusListener = (message, percent) -> {
     };
     private volatile StatusListener workspaceBuildProgress;
+    private volatile WorkListener workListener = (message, percent, active) -> {
+    };
+    private final LspProgressAggregator progressAggregator = new LspProgressAggregator();
     private volatile String maxHeap = "2G";
     private volatile dtm.ide.settings.JdtBuildMode buildMode =
             dtm.ide.settings.JdtBuildMode.PROJECT_BUILD;
     private volatile Path lombokAgentJar;
+    private volatile Path launchedLombokAgentJar;
     private volatile boolean springSupport;
     private volatile boolean debugBundleLoaded;
     private volatile boolean testBundleLoaded;
@@ -226,6 +241,7 @@ public class JdtLsService {
             boolean documentHighlight,
             boolean codeLens,
             boolean rename,
+            boolean prepareRename,
             boolean formatting,
             boolean rangeFormatting,
             boolean codeAction,
@@ -241,7 +257,7 @@ public class JdtLsService {
 
         static ServerCapabilities none() {
             return new ServerCapabilities(false, false, false, false, false, false, false, false,
-                    false, false, false, false, false, false, false, false, false, false,
+                    false, false, false, false, false, false, false, false, false, false, false,
                     Set.of(), Set.of());
         }
     }
@@ -324,6 +340,12 @@ public class JdtLsService {
         return lombokAgentJar;
     }
 
+    public boolean needsRestartForLombokAgent() {
+        Process running = process;
+        return running != null && running.isAlive()
+                && !Objects.equals(launchedLombokAgentJar, lombokAgentJar);
+    }
+
     public void setMaxHeap(String value) {
         this.maxHeap = value == null || value.isBlank() ? "2G" : value.trim();
     }
@@ -338,6 +360,11 @@ public class JdtLsService {
 
     public void setStatusListener(StatusListener listener) {
         this.statusListener = listener == null ? (message, percent) -> {
+        } : listener;
+    }
+
+    public void setWorkListener(WorkListener listener) {
+        this.workListener = listener == null ? (message, percent, active) -> {
         } : listener;
     }
 
@@ -400,8 +427,10 @@ public class JdtLsService {
             projectRoot = root.toAbsolutePath().normalize();
             readyLatch = new CountDownLatch(1);
             serviceReadyLatch = new CountDownLatch(1);
+            progressAggregator.reset();
         }
 
+        long launchStarted = System.nanoTime();
         try {
             JdkInstallation runtime = resolveServerJdk(jdk);
             JdtLsProvisioner.JdtLsInstallation installation = provisioner.ensure(progress);
@@ -422,6 +451,9 @@ public class JdtLsService {
                     JdtLsProvisioner.DEFAULT_VERSION, runtime.fullVersion(),
                     jdk == null ? "padrao" : jdk.fullVersion(), root);
 
+            CompletableFuture<List<String>> bundlePaths =
+                    CompletableFuture.supplyAsync(this::resolveBundlePaths, executor);
+            long processStarted = System.nanoTime();
             Process started = new ProcessBuilder(command)
                     .directory(root.toFile())
                     .redirectErrorStream(false)
@@ -435,9 +467,10 @@ public class JdtLsService {
             pumpStderr(started);
             registerHandlers();
 
-            initialize(root, runtime, jdk);
+            initialize(root, runtime, jdk, bundlePaths.join());
+            long initialized = System.nanoTime();
             state = State.INDEXING;
-            statusListener.onStatus("Java: indexando projeto...", -1);
+            publishProgress(progressAggregator.initialized("indexando projeto..."));
             flushOpenDocuments();
             drainPendingWatchedFiles();
             provisionBundlesInBackground(progress);
@@ -457,7 +490,12 @@ public class JdtLsService {
             flushOpenDocuments();
             refreshOpenDocuments();
             drainPendingWatchedFiles();
+            progressAggregator.restartBackgroundWork();
             readyLatch.countDown();
+            long ready = System.nanoTime();
+            log.info("JDT LS pronto em {} ms (preparo {} ms, processo+initialize {} ms, importacao {} ms)",
+                    elapsedMs(launchStarted, ready), elapsedMs(launchStarted, processStarted),
+                    elapsedMs(processStarted, initialized), elapsedMs(initialized, ready));
             statusListener.onStatus("Java: IntelliSense pronto", -1);
         } catch (Exception e) {
             if (state == State.STOPPED) {
@@ -466,8 +504,13 @@ public class JdtLsService {
             }
             state = State.ERROR;
             lastError = rootMessage(e);
+            Process failed = process;
+            if (failed != null && !failed.isAlive()) {
+                lastError = "o processo do JDT LS encerrou com codigo " + failed.exitValue()
+                        + " (" + lastError + ")";
+            }
             readyLatch.countDown();
-            log.warn("Falha ao iniciar o Eclipse JDT LS", e);
+            log.warn("Falha ao iniciar o Eclipse JDT LS: {}", lastError, e);
             statusListener.onStatus("Java: IntelliSense indisponivel - " + lastError, -1);
             stopProcess();
         }
@@ -608,9 +651,23 @@ public class JdtLsService {
         command.add("-Dlog.level=WARNING");
         command.add("-Dfile.encoding=UTF-8");
         command.add("-Djava.import.generatesMetadataFilesAtProjectRoot=false");
+        command.add("-DDetectVMInstallationsJob.disabled=true");
+        command.add("-Dsun.zip.disableMemoryMapping=true");
         command.add("-Xms256m");
         command.add("-Xmx" + maxHeap);
         Path lombok = lombokAgentJar;
+        launchedLombokAgentJar = lombok;
+        if (runtime.vendor() != JdkVendor.SEMERU) {
+            command.add("-XX:+UseParallelGC");
+            command.add("-XX:GCTimeRatio=4");
+            command.add("-XX:AdaptiveSizePolicyWeight=90");
+            command.add("-Xlog:disable");
+            if (lombok == null && runtime.major() >= MIN_AUTO_SHARED_ARCHIVE_MAJOR) {
+                command.add("-XX:+AutoCreateSharedArchive");
+                command.add("-XX:SharedArchiveFile=" + installation.home()
+                        .resolve("jdtls-jdk" + runtime.major() + ".jsa"));
+            }
+        }
         if (lombok != null) {
             command.add("-javaagent:" + lombok);
         }
@@ -673,12 +730,12 @@ public class JdtLsService {
         LspJsonRpcClient rpc = client;
         if (rpc != null && !rpc.isClosed()) {
             try {
-                rpc.request("shutdown", Map.of()).get(2, TimeUnit.SECONDS);
+                rpc.request("shutdown", Map.of()).get(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
                 rpc.notify("exit", Map.of());
                 // notify is queued on the writer. Give exit time to reach the server
                 // and save its workspace before the process-tree fallback below.
                 Process running = process;
-                if (running != null) running.waitFor(3, TimeUnit.SECONDS);
+                if (running != null) running.waitFor(EXIT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             } catch (Exception error) {
@@ -779,8 +836,25 @@ public class JdtLsService {
         }
     }
 
+    private List<String> resolveBundlePaths() {
+        if (bundles == null) {
+            return List.of();
+        }
+        try {
+            return bundles.resolveBundlePaths(springSupport);
+        } catch (Exception error) {
+            log.warn("Falha ao resolver os bundles do jdtls: {}", rootMessage(error));
+            return List.of();
+        }
+    }
+
+    private static long elapsedMs(long fromNanos, long toNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(toNanos - fromNanos);
+    }
+
     private void initialize(Path root, JdkInstallation runtime,
-                            JdkInstallation preferredProjectJdk) throws Exception {
+                            JdkInstallation preferredProjectJdk,
+                            List<String> bundlePaths) throws Exception {
         LspJsonRpcClient rpc = client;
         if (rpc == null) {
             throw new IllegalStateException("Cliente LSP indisponivel");
@@ -794,7 +868,7 @@ public class JdtLsService {
         params.put("capabilities", LspClientCapabilities.build(TOKEN_TYPES, TOKEN_MODIFIERS));
         JdkInstallation configuredJdk = preferredProjectJdk == null ? runtime : preferredProjectJdk;
         effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode);
-        params.put("initializationOptions", initializationOptions(effectiveSettings));
+        params.put("initializationOptions", initializationOptions(effectiveSettings, bundlePaths));
 
         JsonNode result = rpc.request("initialize", params)
                 .get(INITIALIZE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
@@ -804,7 +878,8 @@ public class JdtLsService {
                 Map.of("settings", effectiveSettings));
     }
 
-    private Map<String, Object> initializationOptions(Map<String, Object> settings) {
+    private Map<String, Object> initializationOptions(Map<String, Object> settings,
+                                                      List<String> bundlePaths) {
         Map<String, Object> options = new LinkedHashMap<>();
         options.put("settings", settings);
         options.put("extendedClientCapabilities", Map.of(
@@ -818,8 +893,6 @@ public class JdtLsService {
                 "hashCodeEqualsPromptSupport", true,
                 "generateDelegateMethodsPromptSupport", true));
 
-        List<String> bundlePaths = bundles == null ? List.of()
-                : bundles.resolveBundlePaths(springSupport);
         debugBundleLoaded = bundlePaths.stream().anyMatch(path ->
                 path.contains("com.microsoft.java.debug.plugin"));
         testBundleLoaded = bundlePaths.stream().anyMatch(path ->
@@ -930,6 +1003,8 @@ public class JdtLsService {
             }
         });
         rpc.onNotification("$/progress", this::onProgress);
+        rpc.onNotification("language/progressReport", this::onProgressReport);
+        rpc.onRequest("window/workDoneProgress/create", params -> null);
 
         rpc.onRequest("workspace/configuration", params -> {
             int items = params != null && params.has("items") ? params.get("items").size() : 1;
@@ -1019,8 +1094,41 @@ public class JdtLsService {
             return;
         }
         if (!message.isBlank()) {
-            statusListener.onStatus("Java: " + message, -1);
+            publishProgress(progressAggregator.status(message));
         }
+    }
+
+    private void publishProgress(LspProgressAggregator.Snapshot snapshot) {
+        State current = state;
+        if (current == State.READY) {
+            String label = snapshot.label().isBlank() ? "" : "Java: " + snapshot.label();
+            workListener.onWork(label, snapshot.workPercent(), !snapshot.idle());
+            if (snapshot.idle()) {
+                progressAggregator.restartBackgroundWork();
+            }
+            return;
+        }
+        if (current == State.STARTING || current == State.INDEXING) {
+            statusListener.onStatus("Java: " + snapshot.label(), snapshot.percent());
+        }
+    }
+
+    private void onProgressReport(JsonNode params) {
+        if (params == null) {
+            return;
+        }
+        String token = "report:" + params.path("id").asText("");
+        String task = params.path("task").asText("");
+        String status = params.path("status").asText("");
+        if (status.isBlank()) {
+            status = params.path("subTask").asText("");
+        }
+        long total = params.path("totalWork").asLong(0);
+        long done = params.path("workDone").asLong(0);
+        int percent = total > 0 ? (int) Math.min(100, done * 100 / total) : -1;
+        publishProgress(params.path("complete").asBoolean(false)
+                ? progressAggregator.end(token)
+                : progressAggregator.report(token, task, status, percent));
     }
 
     private void onServerLogMessage(JsonNode params) {
@@ -1049,15 +1157,21 @@ public class JdtLsService {
         String message = value.path("message").asText("");
         String text = !message.isBlank() ? message : title;
         int percent = value.has("percentage") ? value.path("percentage").asInt(-1) : -1;
+        String kind = value.path("kind").asText("");
+        String token = params.path("token").asText();
+        if ("begin".equalsIgnoreCase(kind)) {
+            publishProgress(progressAggregator.begin(token, title, message, percent));
+        } else if ("end".equalsIgnoreCase(kind)) {
+            publishProgress(progressAggregator.end(token));
+        } else {
+            publishProgress(progressAggregator.report(token, title, message, percent));
+        }
         if (!text.isBlank()) {
-            statusListener.onStatus("Java: " + text, percent);
             StatusListener buildProgress = workspaceBuildProgress;
             if (buildProgress != null) {
                 buildProgress.onStatus(text, percent);
             }
         }
-        String kind = value.path("kind").asText("");
-        String token = params.path("token").asText();
         if ("begin".equalsIgnoreCase(kind)) {
             String operation = (title + " " + message).toLowerCase(java.util.Locale.ROOT);
             if (operation.contains("build") || operation.contains("import") || operation.contains("synchroniz")) {
@@ -1560,8 +1674,12 @@ public class JdtLsService {
         }
         String uri = LspConversions.toUri(filePath);
         String requestedText = text == null ? "" : text;
+        int versionBeforeSync = documents.version(uri);
         if (!syncBeforeRequest(filePath, text)) {
             return List.of();
+        }
+        if (expectedVersion == versionBeforeSync) {
+            expectedVersion = documents.version(uri);
         }
         CompletionCache cached = completionCache.get(uri);
         if (cached != null && cached.text().equals(requestedText)
@@ -1694,19 +1812,20 @@ public class JdtLsService {
         if (!supported || !isInteractive()) return Result.of(Status.UNAVAILABLE);
         return navigateResult(kind.method(), file, text, line, col, true,
                 kind == Kind.REFERENCES ? Map.of("context", Map.of("includeDeclaration", false)) : null,
-                REQUEST_TIMEOUT_MS * 3);
+                REQUEST_TIMEOUT_MS * 3, true);
     }
 
     private Result navigateResult(String method, Path filePath, String text, int line, int col,
                                   boolean interactive, Map<String, Object> extraParams) {
-        return navigateResult(method, filePath, text, line, col, interactive, extraParams, REQUEST_TIMEOUT_MS);
+        return navigateResult(method, filePath, text, line, col, interactive, extraParams, REQUEST_TIMEOUT_MS, false);
     }
 
     private Result navigateResult(String method, Path filePath, String text, int line, int col,
-                                  boolean interactive, Map<String, Object> extraParams, long timeoutMs) {
+                                  boolean interactive, Map<String, Object> extraParams, long timeoutMs,
+                                  boolean authoritative) {
         if (filePath == null) return Result.of(Status.UNAVAILABLE);
         String uri = LspConversions.toUri(filePath);
-        if (!syncBeforeRequest(filePath, text)) return Result.of(Status.STALE);
+        if (!syncBeforeRequest(filePath, text, authoritative)) return Result.of(Status.STALE);
         int version = documents.version(uri);
         long revision = workspaceRevision.get();
         String key = method + "|" + uri + "|" + version + "|" + line + "|" + col + "|" + revision;
@@ -1724,14 +1843,15 @@ public class JdtLsService {
             log.debug("navegacao {} para {} respondeu em {}ms (cache miss)",
                     method, uri, (System.nanoTime() - requestStart) / 1_000_000L);
         }
-        if (documents.version(uri) != version || workspaceRevision.get() != revision) {
+        if (documents.version(uri) != version
+                || text != null && !text.equals(documents.content(uri))) {
             return Result.of(Status.STALE);
         }
         boolean indexing = !isReady() || isWarmingUp() || !workspaceWorkTokens.isEmpty();
         if (response == null) return Result.of(indexing ? Status.INDEXING : Status.FAILED);
         List<Location> locations = JavaNavigation.unique(LspConversions.locations(response));
         if (indexing) return new Result(Status.INDEXING, locations);
-        navigationCache.put(key, locations);
+        if (workspaceRevision.get() == revision) navigationCache.put(key, locations);
         return new Result(Status.COMPLETE, locations);
     }
 
@@ -1987,16 +2107,64 @@ public class JdtLsService {
     }
 
     public List<TextEdit> rename(Path filePath, String text, int line, int col, String newName) {
+        IdeWorkspaceEdit workspaceEdit = renameWorkspace(filePath, text, line, col, newName);
+        return workspaceEdit == null ? List.of() : workspaceEdit.editsFor(filePath);
+    }
+
+    public IdeWorkspaceEdit renameWorkspace(Path filePath, String text, int line, int col, String newName) {
         if (!capabilities.rename()) {
-            return List.of();
+            return IdeWorkspaceEdit.empty();
         }
         Map<String, Object> params = positionParams(filePath, line, col);
         params.put("newName", newName);
         if (!syncBeforeRequest(filePath, text)) {
-            return List.of();
+            return IdeWorkspaceEdit.empty();
         }
-        JsonNode result = request("textDocument/rename", params, REQUEST_TIMEOUT_MS);
-        return LspConversions.singleDocumentEdits(result);
+        JsonNode result = request("textDocument/rename", params, RENAME_TIMEOUT_MS);
+        return LspConversions.workspaceEdit(result);
+    }
+
+    public PrepareRenameResult prepareRename(Path filePath, String text, int line, int col) {
+        if (!capabilities.rename() || !capabilities.prepareRename()) {
+            return null;
+        }
+        LspJsonRpcClient rpc = client;
+        if (rpc == null || !isInteractive()) {
+            return null;
+        }
+        if (!syncBeforeRequest(filePath, text)) {
+            return null;
+        }
+        CompletableFuture<JsonNode> future = rpc.request("textDocument/prepareRename",
+                positionParams(filePath, line, col));
+        JsonNode result;
+        try {
+            result = future.get(REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            future.cancel(false);
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (TimeoutException e) {
+            future.cancel(false);
+            return null;
+        } catch (Exception e) {
+            return PrepareRenameResult.rejected(LspConversions.errorMessage(e));
+        }
+        if (!isCurrentText(filePath, text)) {
+            return null;
+        }
+        return LspConversions.prepareRename(result);
+    }
+
+    public record PrepareRenameResult(boolean renameable, Range range, String placeholder, String message) {
+
+        public static PrepareRenameResult rejected(String message) {
+            return new PrepareRenameResult(false, null, null, message);
+        }
+
+        public static PrepareRenameResult of(Range range, String placeholder) {
+            return new PrepareRenameResult(true, range, placeholder, null);
+        }
     }
 
     public List<CodeAction> codeActions(Path filePath, String text, Range range,
@@ -2624,10 +2792,18 @@ public class JdtLsService {
             return null;
         }
         return requestInteractive(method, positionParams(filePath, line, col),
-                INTERACTIVE_TIMEOUT_MS);
+                interactiveTimeoutMs());
     }
 
-    private synchronized boolean syncBeforeRequest(Path filePath, String text) {
+    private long interactiveTimeoutMs() {
+        return isReady() && !isWarmingUp() ? INTERACTIVE_TIMEOUT_MS : INDEXING_INTERACTIVE_TIMEOUT_MS;
+    }
+
+    private boolean syncBeforeRequest(Path filePath, String text) {
+        return syncBeforeRequest(filePath, text, false);
+    }
+
+    private synchronized boolean syncBeforeRequest(Path filePath, String text, boolean authoritative) {
         if (filePath == null || text == null) {
             return filePath != null;
         }
@@ -2639,7 +2815,7 @@ public class JdtLsService {
         }
         if (!current.equals(text)) {
             // Um snapshot ja visto e diferente do atual pertence a uma requisicao atrasada.
-            if (documents.hasSeen(uri, text)) {
+            if (!authoritative && documents.hasSeen(uri, text)) {
                 log.debug("Requisicao descartada para {}: revisao anterior do editor", uri);
                 return false;
             }

@@ -392,6 +392,39 @@ class JdtLsProtocolTest {
     }
 
     @Test
+    void navigationAfterUndoIsSentWithTheRestoredText() throws Exception {
+        responses.put("textDocument/definition", "[]");
+        service.openDocument(FILE, TEXT);
+        service.changeDocument(FILE, TEXT + "// typed\n");
+
+        assertEquals(Status.COMPLETE, service.navigation(Kind.DEFINITION, FILE, TEXT, 1, 6).status());
+        assertEquals(TEXT, service.documentContent(FILE));
+        assertEquals(1, count("textDocument/definition"));
+    }
+
+    @Test
+    void anEditInAnotherFileDoesNotDiscardANavigationAnswer() throws Exception {
+        service.openDocument(FILE, TEXT);
+        service.openDocument(OTHER_FILE, "package demo;\nclass Foo { }\n");
+        var pending = java.util.concurrent.CompletableFuture.supplyAsync(() ->
+                service.navigation(Kind.DEFINITION, FILE, TEXT, 1, 6));
+        JsonNode request = awaitRequest("textDocument/definition");
+        service.changeDocument(OTHER_FILE, "package demo;\nclass Foo { int x; }\n");
+        synchronized (toClient) {
+            writeFrame(toClient, "{\"jsonrpc\":\"2.0\",\"id\":" + request.get("id") + ",\"result\":[{\"uri\":\""
+                    + FILE.toUri() + "\",\"range\":{\"start\":{\"line\":1,\"character\":6},"
+                    + "\"end\":{\"line\":1,\"character\":10}}}]}");
+        }
+        var result = pending.get(2, TimeUnit.SECONDS);
+        assertEquals(Status.COMPLETE, result.status());
+        assertEquals(1, result.locations().size());
+
+        responses.put("textDocument/definition", "[]");
+        service.navigation(Kind.DEFINITION, FILE, TEXT, 1, 6);
+        assertEquals(2, count("textDocument/definition"));
+    }
+
+    @Test
     void aLateLensResolutionCannotReappearAfterClose() throws Exception {
         responses.put("textDocument/codeLens", "[{\"range\":{\"start\":{\"line\":1,\"character\":6},"
                 + "\"end\":{\"line\":1,\"character\":10}},\"data\":[\"" + FILE.toUri()

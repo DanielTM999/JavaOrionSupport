@@ -141,24 +141,73 @@ class JavaFileChangeRouterTest {
     }
 
     @Test
-    void anOverflowScansTheDirectoryItReportsAbout(@TempDir Path dir) throws Exception {
+    void theFirstOverflowOnlyRecordsWhatIsAlreadyOnDisk(@TempDir Path dir) throws Exception {
         Path sources = Files.createDirectories(dir.resolve("src").resolve("com"));
         Files.writeString(sources.resolve("A.java"), "class A {}");
-        Files.writeString(Files.createDirectories(sources.resolve("sub")).resolve("B.java"),
-                "class B {}");
+        Files.writeString(dir.resolve("pom.xml"), "<project/>");
+        List<Event> events = new CopyOnWriteArrayList<>();
+        JavaFileChangeRouter router = router(events, new CountDownLatch(1), path -> false);
+
+        router.accept(dir, StandardWatchEventKinds.OVERFLOW);
+        router.accept(dir, StandardWatchEventKinds.OVERFLOW);
+        Thread.sleep(700);
+
+        assertTrue(events.isEmpty());
+        router.shutdown();
+    }
+
+    @Test
+    void laterOverflowsReportOnlyWhatReallyChanged(@TempDir Path dir) throws Exception {
+        Path sources = Files.createDirectories(dir.resolve("src").resolve("com"));
+        Path edited = Files.writeString(sources.resolve("A.java"), "class A {}");
+        Path removed = Files.writeString(
+                Files.createDirectories(sources.resolve("sub")).resolve("B.java"), "class B {}");
+        Files.writeString(sources.resolve("Intacta.java"), "class Intacta {}");
+        Files.writeString(dir.resolve("pom.xml"), "<project/>");
         Files.writeString(Files.createDirectories(dir.resolve("target")).resolve("C.java"),
                 "class C {}");
         List<Event> events = new CopyOnWriteArrayList<>();
-        CountDownLatch latch = new CountDownLatch(2);
+        CountDownLatch latch = new CountDownLatch(3);
         JavaFileChangeRouter router = router(events, latch, path -> false);
+        router.accept(dir, StandardWatchEventKinds.OVERFLOW);
+        Thread.sleep(700);
 
+        Files.writeString(edited, "class A { int campo; }");
+        Files.delete(removed);
+        Path added = Files.writeString(sources.resolve("Nova.java"), "class Nova {}");
         router.accept(dir, StandardWatchEventKinds.OVERFLOW);
 
         assertTrue(latch.await(5, TimeUnit.SECONDS));
         Thread.sleep(400);
-        assertEquals(2, events.size());
-        assertTrue(events.stream().noneMatch(event -> event.file().toString().contains("target")));
+        assertEquals(3, events.size());
+        assertEquals(JavaFileChangeRouter.Change.MODIFIED, changeOf(events, edited));
+        assertEquals(JavaFileChangeRouter.Change.DELETED, changeOf(events, removed));
+        assertEquals(JavaFileChangeRouter.Change.CREATED, changeOf(events, added));
         router.shutdown();
+    }
+
+    @Test
+    void aModifyEventWithoutARealChangeIsIgnoredAfterTheBaseline(@TempDir Path dir)
+            throws Exception {
+        Path pom = Files.writeString(dir.resolve("pom.xml"), "<project/>");
+        List<Event> events = new CopyOnWriteArrayList<>();
+        JavaFileChangeRouter router = router(events, new CountDownLatch(1), path -> false);
+        router.accept(dir, StandardWatchEventKinds.OVERFLOW);
+        Thread.sleep(700);
+
+        router.accept(pom, StandardWatchEventKinds.ENTRY_MODIFY);
+        Thread.sleep(700);
+
+        assertTrue(events.isEmpty());
+        router.shutdown();
+    }
+
+    private static JavaFileChangeRouter.Change changeOf(List<Event> events, Path file) {
+        return events.stream()
+                .filter(event -> event.file().equals(file.toAbsolutePath().normalize()))
+                .map(Event::change)
+                .findFirst()
+                .orElse(null);
     }
 
     @Test

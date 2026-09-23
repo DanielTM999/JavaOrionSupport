@@ -37,6 +37,10 @@ import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
 import dtm.ide.api.project.editor.IdeInlayHintContext;
 import dtm.ide.api.project.editor.IdeRenameContext;
+import dtm.ide.api.project.editor.IdeRenamePolicy;
+import dtm.ide.api.project.editor.IdeRenamePrepareContext;
+import dtm.ide.api.project.editor.IdeRenamePreparation;
+import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.ide.api.project.editor.IdeSemanticTokensContext;
 import dtm.ide.api.project.editor.IdeSignatureHelpContext;
 import dtm.ide.api.project.editor.IdeCompletionTriggerKind;
@@ -201,6 +205,7 @@ import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
 import dtm.stools.component.panels.editor.code.api.Position;
 import dtm.stools.component.panels.editor.code.api.Range;
+import dtm.stools.component.panels.editor.code.api.SymbolKind;
 import dtm.stools.component.panels.editor.code.api.TextEdit;
 import dtm.stools.component.panels.editor.code.CodeEditor;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
@@ -263,6 +268,7 @@ import java.util.Optional;
 import java.util.Objects;
 import java.util.Map;
 import java.util.Set;
+import java.net.URI;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -290,6 +296,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final int CODE_LENS_TOOLTIP_TARGETS = 8;
+    private static final int NAVIGATION_RETRIES = 2;
+    private static final long NAVIGATION_RETRY_DELAY_MS = 80;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
     private static final String BUILD_PROBLEMS_OWNER = "java.build";
     private static final String LSP_PROBLEMS_OWNER = "java.lsp";
@@ -298,9 +306,18 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
     private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
     private static final String RENAME_PROGRESS_ID = "javaRenameWait";
+    private static final Set<String> JAVA_RESERVED_WORDS = Set.of(
+            "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
+            "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
+            "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long", "native",
+            "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp",
+            "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void",
+            "volatile", "while", "true", "false", "null", "_");
     private static final String BUILD_PROGRESS_ID = "javaBuild";
     private static final String RUN_BUILD_PROGRESS_ID = "javaRunBuild";
     private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
+    private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
+    private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
 
     private static String text(String key, String fallback) {
         return dtm.stools.i18n.I18n.getText(JavaIdeAdapter.class, key, fallback);
@@ -309,6 +326,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String LSP_PROGRESS_ID = "javaLanguageServer";
+    private static final String LSP_WORK_PROGRESS_ID = "javaLanguageServerWork";
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
     private static final String DEPENDENCIES_TAB_ID = "javaDependencies";
     private static final Color DEBUG_LINE_COLOR = new Color(227, 100, 100, 80);
@@ -434,6 +452,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
     private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
     private final AtomicBoolean languageServerReadyHandled = new AtomicBoolean();
+    private final AtomicBoolean languageServerWorkVisible = new AtomicBoolean();
     private volatile RunConfigurationData selectedRunConfig;
     private volatile List<RunConfigurationData> staticRunConfigurations = List.of();
     private volatile JavaDebugValuePopup debugValuePopup;
@@ -735,7 +754,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (current == null || build == null || current.rootModule() == null) {
             return;
         }
-        if (build.isRunning() || !buildRunning.compareAndSet(false, true)) {
+        if (isStartupBuildCached(current, build)) {
+            setStatusBarText(text("status.buildCached", "Java: build em cache (sem mudancas)"));
+            return;
+        }
+        awaitLanguageServerBeforeBuild(ticket, root);
+        if (!current(ticket, root) || build.isRunning() || !buildRunning.compareAndSet(false, true)) {
             return;
         }
 
@@ -761,6 +785,34 @@ public class JavaIdeAdapter extends IdeAdapter {
             updateProgress(STARTUP_BUILD_PROGRESS_ID, completed.label(), completed.percent());
             hideProgress(STARTUP_BUILD_PROGRESS_ID);
             buildRunning.set(false);
+        }
+    }
+
+    private boolean isStartupBuildCached(JavaProjectDescriptor current, BuildSystem build) {
+        if (!settings().isIncrementalBuild()) {
+            return false;
+        }
+        try {
+            return new IncrementalJavaBuilder(current, () -> build, this::getProjectJdk)
+                    .isUpToDate(current.rootModule());
+        } catch (Exception e) {
+            log.debug("Falha ao verificar o cache do build incremental: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private void awaitLanguageServerBeforeBuild(long ticket, Path root) {
+        JdtLsService lsp = jdtLs;
+        if (lsp == null) {
+            return;
+        }
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(STARTUP_BUILD_LSP_WAIT_MS);
+        while (current(ticket, root) && System.nanoTime() < deadline) {
+            JdtLsService.State state = lsp.getState();
+            if (state != JdtLsService.State.STARTING && state != JdtLsService.State.INDEXING) {
+                return;
+            }
+            lsp.awaitReady(STARTUP_BUILD_LSP_POLL_MS);
         }
     }
 
@@ -863,6 +915,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 this::onLspDiagnosticsPublished);
         created.setMaxHeap(settings().getLanguageServerMemory());
         created.setStatusListener(this::publishLanguageServerStatus);
+        created.setWorkListener(this::publishLanguageServerWork);
         created.setCodeLensRefreshListener(this::requestRefreshCodeLenses);
         created.setWarmUpCompleteListener(this::refreshJavaEditorsAfterIndexing);
         created.setDocumentUpgradeListener(this::onLanguageServerDocumentUpgrade);
@@ -1016,7 +1069,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (state == JdtLsService.State.STARTING || state == JdtLsService.State.INDEXING) {
             int effectivePercent = percent >= 0 ? Math.max(1, Math.min(99, percent)) : -1;
             lspProgress.set(Math.max(0, effectivePercent));
-            String label = state == JdtLsService.State.INDEXING
+            String label = message == null || message.isBlank() || message.strip().equals("Java:")
                     ? text("status.indexing",
                             "Java: indexando - navegacao e autocomplete aproximados disponiveis")
                     : message;
@@ -1039,9 +1092,26 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         hideProgress(LSP_PROGRESS_ID);
+        publishLanguageServerWork(null, -1, false);
         if (state == JdtLsService.State.ERROR) {
             setStatusBarText(message);
         }
+    }
+
+    private void publishLanguageServerWork(String message, int percent, boolean active) {
+        if (!active) {
+            if (languageServerWorkVisible.compareAndSet(true, false)) {
+                hideProgress(LSP_WORK_PROGRESS_ID);
+            }
+            return;
+        }
+        String label = message == null || message.isBlank()
+                ? text("status.lspWorking", "Java: atualizando o projeto...")
+                : message;
+        if (languageServerWorkVisible.compareAndSet(false, true)) {
+            showProgress(LSP_WORK_PROGRESS_ID, label);
+        }
+        updateProgress(LSP_WORK_PROGRESS_ID, label, percent);
     }
 
     private void refreshJavaEditorsAfterIndexing() {
@@ -1693,7 +1763,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                                 declaration.start().line(), declaration.start().col());
                         complete &= references.status() == Status.COMPLETE;
                         for (Location location : references.locations()) {
-                            Path referenced = pathFromLocation(location);
+                            Path referenced = JavaNavigation.path(location);
                             if (referenced == null || isInside(referenced, deleted)) {
                                 continue;
                             }
@@ -1714,7 +1784,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         JavaSafeDeleteScanner.ScanResult scan = JavaSafeDeleteScanner.scan(projectRoot, targets, buffers);
         complete &= scan.complete() && lsp != null && lsp.isReady() && !lsp.isWarmingUp();
         for (Location location : scan.locations()) {
-            Path referenced = pathFromLocation(location);
+            Path referenced = JavaNavigation.path(location);
             if (referenced == null || isInside(referenced, deleted)) {
                 continue;
             }
@@ -1807,11 +1877,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         requestRefreshCodeLenses(file);
     }
 
-    private void onExternalChangeToOpenFile(Path file, String diskContent) {
+    private void onExternalChangeToOpenFile(Path file, String rawDiskContent) {
         JdtLsService lsp = jdtLs;
-        if (lsp == null) {
+        if (lsp == null || rawDiskContent == null) {
             return;
         }
+        String diskContent = rawDiskContent.replace("\r\n", "\n").replace('\r', '\n');
         String mirrored = lsp.documentContent(file);
         if (mirrored == null) {
             lexicalIndex.refreshFile(file, diskContent);
@@ -2321,7 +2392,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (targets.isEmpty()) return;
         if (targets.size() == 1 && kind != Kind.REFERENCES) {
             Location target = targets.getFirst();
-            navigateToLocation(target, pathFromLocation(target));
+            navigateToLocation(target, JavaNavigation.path(target));
             return;
         }
         IdeEditorContext editor = editorContextFor(context.filePath());
@@ -2536,19 +2607,11 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private List<UsagesPopup.Item> buildUsageItems(List<Location> locations, Path currentFile,
                                                    String currentText) {
-        Map<String, Location> unique = new LinkedHashMap<>();
-        if (locations != null) {
-            for (Location location : locations) {
-                if (location != null && location.uri() != null && location.range() != null) {
-                    unique.putIfAbsent(locationKey(location), location);
-                }
-            }
-        }
         List<UsagesPopup.Item> items = new ArrayList<>();
         Map<Path, List<String>> linesByFile = new HashMap<>();
         Path root = projectRoot;
-        for (Location location : unique.values()) {
-            Path path = pathFromLocation(location);
+        for (Location location : JavaNavigation.unique(locations)) {
+            Path path = JavaNavigation.path(location);
             if (path == null) {
                 if (JavaClassFileNavigation.isClassFileUri(location.uri())) {
                     String name = JavaClassFileNavigation.sourceFileName(location.uri());
@@ -2567,19 +2630,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             items.add(new UsagesPopup.Item(snippet, label, () -> navigateToLocation(location, path)));
         }
         return List.copyOf(items);
-    }
-
-    private static Path pathFromLocation(Location location) {
-        if (location == null || location.uri() == null) {
-            return null;
-        }
-        try {
-            java.net.URI uri = java.net.URI.create(location.uri());
-            return "file".equalsIgnoreCase(uri.getScheme())
-                    ? Path.of(uri).toAbsolutePath().normalize() : null;
-        } catch (Exception ignored) {
-            return null;
-        }
     }
 
     static String locationKey(Location location) {
@@ -2619,8 +2669,23 @@ public class JavaIdeAdapter extends IdeAdapter {
                     "Java: nao foi possivel abrir este destino"));
             return;
         }
-        getEditor(path, true, editor -> editor.setCaretPosition(
-                location.range().start().line(), location.range().start().col()));
+        openAt(path, location.range().start().line(), location.range().start().col());
+    }
+
+    private void openAt(Path path, int line, int col) {
+        if (path == null) return;
+        getEditor(path, true, editor -> {
+            int[] target = clampPosition(editor.getText(), line, col);
+            editor.setCaretPosition(target[0], target[1]);
+        });
+    }
+
+    static int[] clampPosition(String text, int line, int col) {
+        if (text == null) return new int[]{Math.max(0, line), Math.max(0, col)};
+        String[] lines = text.split("\\R", -1);
+        int safeLine = Math.max(0, Math.min(line, lines.length - 1));
+        int safeCol = Math.max(0, Math.min(col, lines[safeLine].length()));
+        return new int[]{safeLine, safeCol};
     }
 
     private void navigateToClassFile(Location location) {
@@ -2727,7 +2792,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 return;
             }
             Location target = targets.getFirst();
-            SwingUtilities.invokeLater(() -> navigateToLocation(target, pathFromLocation(target)));
+            SwingUtilities.invokeLater(() -> navigateToLocation(target, JavaNavigation.path(target)));
         });
     }
 
@@ -2888,15 +2953,228 @@ public class JavaIdeAdapter extends IdeAdapter {
     public List<TextEdit> computeRenameEdits(IdeRenameContext context) {
         Path filePath = context == null ? null : context.filePath();
         JdtLsService lsp = runningServerFor(filePath);
-        if (lsp == null) {
-            lsp = awaitServerForRename(filePath);
-        }
         return lsp == null ? null : lsp.rename(context.filePath(), context.text(),
                 context.line(), context.col(), context.newName());
     }
 
+    @Override
+    public IdeWorkspaceEdit computeRenameWorkspaceEdit(IdeRenameContext context) {
+        Path filePath = context == null ? null : context.filePath();
+        if (!JavaProjectConventions.isJava(filePath)) {
+            return null;
+        }
+        JdtLsService lsp = runningServerFor(filePath);
+        if (lsp == null) {
+            lsp = awaitServerForRename(filePath);
+        }
+        return lsp == null ? null : lsp.renameWorkspace(filePath, context.text(),
+                context.line(), context.col(), context.newName());
+    }
+
+    @Override
+    public boolean isRenameEnabled(Path filePath) {
+        return runningServerFor(filePath) != null;
+    }
+
+    @Override
+    public IdeRenamePolicy getRenamePolicy(Path filePath) {
+        return JavaProjectConventions.isJava(filePath) ? IdeRenamePolicy.inline() : IdeRenamePolicy.undeclared();
+    }
+
+    @Override
+    public IdeRenamePreparation prepareRename(IdeRenamePrepareContext context) {
+        Path filePath = context == null ? null : context.filePath();
+        if (!JavaProjectConventions.isJava(filePath)) {
+            return null;
+        }
+        String text = context.text();
+        JdtLsService lsp = runningServerFor(filePath);
+        if (lsp == null) {
+            return IdeRenamePreparation.rejected(isServerStarting(filePath)
+                    ? text("rename.serverLoading", "Aguarde o servidor Java terminar de carregar para renomear")
+                    : text("rename.serverUnavailable", "O servidor Java não está disponível para renomear com segurança"));
+        }
+        JdtLsService.PrepareRenameResult prepared = lsp.prepareRename(filePath, text, context.line(), context.col());
+        if (prepared != null && !prepared.renameable()) {
+            return IdeRenamePreparation.rejected(text("rename.notRenameable",
+                    "Este elemento não pode ser renomeado"));
+        }
+        Range range = prepared == null ? null : prepared.range();
+        if (range == null) {
+            range = identifierRangeAt(text, context.line(), context.col());
+        }
+        if (range == null) {
+            return null;
+        }
+        String placeholder = prepared == null ? null : prepared.placeholder();
+        if (placeholder == null || placeholder.isBlank()) {
+            placeholder = textOfRange(text, range);
+        }
+        List<Range> occurrences = new ArrayList<>();
+        List<DocumentHighlight> highlights = lsp.documentHighlights(filePath, text, context.line(), context.col());
+        if (highlights != null) {
+            for (DocumentHighlight highlight : highlights) {
+                if (highlight != null && highlight.range() != null) {
+                    occurrences.add(highlight.range());
+                }
+            }
+        }
+        SymbolKind kind = resolveRenameKind(lsp, filePath, text, context.line(), context.col(), placeholder);
+        return IdeRenamePreparation.of(range, placeholder)
+                .withOccurrences(occurrences)
+                .withKind(kind);
+    }
+
+    @Override
+    public String validateRenameName(IdeRenamePrepareContext context, String newName) {
+        if (context == null || !JavaProjectConventions.isJava(context.filePath())) {
+            return null;
+        }
+        String name = newName == null ? "" : newName.trim();
+        if (name.isEmpty()) {
+            return null;
+        }
+        if (JAVA_RESERVED_WORDS.contains(name)) {
+            return text("rename.reservedWord", "'{name}' é uma palavra reservada do Java").replace("{name}", name);
+        }
+        if (!Character.isJavaIdentifierStart(name.charAt(0))) {
+            return text("rename.invalidIdentifier", "'{name}' não é um identificador Java válido").replace("{name}", name);
+        }
+        for (int i = 1; i < name.length(); i++) {
+            if (!Character.isJavaIdentifierPart(name.charAt(i))) {
+                return text("rename.invalidIdentifier", "'{name}' não é um identificador Java válido").replace("{name}", name);
+            }
+        }
+        return null;
+    }
+
+    private boolean isServerStarting(Path filePath) {
+        JdtLsService lsp = jdtLs;
+        if (lsp == null || !JavaProjectConventions.isJava(filePath)) {
+            return false;
+        }
+        JdtLsService.State state = lsp.getState();
+        return state == JdtLsService.State.NOT_STARTED
+                || state == JdtLsService.State.STARTING
+                || state == JdtLsService.State.INDEXING;
+    }
+
+    private SymbolKind resolveRenameKind(JdtLsService lsp, Path filePath, String text, int line, int col, String name) {
+        Position position = new Position(line, col);
+        SymbolKind declared = symbolKindAt(lsp.documentSymbols(filePath, text), position);
+        if (declared != null) {
+            return declared;
+        }
+        try {
+            if (JavaLocalScope.at(text, line, col) != null) {
+                return SymbolKind.VARIABLE;
+            }
+        } catch (Exception ignored) {
+        }
+        List<Location> definitions = lsp.definitions(filePath, text, line, col);
+        Location definition = definitions == null || definitions.isEmpty() ? null : definitions.get(0);
+        if (definition != null && definition.range() != null && isSameFile(definition, filePath)) {
+            SymbolKind atDefinition = symbolKindAt(lsp.documentSymbols(filePath, text), definition.range().start());
+            if (atDefinition != null) {
+                return atDefinition;
+            }
+            return SymbolKind.VARIABLE;
+        }
+        List<CallHierarchyItem> calls = lsp.prepareCallHierarchy(filePath, text, line, col);
+        if (calls != null && !calls.isEmpty() && calls.get(0).kind() != null) {
+            return calls.get(0).kind();
+        }
+        if (definition != null && name != null && !name.isEmpty() && Character.isUpperCase(name.charAt(0))) {
+            String fileName = definitionFileName(definition);
+            if (fileName != null && fileName.equals(name + ".java")) {
+                return SymbolKind.CLASS;
+            }
+        }
+        return SymbolKind.FIELD;
+    }
+
+    private static SymbolKind symbolKindAt(List<DocumentSymbol> symbols, Position position) {
+        if (symbols == null || position == null) {
+            return null;
+        }
+        for (DocumentSymbol symbol : symbols) {
+            if (symbol.range() != null && !symbol.range().contains(position)) {
+                continue;
+            }
+            SymbolKind nested = symbolKindAt(symbol.children(), position);
+            if (nested != null) {
+                return nested;
+            }
+            if (symbol.selectionRange() != null && symbol.selectionRange().contains(position)) {
+                return symbol.kind();
+            }
+        }
+        return null;
+    }
+
+    private static boolean isSameFile(Location location, Path filePath) {
+        if (location.isLocal()) {
+            return true;
+        }
+        try {
+            Path target = Path.of(URI.create(location.uri())).toAbsolutePath().normalize();
+            return filePath != null && target.equals(filePath.toAbsolutePath().normalize());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static String definitionFileName(Location location) {
+        if (location == null || location.isLocal()) {
+            return null;
+        }
+        String uri = location.uri();
+        int slash = uri.lastIndexOf('/');
+        String name = slash >= 0 ? uri.substring(slash + 1) : uri;
+        int query = name.indexOf('?');
+        return query >= 0 ? name.substring(0, query) : name;
+    }
+
+    private static Range identifierRangeAt(String text, int line, int col) {
+        if (text == null) {
+            return null;
+        }
+        String[] lines = text.split("\n", -1);
+        if (line < 0 || line >= lines.length) {
+            return null;
+        }
+        String lineText = lines[line];
+        int start = Math.max(0, Math.min(col, lineText.length()));
+        int end = start;
+        while (start > 0 && Character.isJavaIdentifierPart(lineText.charAt(start - 1))) {
+            start--;
+        }
+        while (end < lineText.length() && Character.isJavaIdentifierPart(lineText.charAt(end))) {
+            end++;
+        }
+        if (end <= start) {
+            return null;
+        }
+        return Range.of(line, start, line, end);
+    }
+
+    private static String textOfRange(String text, Range range) {
+        if (text == null || range == null || range.start().line() != range.end().line()) {
+            return null;
+        }
+        String[] lines = text.split("\n", -1);
+        int line = range.start().line();
+        if (line < 0 || line >= lines.length) {
+            return null;
+        }
+        String lineText = lines[line];
+        int start = Math.max(0, Math.min(range.start().col(), lineText.length()));
+        int end = Math.max(start, Math.min(range.end().col(), lineText.length()));
+        return lineText.substring(start, end);
+    }
+
     private JdtLsService awaitServerForRename(Path filePath) {
-        if (!isIndexing(filePath)) {
+        if (!isServerStarting(filePath)) {
             return null;
         }
         JdtLsService lsp = jdtLs;
@@ -3119,13 +3397,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         long session = lifecycle.get();
         long clickStart = System.nanoTime();
         background.submit(() -> {
-            Result result = resolveNavigation(context.filePath(), context.text(),
-                    context.line(), context.col(), Kind.DEFINITION);
+            IdeEditorContext editor = context.editorContext();
+            Supplier<NavigationRequest> live = () -> NavigationRequest.of(editor);
+            NavigationRequest request = new NavigationRequest(context.text(), context.line(), context.col());
+            Result result = resolveCurrent(live, request, context.filePath(), Kind.DEFINITION, false).result();
             Kind kind = Kind.DEFINITION;
             if (isResolved(result) && isOwnDeclaration(result.locations(), context)) {
                 kind = Kind.REFERENCES;
-                result = JavaNavigation.restrict(resolveNavigation(context.filePath(), context.text(),
-                        context.line(), context.col(), kind), Extent.DOCUMENT, context.filePath());
+                result = JavaNavigation.restrict(resolveCurrent(live, request, context.filePath(), kind, false)
+                        .result(), Extent.DOCUMENT, context.filePath());
             }
             publishNavigationResult(ticket, session, context.editorContext(), context.filePath(),
                     context.text(), kind, result);
@@ -3134,6 +3414,41 @@ public class JavaIdeAdapter extends IdeAdapter {
                         elapsedMs(clickStart), result.locations().size());
             }
         });
+    }
+
+    public record NavigationRequest(String text, int line, int col) {
+        static NavigationRequest of(IdeEditorContext editor) {
+            return editor == null ? null : onUi(() -> new NavigationRequest(
+                    editor.getText(), editor.getCaretLine(), editor.getCaretCol()));
+        }
+    }
+
+    public record ResolvedNavigation(NavigationRequest request, Result result) { }
+
+    ResolvedNavigation resolveCurrent(Supplier<NavigationRequest> live, NavigationRequest request,
+                                      Path file, Kind kind, boolean followEdits) {
+        Result result = resolveNavigation(file, request.text(), request.line(), request.col(), kind);
+        for (int attempt = 0; attempt < NAVIGATION_RETRIES && shouldRetryNavigation(result); attempt++) {
+            NavigationRequest current = live == null ? null : live.get();
+            if (current == null || current.text() == null) break;
+            if (!current.text().equals(request.text())) {
+                if (!followEdits) break;
+                request = current;
+            }
+            try {
+                Thread.sleep(NAVIGATION_RETRY_DELAY_MS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            result = resolveNavigation(file, request.text(), request.line(), request.col(), kind);
+        }
+        return new ResolvedNavigation(request, result);
+    }
+
+    static boolean shouldRetryNavigation(Result result) {
+        return result != null && (result.status() == Status.STALE
+                || result.status() == Status.FAILED && result.locations().isEmpty());
     }
 
     private long beginNavigation() {
@@ -3154,7 +3469,10 @@ public class JavaIdeAdapter extends IdeAdapter {
                         "Java: navegacao semantica indisponivel"));
                 return;
             }
-            if (!Objects.equals(requestedText, editor.getText())) {
+            String current = editor.getText();
+            if (!Objects.equals(requestedText, current)) {
+                JdtLsService lsp = jdtLs;
+                if (lsp != null && current != null) background.submit(() -> lsp.changeDocument(file, current));
                 setStatusBarText(text("status.navigation.stale",
                         "Java: o codigo mudou; tente novamente"));
                 return;
@@ -3241,12 +3559,16 @@ public class JavaIdeAdapter extends IdeAdapter {
     private void navigateFromEditor(IdeEditorContext context, String action) {
         if (context == null || !isNavigationAvailable(context.filePath())) return;
         Path file = context.filePath();
-        String source = context.getText();
-        int line = context.getCaretLine(), col = context.getCaretCol();
+        NavigationRequest request = new NavigationRequest(context.getText(),
+                context.getCaretLine(), context.getCaretCol());
         long ticket = beginNavigation(), session = lifecycle.get();
         Kind kind = Kind.forAction(action);
-        background.submit(() -> publishNavigationResult(ticket, session, context, file, source,
-                kind, resolveNavigation(file, source, line, col, kind)));
+        background.submit(() -> {
+            ResolvedNavigation resolved = resolveCurrent(() -> NavigationRequest.of(context),
+                    request, file, kind, true);
+            publishNavigationResult(ticket, session, context, file, resolved.request().text(),
+                    kind, resolved.result());
+        });
     }
 
     private boolean isNavigationAvailable(Path filePath) {
@@ -3270,7 +3592,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (result.status() == Status.COMPLETE) setStatusBarText(text("status.navigation.done", "Java: busca concluida"));
         if (targets.size() == 1 && kind != Kind.REFERENCES) {
             Location target = targets.getFirst();
-            navigateToLocation(target, pathFromLocation(target));
+            navigateToLocation(target, JavaNavigation.path(target));
             return;
         }
         openUsagesPopup(context, null, countLabel(kind, items.size()), items);
@@ -5814,8 +6136,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public void open(TodoItem item) {
             if (item != null) {
-                getEditor(item.file(), true,
-                        editor -> editor.setCaretPosition(item.line(), item.column()));
+                openAt(item.file(), item.line(), item.column());
             }
         }
     }
@@ -6269,13 +6590,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (file == null) {
                 return;
             }
-            requestOpenFile(file);
-            SwingUtilities.invokeLater(() -> {
-                IdeEditorContext editor = getEditor(file, true);
-                if (editor != null) {
-                    editor.setCaretPosition(Math.max(0, line - 1), 0);
-                }
-            });
+            openAt(file, Math.max(0, line - 1), 0);
         }
     }
 
@@ -6450,13 +6765,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (file == null) {
                 return;
             }
-            requestOpenFile(file);
-            SwingUtilities.invokeLater(() -> {
-                IdeEditorContext editor = getEditor(file, true);
-                if (editor != null) {
-                    editor.setCaretPosition(Math.max(0, line - 1), 0);
-                }
-            });
+            openAt(file, Math.max(0, line - 1), 0);
         }
 
         @Override
@@ -6692,7 +7001,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                 descriptor = reloaded;
             }
             JdtLsService lsp = jdtLs;
-            boolean agentChanged = applyLombokAgent(lsp, descriptor);
+            applyLombokAgent(lsp, descriptor);
+            boolean agentChanged = lsp != null && lsp.needsRestartForLombokAgent();
             if (agentChanged || lsp == null || !lsp.updateProjectConfiguration(root)) {
                 clearCaches();
                 return;
@@ -7076,7 +7386,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void restartWhenLombokAgentChanged(JdtLsService lsp, JavaProjectDescriptor current) {
-        if (current == null || !applyLombokAgent(lsp, current)) {
+        if (current == null || lsp == null) {
+            return;
+        }
+        applyLombokAgent(lsp, current);
+        if (!lsp.needsRestartForLombokAgent()) {
             return;
         }
         log.info("Agente do Lombok mudou; reiniciando o IntelliSense Java");

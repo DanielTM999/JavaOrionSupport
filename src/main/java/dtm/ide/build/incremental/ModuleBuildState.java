@@ -63,7 +63,12 @@ public final class ModuleBuildState {
     }
 
     public boolean isLocallyUsable(String expectedLocalFingerprint) {
-        return loaded && localFingerprint.equals(expectedLocalFingerprint) && !entries.isEmpty();
+        return matchesLocally(expectedLocalFingerprint) && !entries.isEmpty();
+    }
+
+    public boolean matchesLocally(String expectedLocalFingerprint) {
+        return loaded && !localFingerprint.isEmpty()
+                && localFingerprint.equals(expectedLocalFingerprint);
     }
 
     public String classpath() {
@@ -269,6 +274,16 @@ public final class ModuleBuildState {
         Set<String> names = new LinkedHashSet<>();
         for (JavaLexicalSource.Declared declared : JavaLexicalSource.declarations(content)) {
             if (JavaLexicalSource.isType(declared.kind())) {
+                names.add(declared.name());
+            }
+        }
+        return List.copyOf(names);
+    }
+
+    static List<String> topLevelTypesDeclaredIn(String content) {
+        Set<String> names = new LinkedHashSet<>();
+        for (JavaLexicalSource.Declared declared : JavaLexicalSource.declarations(content)) {
+            if (declared.depth() == 0 && JavaLexicalSource.isType(declared.kind())) {
                 names.add(declared.name());
             }
         }

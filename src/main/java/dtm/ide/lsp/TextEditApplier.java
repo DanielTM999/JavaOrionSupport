@@ -29,6 +29,7 @@ final class TextEditApplier {
 
     private static List<Span> resolve(String text, List<TextEdit> edits, int[] lineOffsets) {
         List<Span> spans = new ArrayList<>(edits.size());
+        boolean lineFeedOnly = text.indexOf('\r') < 0;
         for (TextEdit edit : edits) {
             if (edit == null || edit.range() == null) {
                 continue;
@@ -36,7 +37,11 @@ final class TextEditApplier {
             int start = offsetOf(edit.range().start(), lineOffsets, text.length());
             int end = offsetOf(edit.range().end(), lineOffsets, text.length());
             if (start <= end) {
-                spans.add(new Span(start, end, edit.newText() == null ? "" : edit.newText()));
+                String newText = edit.newText() == null ? "" : edit.newText();
+                if (lineFeedOnly) {
+                    newText = newText.replace("\r\n", "\n").replace('\r', '\n');
+                }
+                spans.add(new Span(start, end, newText));
             }
         }
         spans.sort(Comparator.comparingInt(Span::start).thenComparingInt(Span::end));
@@ -81,7 +86,8 @@ final class TextEditApplier {
         if (line >= lineOffsets.length) {
             return textLength;
         }
-        return Math.min(textLength, lineOffsets[line] + Math.max(0, position.col()));
+        int lineEnd = line + 1 < lineOffsets.length ? lineOffsets[line + 1] - 1 : textLength;
+        return Math.min(lineEnd, lineOffsets[line] + Math.max(0, position.col()));
     }
 
     static String apply(String text, TextEdit edit) {

@@ -22,6 +22,26 @@ class TextEditApplierTest {
     }
 
     @Test
+    void carriageReturnsFromTheServerDoNotLeakIntoALineFeedDocument() {
+        String text = "a;\nb;";
+
+        String result = TextEditApplier.apply(text,
+                new TextEdit(Range.of(0, 2, 1, 0), "\r\nx\r\n"));
+
+        assertEquals("a;\nx\nb;", result);
+    }
+
+    @Test
+    void aColumnPastTheEndOfTheLineStopsAtThatLine() {
+        String text = "ab;\ncd;";
+
+        String result = TextEditApplier.apply(text,
+                new TextEdit(Range.of(0, 3, 0, 40), "!"));
+
+        assertEquals("ab;!\ncd;", result);
+    }
+
+    @Test
     void appliesMultipleEditsWithoutShiftingEachOther() {
         String text = "a b c";
 

@@ -84,6 +84,155 @@ class JdtLsServiceTest {
     }
 
     @Test
+    void aModernHotSpotServerBootsWithTheSharedArchiveAndWithoutScanningForJdks() {
+        List<String> command = commandFor(JdkVendor.TEMURIN, 21);
+
+        assertTrue(command.contains("-DDetectVMInstallationsJob.disabled=true"));
+        assertTrue(command.contains("-XX:+UseParallelGC"));
+        assertTrue(command.contains("-XX:+AutoCreateSharedArchive"));
+        assertTrue(command.contains("-XX:SharedArchiveFile="
+                + root.resolve("jdtls").toAbsolutePath().normalize().resolve("jdtls-jdk21.jsa")));
+        assertTrue(command.indexOf("-XX:+AutoCreateSharedArchive") < command.indexOf("-jar"));
+    }
+
+    @Test
+    void aServerJdkOlderThanNineteenSkipsTheSharedArchive() {
+        List<String> command = commandFor(JdkVendor.TEMURIN, 17);
+
+        assertTrue(command.contains("-XX:+UseParallelGC"));
+        assertTrue(command.stream().noneMatch(argument -> argument.contains("SharedArchive")));
+    }
+
+    @Test
+    void anOpenJ9ServerReceivesNoHotSpotOptions() {
+        List<String> command = commandFor(JdkVendor.SEMERU, 21);
+
+        assertTrue(command.stream().noneMatch(argument -> argument.startsWith("-XX:")));
+        assertTrue(command.contains("-DDetectVMInstallationsJob.disabled=true"));
+    }
+
+    @Test
+    void theLombokAgentNeverShipsTogetherWithTheSharedArchive() {
+        JdtLsService service = new JdtLsService(null, null, null, null);
+        service.setLombokAgentJar(root.resolve("lombok.jar"));
+
+        List<String> command = service.buildCommand(hotSpot(21), installation(), root.resolve("ws"));
+
+        assertTrue(command.contains("-javaagent:" + root.resolve("lombok.jar")));
+        assertTrue(command.stream().noneMatch(argument -> argument.contains("SharedArchive")));
+    }
+
+    @Test
+    void theRealJvmAcceptsTheServerOptionsWithAndWithoutAnAgent() throws Exception {
+        String vmName = System.getProperty("java.vm.name", "");
+        JdkInstallation runtime = new JdkInstallation(Path.of(System.getProperty("java.home")),
+                vmName.contains("OpenJ9") ? JdkVendor.SEMERU : JdkVendor.TEMURIN,
+                Runtime.version().feature(), System.getProperty("java.version"),
+                JdkInstallation.JdkOrigin.MANAGED);
+        Path agent = noOpAgentJar();
+
+        for (Path lombok : java.util.Arrays.asList(agent, null)) {
+            Path home = Files.createDirectories(
+                    root.resolve(lombok == null ? "jdtls-sem-agente" : "jdtls-com-agente"));
+            JdtLsService service = new JdtLsService(null, null, null, null);
+            service.setLombokAgentJar(lombok);
+            List<String> command = service.buildCommand(runtime,
+                    new JdtLsProvisioner.JdtLsInstallation(home, home.resolve("launcher.jar"),
+                            home.resolve("config_win")),
+                    root.resolve("ws"));
+            List<String> vmOnly = new ArrayList<>(command.subList(0, command.indexOf("-jar")));
+            vmOnly.set(0, javaExecutable());
+            vmOnly.add("-version");
+
+            Process jvm = new ProcessBuilder(vmOnly).redirectErrorStream(true).start();
+            String output = new String(jvm.getInputStream().readAllBytes());
+
+            assertTrue(jvm.waitFor(60, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(0, jvm.exitValue(), "agente=" + lombok + " saida=" + output);
+        }
+    }
+
+    @Test
+    void aRunningServerStartedWithAnotherAgentNeedsARestart() throws Exception {
+        Process child = new ProcessBuilder(javaExecutable(), "-cp",
+                System.getProperty("java.class.path"), IdleServer.class.getName()).start();
+        JdtLsService service = new JdtLsService(null, null, null, null);
+        try {
+            assertEquals('R', child.getInputStream().read());
+            service.setLombokAgentJar(root.resolve("lombok-1.jar"));
+            service.buildCommand(hotSpot(21), installation(), root.resolve("ws"));
+            var processField = JdtLsService.class.getDeclaredField("process");
+            processField.setAccessible(true);
+            processField.set(service, child);
+
+            assertFalse(service.needsRestartForLombokAgent());
+            service.setLombokAgentJar(root.resolve("lombok-2.jar"));
+            assertTrue(service.needsRestartForLombokAgent());
+        } finally {
+            child.destroyForcibly();
+            service.shutdown();
+        }
+    }
+
+    public static class NoOpAgent implements java.lang.instrument.ClassFileTransformer {
+        public static void premain(String arguments, java.lang.instrument.Instrumentation instrumentation) {
+            instrumentation.addTransformer(new NoOpAgent());
+        }
+    }
+
+    private Path noOpAgentJar() throws Exception {
+        String entry = NoOpAgent.class.getName().replace('.', '/') + ".class";
+        java.util.jar.Manifest manifest = new java.util.jar.Manifest();
+        manifest.getMainAttributes().put(java.util.jar.Attributes.Name.MANIFEST_VERSION, "1.0");
+        manifest.getMainAttributes().putValue("Premain-Class", NoOpAgent.class.getName());
+        manifest.getMainAttributes().putValue("Can-Redefine-Classes", "true");
+        Path jar = root.resolve("noop-agent.jar");
+        try (var out = new java.util.jar.JarOutputStream(Files.newOutputStream(jar), manifest);
+             var in = NoOpAgent.class.getClassLoader().getResourceAsStream(entry)) {
+            out.putNextEntry(new java.util.jar.JarEntry(entry));
+            in.transferTo(out);
+            out.closeEntry();
+        }
+        return jar;
+    }
+
+    private static String javaExecutable() {
+        return Path.of(System.getProperty("java.home"), "bin",
+                System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java").toString();
+    }
+
+    private JdkInstallation hotSpot(int major) {
+        return new JdkInstallation(root.resolve("jdk"), JdkVendor.TEMURIN, major,
+                major + ".0.1", JdkInstallation.JdkOrigin.MANAGED);
+    }
+
+    private JdtLsProvisioner.JdtLsInstallation installation() {
+        return new JdtLsProvisioner.JdtLsInstallation(
+                root.resolve("jdtls").toAbsolutePath().normalize(),
+                root.resolve("jdtls/plugins/launcher.jar"),
+                root.resolve("jdtls/config_win"));
+    }
+
+    @Test
+    void settingTheLombokAgentBeforeTheServerStartsNeedsNoRestart() {
+        JdtLsService service = new JdtLsService(null, null, null, null);
+
+        assertTrue(service.setLombokAgentJar(root.resolve("lombok.jar")));
+        assertFalse(service.needsRestartForLombokAgent());
+    }
+
+    private List<String> commandFor(JdkVendor vendor, int major) {
+        JdtLsService service = new JdtLsService(null, null, null, null);
+        JdkInstallation runtime = new JdkInstallation(root.resolve("jdk"), vendor, major,
+                major + ".0.1", JdkInstallation.JdkOrigin.MANAGED);
+        return service.buildCommand(runtime, new JdtLsProvisioner.JdtLsInstallation(
+                        root.resolve("jdtls").toAbsolutePath().normalize(),
+                        root.resolve("jdtls/plugins/launcher.jar"),
+                        root.resolve("jdtls/config_win")),
+                root.resolve("workspace"));
+    }
+
+    @Test
     void recognizesOnlyJdtLsProcessesUsingTheSameWorkspace() {
         Path workspace = root.resolve("workspace").toAbsolutePath().normalize();
         String[] matching = {

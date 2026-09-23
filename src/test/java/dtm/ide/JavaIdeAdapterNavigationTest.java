@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -69,7 +70,73 @@ class JavaIdeAdapterNavigationTest {
         assertTrue(result.locations().isEmpty());
     }
 
-    private static final IdeEditorContext EDITOR = (IdeEditorContext) Proxy.newProxyInstance(
+    @Test
+    void aStaleAnswerIsRetriedWhileTheEditorStillShowsTheSameText() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        JavaIdeAdapter adapter = adapterAnswering(calls, 1);
+        String source = "class A { B b; }";
+        var request = new JavaIdeAdapter.NavigationRequest(source, 0, 10);
+
+        var resolved = adapter.resolveCurrent(() -> request, request, Path.of("A.java"),
+                dtm.ide.navigation.JavaNavigation.Kind.DEFINITION, false);
+
+        assertEquals(dtm.ide.navigation.JavaNavigation.Status.COMPLETE, resolved.result().status());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void aClickIsNotRetriedAgainstTextTheUserHasSinceChanged() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        JavaIdeAdapter adapter = adapterAnswering(calls, 5);
+        var request = new JavaIdeAdapter.NavigationRequest("class A { B b; }", 0, 10);
+        var edited = new JavaIdeAdapter.NavigationRequest("class A { B bb; }", 0, 10);
+
+        var resolved = adapter.resolveCurrent(() -> edited, request, Path.of("A.java"),
+                dtm.ide.navigation.JavaNavigation.Kind.DEFINITION, false);
+
+        assertEquals(dtm.ide.navigation.JavaNavigation.Status.STALE, resolved.result().status());
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void caretNavigationFollowsTheLatestEditorText() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        JavaIdeAdapter adapter = adapterAnswering(calls, 1);
+        var request = new JavaIdeAdapter.NavigationRequest("class A { B b; }", 0, 10);
+        var edited = new JavaIdeAdapter.NavigationRequest("class A { B bb; }", 0, 10);
+
+        var resolved = adapter.resolveCurrent(() -> edited, request, Path.of("A.java"),
+                dtm.ide.navigation.JavaNavigation.Kind.DEFINITION, true);
+
+        assertEquals(dtm.ide.navigation.JavaNavigation.Status.COMPLETE, resolved.result().status());
+        assertSame(edited, resolved.request());
+    }
+
+    @Test
+    void theTargetPositionIsClampedToTheBufferTheEditorHolds() {
+        assertArrayEquals(new int[]{1, 3}, JavaIdeAdapter.clampPosition("abc\r\ndef", 7, 40));
+        assertArrayEquals(new int[]{0, 0}, JavaIdeAdapter.clampPosition("", 3, 2));
+        assertArrayEquals(new int[]{1, 2}, JavaIdeAdapter.clampPosition("abc\ndef", 1, 2));
+    }
+
+    private static JavaIdeAdapter adapterAnswering(AtomicInteger calls, int staleAnswers) throws Exception {
+        JavaIdeAdapter adapter = new JavaIdeAdapter();
+        var lsp = new dtm.ide.lsp.JdtLsService(null, null, null, null) {
+            @Override public boolean isInteractive() { return true; }
+            @Override public dtm.ide.navigation.JavaNavigation.Result navigation(
+                    dtm.ide.navigation.JavaNavigation.Kind kind, Path file, String text, int line, int col) {
+                return dtm.ide.navigation.JavaNavigation.Result.of(calls.incrementAndGet() <= staleAnswers
+                        ? dtm.ide.navigation.JavaNavigation.Status.STALE
+                        : dtm.ide.navigation.JavaNavigation.Status.COMPLETE);
+            }
+        };
+        var field = JavaIdeAdapter.class.getDeclaredField("jdtLs");
+        field.setAccessible(true);
+        field.set(adapter, lsp);
+        return adapter;
+    }
+
+    private static final IdeEditorContext EDITOR =(IdeEditorContext) Proxy.newProxyInstance(
             IdeEditorContext.class.getClassLoader(),
             new Class<?>[]{IdeEditorContext.class},
             (proxy, method, args) -> null);

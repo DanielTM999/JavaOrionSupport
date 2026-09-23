@@ -83,6 +83,17 @@ class JdtLsExtensionBundlesTest {
         assertFalse(bundles().resolveBundlePaths(false).contains(candidate.toString()));
     }
 
+    @Test
+    void pluginsFollowingTheEclipseNamingAreIdentifiedWithoutOpeningTheJar() throws Exception {
+        Path server = testRunnerServerDir();
+        Path candidate = Files.createFile(server.resolve("org.objectweb.asm_9.10.1.jar"));
+        declareJavaExtensions("./server/org.objectweb.asm_9.10.1.jar");
+        writeBundleJar(jdtlsPlugins().resolve("org.objectweb.asm_9.10.1.jar"),
+                "manifesto.que.nao.deveria.ser.lido", "0.0.1");
+
+        assertFalse(bundles().resolveBundlePaths(false).contains(candidate.toString()));
+    }
+
     private JdtLsExtensionBundles bundles() {
         return new JdtLsExtensionBundles(new SdkDownloader(null), sdkRoot);
     }

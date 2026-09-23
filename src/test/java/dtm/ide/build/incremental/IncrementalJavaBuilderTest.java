@@ -91,6 +91,48 @@ class IncrementalJavaBuilderTest {
     }
 
     @Test
+    void nestedTypesDoNotMakeTheOutputLookIncomplete() {
+        source("Lojista.java", "package a; public class Lojista { record Endereco(String rua) {} "
+                + "enum Tipo { A } static class Interna {} }");
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+
+        BuildResult result = builder().build(module(), false, line -> { });
+
+        assertTrue(result.successful());
+        assertTrue(build.requests.isEmpty());
+        assertTrue(javacCalls.isEmpty());
+    }
+
+    @Test
+    void aModuleWithoutSourcesIsNotRebuiltOnEveryOpen() throws Exception {
+        Files.createDirectories(root.resolve("web/src/main/java"));
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+        int resolutions = build.classpathResolutions;
+
+        builder().build(module(), false, line -> { });
+
+        assertTrue(build.requests.isEmpty());
+        assertEquals(resolutions, build.classpathResolutions);
+    }
+
+    @Test
+    void upToDateReflectsTheCachedState() throws Exception {
+        Path lojista = source("Lojista.java", "package a; public class Lojista { class Item {} }");
+        assertFalse(builder().isUpToDate(module()));
+        builder().build(module(), false, line -> { });
+        int resolutions = build.classpathResolutions;
+
+        assertTrue(builder().isUpToDate(module()));
+        assertEquals(resolutions, build.classpathResolutions);
+
+        Files.writeString(lojista, "package a; public class Lojista { void extra() {} }",
+                StandardCharsets.UTF_8);
+        assertFalse(builder().isUpToDate(module()));
+    }
+
+    @Test
     void republishedJarAtTheSamePathInvalidatesTheState() throws Exception {
         source("Lojista.java", "package a; public class Lojista {}");
         Path dependency = Files.writeString(root.resolve("dependency.jar"), "first",

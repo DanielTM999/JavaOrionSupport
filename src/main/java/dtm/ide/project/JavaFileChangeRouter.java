@@ -7,6 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -49,12 +51,17 @@ public final class JavaFileChangeRouter {
     private final Predicate<Path> editorManaged;
     private final ScheduledExecutorService scheduler;
     private final Map<Path, Pending> pending = new ConcurrentHashMap<>();
+    private final Map<Path, Stamp> known = new ConcurrentHashMap<>();
+    private final Set<Path> baselineRoots = ConcurrentHashMap.newKeySet();
 
     private boolean closed;
     private long generation;
 
     private record Pending(ScheduledFuture<?> task, boolean created, boolean directory,
-                           long generation) {
+                           boolean differential, long generation) {
+    }
+
+    private record Stamp(long size, long modified) {
     }
 
     public JavaFileChangeRouter(Listener listener, Predicate<Path> editorManaged) {
@@ -76,18 +83,18 @@ public final class JavaFileChangeRouter {
             return;
         }
         if (kind == StandardWatchEventKinds.OVERFLOW) {
-            schedule(file, false, true);
+            schedule(file, false, true, true);
             return;
         }
         boolean created = kind == StandardWatchEventKinds.ENTRY_CREATE;
         if (created && Files.isDirectory(file)) {
-            schedule(file, true, true);
+            schedule(file, true, true, false);
             return;
         }
         if (roleOf(file) == null) {
             return;
         }
-        schedule(file, created, false);
+        schedule(file, created, false, false);
     }
 
     public void acceptCreated(Path createdPath) {
@@ -98,7 +105,7 @@ public final class JavaFileChangeRouter {
         if (roleOf(file) == null) {
             return;
         }
-        schedule(file, true, false);
+        schedule(file, true, false, false);
     }
 
     public void acceptDirectory(Path directory) {
@@ -109,20 +116,23 @@ public final class JavaFileChangeRouter {
         if (isIgnored(root)) {
             return;
         }
-        schedule(root, false, true);
+        schedule(root, false, true, false);
     }
 
-    private synchronized void schedule(Path file, boolean created, boolean directory) {
+    private synchronized void schedule(Path file, boolean created, boolean directory,
+                                       boolean differential) {
         if (closed) return;
         pending.compute(file, (path, previous) -> {
             boolean wasCreated = created || (previous != null && previous.created());
+            boolean onlyDifferences = differential
+                    && (previous == null || !previous.directory() || previous.differential());
             if (previous != null) {
                 previous.task().cancel(false);
             }
             long ticket = ++generation;
             ScheduledFuture<?> task = scheduler.schedule(() -> dispatch(path, ticket),
                     DEBOUNCE_MS, TimeUnit.MILLISECONDS);
-            return new Pending(task, wasCreated, directory, ticket);
+            return new Pending(task, wasCreated, directory, onlyDifferences, ticket);
         });
     }
 
@@ -137,18 +147,26 @@ public final class JavaFileChangeRouter {
         Pending removed = claim(file, ticket);
         if (removed == null) return;
         if (removed.directory()) {
-            scanDirectory(file, removed.created());
+            if (removed.differential()) {
+                scanDifferences(file);
+            } else {
+                scanDirectory(file, removed.created());
+            }
             return;
         }
         FileRole role = roleOf(file);
         if (role == null) {
             return;
         }
+        Stamp current = stampOf(file);
+        Stamp previous = current == null ? known.remove(file) : known.put(file, current);
         Change change;
-        if (!Files.exists(file)) {
+        if (current == null) {
             change = Change.DELETED;
         } else if (removed.created()) {
             change = Change.CREATED;
+        } else if (current.equals(previous)) {
+            return;
         } else {
             change = Change.MODIFIED;
         }
@@ -174,13 +192,77 @@ public final class JavaFileChangeRouter {
             log.debug("Falha ao varrer {}: {}", directory, e.getMessage());
             return;
         }
-        found.forEach(path -> schedule(path, created, false));
+        found.forEach(path -> schedule(path, created, false, false));
+    }
+
+    private void scanDifferences(Path directory) {
+        if (!Files.isDirectory(directory)) {
+            return;
+        }
+        List<Path> found;
+        try (Stream<Path> walk = Files.walk(directory, MAX_SCAN_DEPTH)) {
+            found = walk.filter(Files::isRegularFile)
+                    .filter(path -> !isIgnored(path))
+                    .filter(path -> roleOf(path) != null)
+                    .limit(MAX_SCAN_FILES)
+                    .toList();
+        } catch (Exception e) {
+            log.debug("Falha ao varrer {}: {}", directory, e.getMessage());
+            return;
+        }
+        boolean baseline = !hasBaseline(directory);
+        Set<Path> present = new HashSet<>(found);
+        for (Path path : found) {
+            Stamp current = stampOf(path);
+            if (current == null) {
+                continue;
+            }
+            Stamp previous = known.get(path);
+            if (baseline) {
+                known.put(path, current);
+            } else if (previous == null) {
+                schedule(path, true, false, false);
+            } else if (!previous.equals(current)) {
+                schedule(path, false, false, false);
+            }
+        }
+        if (baseline) {
+            baselineRoots.add(directory);
+            return;
+        }
+        for (Path path : known.keySet()) {
+            if (path.startsWith(directory) && !present.contains(path) && !Files.exists(path)) {
+                schedule(path, false, false, false);
+            }
+        }
+    }
+
+    private boolean hasBaseline(Path directory) {
+        for (Path root : baselineRoots) {
+            if (directory.startsWith(root)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Stamp stampOf(Path file) {
+        try {
+            BasicFileAttributes attributes = Files.readAttributes(file, BasicFileAttributes.class);
+            return attributes.isRegularFile()
+                    ? new Stamp(attributes.size(), attributes.lastModifiedTime().toMillis())
+                    : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     public synchronized void shutdown() {
         closed = true;
         pending.values().forEach(entry -> entry.task().cancel(false));
         pending.clear();
+        known.clear();
+        baselineRoots.clear();
         scheduler.shutdownNow();
     }
 

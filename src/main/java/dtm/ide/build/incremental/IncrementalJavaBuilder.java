@@ -158,31 +158,70 @@ public final class IncrementalJavaBuilder {
                               String fingerprint, Path stateFile, boolean full, String reason) {
     }
 
-    private ModulePlan planOf(JavaModule module, boolean test) {
+    public boolean isUpToDate(JavaModule target) {
+        if (!isApplicable(target)) {
+            return false;
+        }
+        for (JavaModule module : WorkspaceModuleGraph.of(descriptor).buildOrderFor(target)) {
+            List<Path> sources = collectSources(module, false);
+            Optional<ModulePlan> cached = cachedPlanOf(module, false, sources);
+            if (cached.isEmpty()) {
+                return false;
+            }
+            if (!cached.get().state().changes(module.root(), sources).isEmpty()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private Optional<ModulePlan> cachedPlanOf(JavaModule module, boolean test, List<Path> sources) {
         Path stateFile = stateFileOf(module, test);
         ModuleBuildState state = ModuleBuildState.load(stateFile);
         String localFingerprint = localFingerprintOf(module);
         String storedClasspath = state.classpath();
+        if (sources.isEmpty() && state.matchesLocally(localFingerprint)) {
+            return Optional.of(new ModulePlan(module, storedClasspath, state, null, stateFile,
+                    false, null));
+        }
         if (state.isLocallyUsable(localFingerprint)
-                && outputIsComplete(module, test)
+                && outputIsComplete(module, test, sources)
                 && !storedClasspath.isBlank()
                 && !ClasspathValidation.hasMissingJar(storedClasspath)
                 && state.classpathFingerprint().equals(
                         ClasspathValidation.fingerprint(storedClasspath))) {
-            return new ModulePlan(module, storedClasspath, state,
-                    fingerprintOf(localFingerprint, storedClasspath), stateFile, false, null);
+            return Optional.of(new ModulePlan(module, storedClasspath, state,
+                    fingerprintOf(localFingerprint, storedClasspath), stateFile, false, null));
         }
+        return Optional.empty();
+    }
+
+    private ModulePlan planOf(JavaModule module, boolean test) {
+        List<Path> sources = collectSources(module, test);
+        Optional<ModulePlan> cached = cachedPlanOf(module, test, sources);
+        if (cached.isPresent()) {
+            return cached.get();
+        }
+        Path stateFile = stateFileOf(module, test);
+        ModuleBuildState state = ModuleBuildState.load(stateFile);
 
         Optional<String> classpath = classpathOf(module, test);
         if (classpath.isEmpty()) {
-            return new ModulePlan(module, null, state, null, stateFile, true,
-                    "classpath nao resolvido");
+            return logged(new ModulePlan(module, null, state, null, stateFile, true,
+                    "classpath nao resolvido"));
         }
         String fingerprint = fingerprintOf(module, classpath.get());
-        boolean outputComplete = outputIsComplete(module, test);
+        boolean outputComplete = outputIsComplete(module, test, sources);
         boolean full = !state.isUsable(fingerprint) || !outputComplete;
-        return new ModulePlan(module, classpath.get(), state, fingerprint, stateFile, full,
-                full ? outputComplete ? "estado incremental ausente" : "saida incompleta" : null);
+        return logged(new ModulePlan(module, classpath.get(), state, fingerprint, stateFile, full,
+                full ? outputComplete ? "estado incremental ausente" : "saida incompleta" : null));
+    }
+
+    private static ModulePlan logged(ModulePlan plan) {
+        if (plan.full()) {
+            log.info("Build completo de {}: {}", plan.module().artifactId(), plan.reason());
+        }
+        return plan;
     }
 
     private BuildResult buildModule(JavaModule module, boolean test, Consumer<String> output) {
@@ -422,18 +461,21 @@ public final class IncrementalJavaBuilder {
                 jdk == null ? "" : jdk.home().toString());
     }
 
-    private boolean outputIsComplete(JavaModule module, boolean test) {
+    private boolean outputIsComplete(JavaModule module, boolean test, List<Path> sources) {
+        if (sources.isEmpty()) {
+            return true;
+        }
         Path outputDir = outputDirOf(module, test);
         if (!Files.isDirectory(outputDir)) {
             return false;
         }
-        for (Path source : collectSources(module, test)) {
+        for (Path source : sources) {
             Optional<Path> relative = relativeToSourceRoot(module, test, source);
             if (relative.isEmpty()) {
                 continue;
             }
             Path parent = relative.get().getParent();
-            for (String type : declaredTypesOf(source)) {
+            for (String type : topLevelTypesOf(source)) {
                 Path classFile = parent == null
                         ? outputDir.resolve(type + ".class")
                         : outputDir.resolve(parent).resolve(type + ".class");
@@ -505,6 +547,14 @@ public final class IncrementalJavaBuilder {
             return new LinkedHashSet<>(ModuleBuildState.typesDeclaredIn(Files.readString(source)));
         } catch (Exception e) {
             return Set.of();
+        }
+    }
+
+    private static List<String> topLevelTypesOf(Path source) {
+        try {
+            return ModuleBuildState.topLevelTypesDeclaredIn(Files.readString(source));
+        } catch (Exception e) {
+            return List.of();
         }
     }
 

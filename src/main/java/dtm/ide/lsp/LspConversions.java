@@ -3,6 +3,7 @@ package dtm.ide.lsp;
 import com.fasterxml.jackson.databind.JsonNode;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
+import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
 import dtm.stools.component.panels.editor.code.api.Command;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
@@ -553,6 +554,73 @@ final class LspConversions {
         return CodeAction.CodeActionKind.OTHER;
     }
 
+    static IdeWorkspaceEdit workspaceEdit(JsonNode workspaceEdit) {
+        if (workspaceEdit == null || workspaceEdit.isNull()) {
+            return IdeWorkspaceEdit.empty();
+        }
+        List<IdeWorkspaceEdit.Operation> operations = new ArrayList<>();
+        JsonNode documentChanges = workspaceEdit.get("documentChanges");
+        if (documentChanges != null && documentChanges.isArray()) {
+            for (JsonNode change : documentChanges) {
+                String kind = change.path("kind").asText("");
+                if ("rename".equals(kind)) {
+                    Path oldPath = toPath(change.path("oldUri").asText(null));
+                    Path newPath = toPath(change.path("newUri").asText(null));
+                    if (oldPath != null && newPath != null) {
+                        operations.add(new IdeWorkspaceEdit.RenameFile(oldPath, newPath));
+                    }
+                    continue;
+                }
+                if (!kind.isEmpty() || !change.hasNonNull("textDocument")) {
+                    continue;
+                }
+                Path file = toPath(change.path("textDocument").path("uri").asText(null));
+                List<TextEdit> edits = textEdits(change.get("edits"));
+                if (file != null && !edits.isEmpty()) {
+                    operations.add(new IdeWorkspaceEdit.TextEdits(file, edits));
+                }
+            }
+            return new IdeWorkspaceEdit(operations);
+        }
+        JsonNode changes = workspaceEdit.get("changes");
+        if (changes != null && changes.isObject()) {
+            changes.fields().forEachRemaining(entry -> {
+                Path file = toPath(entry.getKey());
+                List<TextEdit> edits = textEdits(entry.getValue());
+                if (file != null && !edits.isEmpty()) {
+                    operations.add(new IdeWorkspaceEdit.TextEdits(file, edits));
+                }
+            });
+        }
+        return new IdeWorkspaceEdit(operations);
+    }
+
+    static JdtLsService.PrepareRenameResult prepareRename(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return JdtLsService.PrepareRenameResult.rejected(null);
+        }
+        if (node.path("defaultBehavior").asBoolean(false)) {
+            return JdtLsService.PrepareRenameResult.of(null, null);
+        }
+        if (node.hasNonNull("range")) {
+            String placeholder = node.hasNonNull("placeholder") ? node.get("placeholder").asText() : null;
+            return JdtLsService.PrepareRenameResult.of(range(node.get("range")), placeholder);
+        }
+        if (node.hasNonNull("start") && node.hasNonNull("end")) {
+            return JdtLsService.PrepareRenameResult.of(range(node), null);
+        }
+        return JdtLsService.PrepareRenameResult.rejected(null);
+    }
+
+    static String errorMessage(Throwable error) {
+        Throwable current = error;
+        while (current != null && current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        String message = current == null ? null : current.getMessage();
+        return message == null || message.isBlank() ? null : message;
+    }
+
     static List<TextEdit> singleDocumentEdits(JsonNode workspaceEdit) {
         if (workspaceEdit == null || workspaceEdit.isNull()) {
             return List.of();
@@ -601,7 +669,25 @@ final class LspConversions {
     }
 
     static String toUri(Path path) {
-        return path == null ? null : path.toAbsolutePath().normalize().toUri().toString();
+        if (path == null) {
+            return null;
+        }
+        return canonicalDrive(path.toAbsolutePath().normalize()).toUri().toString();
+    }
+
+    static Path canonicalDrive(Path path) {
+        Path root = path.getRoot();
+        if (root == null) {
+            return path;
+        }
+        String rootText = root.toString();
+        if (rootText.length() < 2 || rootText.charAt(1) != ':'
+                || !Character.isLowerCase(rootText.charAt(0))) {
+            return path;
+        }
+        String upper = Character.toUpperCase(rootText.charAt(0)) + rootText.substring(1);
+        Path canonicalRoot = path.getFileSystem().getPath(upper);
+        return path.getNameCount() == 0 ? canonicalRoot : canonicalRoot.resolve(root.relativize(path));
     }
 
     static Path toPath(String uri) {

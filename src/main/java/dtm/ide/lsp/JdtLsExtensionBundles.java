@@ -248,7 +248,7 @@ public final class JdtLsExtensionBundles {
         Set<String> seen = new LinkedHashSet<>();
         List<String> bundles = new ArrayList<>();
         for (Path jar : candidates) {
-            Optional<BundleId> id = bundleId(jar);
+            Optional<BundleId> id = quickBundleId(jar);
             if (id.isPresent() && installed.contains(id.get())) {
                 log.debug("Bundle descartado, o jdtls ja o instala: {} ({})", id.get(), jar);
                 continue;
@@ -291,6 +291,14 @@ public final class JdtLsExtensionBundles {
         return bundleIdFromFileName(jar);
     }
 
+    private static Optional<BundleId> quickBundleId(Path jar) {
+        Optional<BundleId> named = bundleIdFromFileName(jar);
+        if (named.isPresent() && Character.isDigit(named.get().version().charAt(0))) {
+            return named;
+        }
+        return bundleId(jar);
+    }
+
     private static Optional<BundleId> bundleIdFromFileName(Path jar) {
         Path fileName = jar.getFileName();
         if (fileName == null || !fileName.toString().endsWith(".jar")) {
@@ -313,7 +321,7 @@ public final class JdtLsExtensionBundles {
         }
         Set<BundleId> found = new LinkedHashSet<>();
         for (Path jar : searchJars(jdtlsPluginsRoot(), name -> name.endsWith(".jar"))) {
-            bundleId(jar).ifPresent(found::add);
+            quickBundleId(jar).ifPresent(found::add);
         }
         if (found.isEmpty()) {
             return Set.of();

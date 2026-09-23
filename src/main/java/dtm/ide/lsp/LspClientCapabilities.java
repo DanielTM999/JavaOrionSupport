@@ -116,6 +116,7 @@ final class LspClientCapabilities {
                 provided(caps, "documentHighlightProvider"),
                 provided(caps, "codeLensProvider"),
                 provided(caps, "renameProvider"),
+                caps.path("renameProvider").path("prepareProvider").asBoolean(false),
                 provided(caps, "documentFormattingProvider"),
                 provided(caps, "documentRangeFormattingProvider"),
                 provided(caps, "codeActionProvider"),
