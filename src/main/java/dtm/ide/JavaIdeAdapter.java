@@ -2567,6 +2567,21 @@ public class JavaIdeAdapter extends IdeAdapter {
         return normalized == null ? null : javaEditors.get(normalized);
     }
 
+    IdeEditorContext liveEditorFor(Path file) {
+        IdeEditorContext registered = editorContextFor(file);
+        if (registered != null) {
+            return registered;
+        }
+        Path normalized = JavaProjectConventions.normalize(file);
+        IdeEditorContext open = normalized == null || !JavaProjectConventions.isJava(normalized)
+                ? null : getEditor(normalized);
+        if (open == null) {
+            return null;
+        }
+        IdeEditorContext previous = javaEditors.putIfAbsent(normalized, open);
+        return previous == null ? open : previous;
+    }
+
     private void openUsagesPopup(IdeEditorContext context, Point screen, String header,
                                  List<UsagesPopup.Item> items) {
         if (!SwingUtilities.isEventDispatchThread()) {
@@ -3464,7 +3479,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 ? buildUsageItems(result.locations(), file, requestedText) : List.of();
         SwingUtilities.invokeLater(() -> {
             if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
-            if (editor == null || editorContextFor(file) == null) {
+            if (editor == null || liveEditorFor(file) == null) {
                 setStatusBarText(text("status.navigation.unavailable",
                         "Java: navegacao semantica indisponivel"));
                 return;

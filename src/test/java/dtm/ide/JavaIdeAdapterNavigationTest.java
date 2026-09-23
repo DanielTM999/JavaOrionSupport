@@ -273,6 +273,37 @@ class JavaIdeAdapterNavigationTest {
         assertNull(JavaIdeAdapter.identifierAt(null, 0, 0));
     }
 
+    @Test
+    void anEditorForgottenByTheRegistryIsRecoveredFromTheIde() {
+        Path file = Path.of("Reopened.java").toAbsolutePath().normalize();
+        AtomicInteger lookups = new AtomicInteger();
+        JavaIdeAdapter adapter = adapterWithOpenEditors(file, lookups);
+
+        assertSame(EDITOR, adapter.liveEditorFor(file));
+        assertSame(EDITOR, adapter.liveEditorFor(file));
+        assertEquals(1, lookups.get());
+    }
+
+    @Test
+    void anEditorTheIdeNoLongerShowsIsReportedAsUnavailable() {
+        AtomicInteger lookups = new AtomicInteger();
+        JavaIdeAdapter adapter = adapterWithOpenEditors(Path.of("Other.java"), lookups);
+
+        assertNull(adapter.liveEditorFor(Path.of("Closed.java")));
+        assertEquals(1, lookups.get());
+    }
+
+    private static JavaIdeAdapter adapterWithOpenEditors(Path open, AtomicInteger lookups) {
+        Path expected = open.toAbsolutePath().normalize();
+        return new JavaIdeAdapter() {
+            @Override
+            public IdeEditorContext getEditor(Path filePath, boolean createIfAbsent) {
+                lookups.incrementAndGet();
+                return !createIfAbsent && expected.equals(filePath) ? EDITOR : null;
+            }
+        };
+    }
+
     private static IdeWordClickContext click(Path path, int button, int modifiers) {
         return new IdeWordClickContext(
                 "class Demo {}", path, "Demo", 0, 6, 6, 10,
