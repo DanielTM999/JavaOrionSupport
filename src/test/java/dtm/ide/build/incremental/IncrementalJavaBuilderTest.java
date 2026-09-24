@@ -193,18 +193,88 @@ class IncrementalJavaBuilderTest {
     }
 
     @Test
-    void changingAResourceForcesTheFullMavenBuild() throws Exception {
+    void changingAResourceOnlySyncsTheResources() throws Exception {
         source("Lojista.java", "package a; public class Lojista {}");
         resource("application.properties", "a=1");
         builder().build(module(), false, line -> {
         });
         build.requests.clear();
-        resource("application.properties", "a=2");
+        resource("application.properties", "a=22");
 
+        BuildResult result = builder().build(module(), false, line -> {
+        });
+
+        assertTrue(result.successful());
+        assertTrue(build.requests.isEmpty());
+        assertTrue(javacCalls.isEmpty());
+        assertEquals(List.of(List.of("resources:resources")), build.toolCommands);
+
+        build.toolCommands.clear();
         builder().build(module(), false, line -> {
         });
 
-        assertEquals(1, build.requests.size());
+        assertTrue(build.toolCommands.isEmpty());
+        assertTrue(build.requests.isEmpty());
+    }
+
+    @Test
+    void aResourceRewrittenByTheMavenBuildDoesNotForceTheNextBuild() {
+        source("Lojista.java", "package a; public class Lojista {}");
+        build.duringBuild = () -> resource("native.dll", "binario " + System.nanoTime());
+        builder().build(module(), true, line -> {
+        });
+        build.duringBuild = () -> {
+        };
+        build.requests.clear();
+        build.toolCommands.clear();
+        javacCalls.clear();
+
+        BuildResult result = builder().build(module(), true, line -> {
+        });
+
+        assertTrue(result.successful());
+        assertTrue(build.requests.isEmpty());
+        assertTrue(build.toolCommands.isEmpty());
+        assertTrue(javacCalls.isEmpty());
+    }
+
+    @Test
+    void theTestStepCompilesTestsWithJavacWithoutRelaunchingTheMavenLifecycle() {
+        source("Lojista.java", "package a; public class Lojista {}");
+        Path test = testSource("LojistaTest.java", "package a; class LojistaTest { Lojista l; }");
+        builder().build(module(), false, line -> {
+        });
+        build.requests.clear();
+
+        BuildResult result = builder().build(module(), true, line -> {
+        });
+
+        assertTrue(result.successful());
+        assertTrue(build.requests.isEmpty());
+        assertEquals(1, javacCalls.size());
+        assertTrue(javacCalls.getFirst().contains(test.toString()));
+        assertTrue(javacCalls.getFirst().contains(
+                root.resolve("web/target/test-classes").toString()));
+    }
+
+    @Test
+    void aSecondTestBuildWithoutChangesRunsNothing() throws Exception {
+        source("Lojista.java", "package a; public class Lojista {}");
+        testSource("LojistaTest.java", "package a; class LojistaTest {}");
+        write(root.resolve("web/src/test/resources/dados.json"), "{}");
+        builder().build(module(), true, line -> {
+        });
+        Files.createDirectories(root.resolve("web/target/test-classes/a"));
+        Files.writeString(root.resolve("web/target/test-classes/a/LojistaTest.class"), "");
+        build.requests.clear();
+        build.toolCommands.clear();
+        javacCalls.clear();
+
+        builder().build(module(), true, line -> {
+        });
+
+        assertTrue(build.requests.isEmpty());
+        assertTrue(build.toolCommands.isEmpty());
         assertTrue(javacCalls.isEmpty());
     }
 
@@ -469,6 +539,10 @@ class IncrementalJavaBuilderTest {
         return write(root.resolve("web/src/main/java/a").resolve(name), content);
     }
 
+    private Path testSource(String name, String content) {
+        return write(root.resolve("web/src/test/java/a").resolve(name), content);
+    }
+
     private void resource(String name, String content) {
         write(root.resolve("web/src/main/resources").resolve(name), content);
     }
@@ -486,8 +560,11 @@ class IncrementalJavaBuilderTest {
     private final class RecordingBuildSystem implements BuildSystem {
 
         private final List<BuildRequest> requests = new ArrayList<>();
+        private final List<List<String>> toolCommands = new ArrayList<>();
         private String classpath = "classpath-resolvido";
         private int classpathResolutions;
+        private Runnable duringBuild = () -> {
+        };
 
         @Override
         public String name() {
@@ -495,8 +572,16 @@ class IncrementalJavaBuilderTest {
         }
 
         @Override
+        public BuildResult executeToolCommand(JavaModule module, List<String> command,
+                                              Consumer<String> output) {
+            toolCommands.add(List.copyOf(command));
+            return new BuildResult(0, List.of(), Duration.ZERO, "maven");
+        }
+
+        @Override
         public BuildResult execute(BuildRequest request, Consumer<String> output) {
             requests.add(request);
+            duringBuild.run();
             for (JavaModule module : request.selection()) {
                 try {
                     Files.createDirectories(module.outputDir());

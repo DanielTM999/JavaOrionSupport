@@ -133,9 +133,15 @@ public final class IncrementalJavaBuilder {
                         Duration.between(start, Instant.now()), result.command());
             }
         }
+        BuildResult resources = syncResources(target, plans, false, output);
+        if (!resources.successful()) {
+            diagnostics.addAll(resources.diagnostics());
+            return new BuildResult(resources.exitCode(), diagnostics,
+                    Duration.between(start, Instant.now()), resources.command());
+        }
         if (includeTests) {
             moduleListener.starting(target, total, total);
-            BuildResult result = buildModule(target, true, output);
+            BuildResult result = buildTests(target, output);
             diagnostics.addAll(result.diagnostics());
             if (!result.successful()) {
                 return new BuildResult(result.exitCode(), diagnostics,
@@ -169,6 +175,9 @@ public final class IncrementalJavaBuilder {
                 return false;
             }
             if (!cached.get().state().changes(module.root(), sources).isEmpty()) {
+                return false;
+            }
+            if (!resourcesAreSynced(cached.get(), false)) {
                 return false;
             }
         }
@@ -224,16 +233,93 @@ public final class IncrementalJavaBuilder {
         return plan;
     }
 
-    private BuildResult buildModule(JavaModule module, boolean test, Consumer<String> output) {
-        ModulePlan plan = planOf(module, test);
+    private BuildResult buildTests(JavaModule module, Consumer<String> output) {
+        ModulePlan plan = planOf(module, true);
         if (!plan.full()) {
-            return buildIncremental(plan, test, output);
+            BuildResult result = buildIncremental(plan, true, output);
+            return result.successful() ? syncResources(module, List.of(plan), true, output) : result;
         }
-        BuildResult result = delegate(module, test, output, plan.reason());
+        if (plan.fingerprint() == null) {
+            return delegateTests(plan, plan.reason(), output);
+        }
+        List<Path> sources = collectSources(module, true);
+        BuildResult result = sources.isEmpty() ? ok()
+                : compile(module, true, new LinkedHashSet<>(sources), plan.classpath(),
+                        outputDirOf(module, true), output);
+        if (!result.successful()) {
+            if (!result.diagnostics().isEmpty()) {
+                return result;
+            }
+            log.info("javac falhou sem diagnosticos nos testes de {}; voltando para o Maven",
+                    module.artifactId());
+            return delegateTests(plan, "javac indisponivel", output);
+        }
+        if (hasResources(module, true)) {
+            BuildResult resources = copyResources(module, true, output);
+            if (!resources.successful()) {
+                return resources;
+            }
+        }
+        refreshState(module, true, plan.state(), plan.fingerprint(), plan.classpath(),
+                plan.stateFile());
+        return result;
+    }
+
+    private BuildResult delegateTests(ModulePlan plan, String reason, Consumer<String> output) {
+        BuildResult result = delegate(plan.module(), true, output, reason);
         if (result.successful() && plan.fingerprint() != null) {
-            refreshState(module, test, plan.state(), plan.fingerprint(), plan.classpath(), plan.stateFile());
+            refreshState(plan.module(), true, plan.state(), plan.fingerprint(), plan.classpath(),
+                    plan.stateFile());
         }
         return result;
+    }
+
+    private BuildResult syncResources(JavaModule target, List<ModulePlan> plans, boolean test,
+                                      Consumer<String> output) {
+        List<ModulePlan> stale = new ArrayList<>();
+        List<String> fingerprints = new ArrayList<>();
+        for (ModulePlan plan : plans) {
+            if (plan.full()) {
+                continue;
+            }
+            String current = resourcesFingerprint(plan.module(), test);
+            if (!current.equals(plan.state().resourcesFingerprint())) {
+                stale.add(plan);
+                fingerprints.add(current);
+            }
+        }
+        if (stale.isEmpty()) {
+            return ok();
+        }
+        List<JavaModule> modules = new ArrayList<>();
+        for (ModulePlan plan : stale) {
+            modules.add(plan.module());
+        }
+        emit(output, "[" + labelOf(modules) + "] resources alterados");
+        BuildResult result = copyResources(target, test, output);
+        if (!result.successful()) {
+            return result;
+        }
+        for (int index = 0; index < stale.size(); index++) {
+            ModuleBuildState state = stale.get(index).state();
+            state.recordResources(fingerprints.get(index));
+            state.save();
+        }
+        return result;
+    }
+
+    private BuildResult copyResources(JavaModule target, boolean test, Consumer<String> output) {
+        BuildSystem build = buildSupplier.get();
+        if (build == null) {
+            return new BuildResult(-1, List.of(new BuildDiagnostic(null, 0, 0, null,
+                    "Nenhum build system disponivel.", "build")), Duration.ZERO, "maven");
+        }
+        return build.executeToolCommand(target,
+                List.of(test ? "resources:testResources" : "resources:resources"), output);
+    }
+
+    private boolean resourcesAreSynced(ModulePlan plan, boolean test) {
+        return resourcesFingerprint(plan.module(), test).equals(plan.state().resourcesFingerprint());
     }
 
     private BuildResult buildIncremental(ModulePlan plan, boolean test, Consumer<String> output) {
@@ -384,6 +470,7 @@ public final class IncrementalJavaBuilder {
                               String fingerprint, String classpath, Path stateFile) {
         state.reset(fingerprint, localFingerprintOf(module), classpath,
                 ClasspathValidation.fingerprint(classpath));
+        state.recordResources(resourcesFingerprint(module, test));
         for (Path source : collectSources(module, test)) {
             state.record(module.root(), source);
         }
@@ -457,7 +544,6 @@ public final class IncrementalJavaBuilder {
                 ModuleBuildState.FORMAT_VERSION,
                 hashOfFile(module.root().resolve(JavaProjectConventions.POM_FILE)),
                 hashOfFile(descriptor.root().resolve(JavaProjectConventions.POM_FILE)),
-                resourcesFingerprint(module),
                 jdk == null ? "" : jdk.home().toString());
     }
 
@@ -497,13 +583,24 @@ public final class IncrementalJavaBuilder {
         }
     }
 
-    private static String resourcesFingerprint(JavaModule module) {
-        List<String> stamps = new ArrayList<>();
-        for (Path root : module.sourceRoots()) {
-            if (root.getFileName() == null || !root.getFileName().toString().equals("resources")
-                    || !Files.isDirectory(root)) {
-                continue;
+    private static boolean hasResources(JavaModule module, boolean test) {
+        return !resourceRootsOf(module, test).isEmpty();
+    }
+
+    private static List<Path> resourceRootsOf(JavaModule module, boolean test) {
+        List<Path> roots = new ArrayList<>();
+        for (Path root : test ? module.testRoots() : module.sourceRoots()) {
+            if (root.getFileName() != null && root.getFileName().toString().equals("resources")
+                    && Files.isDirectory(root)) {
+                roots.add(root);
             }
+        }
+        return roots;
+    }
+
+    private static String resourcesFingerprint(JavaModule module, boolean test) {
+        List<String> stamps = new ArrayList<>();
+        for (Path root : resourceRootsOf(module, test)) {
             try (Stream<Path> paths = Files.walk(root)) {
                 paths.filter(Files::isRegularFile).sorted().forEach(path -> {
                     try {

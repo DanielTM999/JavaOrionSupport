@@ -20,7 +20,7 @@ import java.util.Set;
 @Slf4j
 public final class ModuleBuildState {
 
-    public static final String FORMAT_VERSION = "2";
+    public static final String FORMAT_VERSION = "3";
 
     private static final String HEADER = "#orion-incremental";
     private static final String FIELD_SEPARATOR = "\t";
@@ -48,6 +48,7 @@ public final class ModuleBuildState {
     private String localFingerprint = "";
     private String classpath = "";
     private String classpathFingerprint = "";
+    private String resourcesFingerprint = "";
 
     private String fingerprint = "";
     private boolean loaded;
@@ -77,6 +78,14 @@ public final class ModuleBuildState {
 
     public String classpathFingerprint() {
         return classpathFingerprint;
+    }
+
+    public String resourcesFingerprint() {
+        return resourcesFingerprint;
+    }
+
+    public void recordResources(String newResourcesFingerprint) {
+        resourcesFingerprint = newResourcesFingerprint == null ? "" : newResourcesFingerprint;
     }
 
     public void reset(String newFingerprint, String newLocalFingerprint,
@@ -186,6 +195,7 @@ public final class ModuleBuildState {
             content.append(classpathFingerprint).append(System.lineSeparator());
             content.append(Base64.getEncoder().encodeToString(classpath.getBytes(StandardCharsets.UTF_8))).append(System.lineSeparator());
             content.append(fingerprint).append(System.lineSeparator());
+            content.append(resourcesFingerprint).append(System.lineSeparator());
             for (Map.Entry<String, Entry> entry : entries.entrySet()) {
                 Entry value = entry.getValue();
                 content.append(entry.getKey()).append(FIELD_SEPARATOR)
@@ -231,14 +241,15 @@ public final class ModuleBuildState {
         }
         try {
             List<String> lines = Files.readAllLines(stateFile, StandardCharsets.UTF_8);
-            if (lines.size() < 5 || !lines.get(0).equals(HEADER + " " + FORMAT_VERSION)) {
+            if (lines.size() < 6 || !lines.get(0).equals(HEADER + " " + FORMAT_VERSION)) {
                 return;
             }
             localFingerprint = lines.get(1);
             classpathFingerprint = lines.get(2);
             classpath = new String(Base64.getDecoder().decode(lines.get(3)), StandardCharsets.UTF_8);
             fingerprint = lines.get(4);
-            for (String line : lines.subList(5, lines.size())) {
+            resourcesFingerprint = lines.get(5);
+            for (String line : lines.subList(6, lines.size())) {
                 String[] fields = line.split(FIELD_SEPARATOR, -1);
                 if (fields.length < 6) {
                     continue;
