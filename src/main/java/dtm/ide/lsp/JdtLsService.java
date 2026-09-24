@@ -2205,6 +2205,24 @@ public class JdtLsService {
         return actions;
     }
 
+    public ImportCandidates.Lookup importCandidates(Path filePath, String text, Range pasted) {
+        if (!capabilities.codeAction() || !isCurrentText(filePath, text)) {
+            return ImportCandidates.Lookup.PENDING;
+        }
+        List<JsonNode> unresolved = ImportCandidates.unresolvedIn(
+                rawDiagnosticsByPath.getOrDefault(normalizePath(filePath), List.of()), text, pasted);
+        if (unresolved.isEmpty()) {
+            return ImportCandidates.Lookup.PENDING;
+        }
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("textDocument", documentId(filePath));
+        params.put("range", rangeParam(pasted));
+        params.put("context", Map.of("diagnostics", unresolved, "only", List.of("quickfix")));
+        JsonNode result = requestInteractive("textDocument/codeAction", params,
+                INTERACTIVE_TIMEOUT_MS);
+        return new ImportCandidates.Lookup(true, ImportCandidates.fromActions(result));
+    }
+
     public List<SourceAction> sourceActions(Path filePath, String text, int line, int col) {
         if (!capabilities.codeAction()) {
             return List.of();

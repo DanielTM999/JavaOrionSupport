@@ -41,6 +41,8 @@ final class JdtLsSettings {
                 "enabled", true,
                 "guessMethodArguments", true,
                 "importOrder", List.of("java", "javax", "jakarta", "org", "com"),
+                "filteredTypes", List.of("com.sun.*", "sun.*", "jdk.internal.*",
+                        "org.graalvm.*", "io.micrometer.shaded.*"),
                 "favoriteStaticMembers", List.of(
                         "org.junit.jupiter.api.Assertions.*",
                         "org.junit.jupiter.api.Assumptions.*",

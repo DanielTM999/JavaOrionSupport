@@ -54,6 +54,20 @@ class JdtLsSettingsTest {
                 JdtLsSettings.build(jdk, List.of(jdk), null)));
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void keepsAwtTypesAvailableForImportChoices() throws Exception {
+        JdkInstallation jdk = jdk(21);
+
+        Map<String, Object> java = (Map<String, Object>) JdtLsSettings.build(jdk, List.of(jdk),
+                JdtBuildMode.PROJECT_BUILD).get("java");
+        List<String> filtered = (List<String>) ((Map<String, Object>) java.get("completion"))
+                .get("filteredTypes");
+
+        assertTrue(filtered.contains("sun.*"));
+        assertTrue(filtered.stream().noneMatch(pattern -> pattern.startsWith("java.")));
+    }
+
     @SuppressWarnings("unchecked")
     private Object autobuildEnabled(Map<String, Object> settings) {
         Map<String, Object> java = (Map<String, Object>) settings.get("java");

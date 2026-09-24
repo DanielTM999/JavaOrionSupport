@@ -90,6 +90,7 @@ import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
 import dtm.ide.editor.JavaSnippetCompletionProvider;
 import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.editor.JavaFastCompletionProvider;
+import dtm.ide.editor.JavaImportInserter;
 import dtm.ide.index.JavaLexicalIndex;
 import dtm.ide.index.JavaLexicalSource;
 import dtm.ide.index.JavaLocalScope;
@@ -99,6 +100,7 @@ import dtm.ide.navigation.JavaNavigation.Result;
 import dtm.ide.navigation.JavaNavigation.Status;
 import dtm.ide.navigation.JavaNavigation.Extent;
 import dtm.ide.editor.theme.JavaEditorTheme;
+import dtm.ide.lsp.ImportCandidates;
 import dtm.ide.lsp.JdtLsExtensionBundles;
 import dtm.ide.lsp.JdtLsProvisioner;
 import dtm.ide.lsp.JdtLsService;
@@ -177,6 +179,7 @@ import dtm.ide.test.JavaTestProblems;
 import dtm.ide.test.JavaSemanticTestDiscovery;
 import dtm.ide.ui.DependencyManagerPanel;
 import dtm.ide.ui.JavaSourceActionDialogs;
+import dtm.ide.ui.ImportChoicePanel;
 import dtm.ide.ui.JavaCoveragePanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaTestGutterLayer;
@@ -255,9 +258,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -318,6 +323,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
     private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
     private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
+    private static final long PASTE_IMPORT_WINDOW_MS = 5_000;
+    private static final Pattern TYPE_LIKE_NAME = Pattern.compile("\\b\\p{Lu}");
+
+    private record PendingPasteImport(Path file, int offset, String pasted, Range range, long deadline) {
+    }
 
     private static String text(String key, String fallback) {
         return dtm.stools.i18n.I18n.getText(JavaIdeAdapter.class, key, fallback);
@@ -449,6 +459,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile IdeEditorContext codeActionLampContext;
     private volatile IdeEditorContext activeJavaEditor;
     private final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
+    private final Map<Path, PendingPasteImport> pendingPasteImports = new ConcurrentHashMap<>();
     private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
     private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
     private final AtomicBoolean languageServerReadyHandled = new AtomicBoolean();
@@ -929,6 +940,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         requestRefreshDiagnostics(path);
+        resolvePastedImports(path);
         Path normalized = path.toAbsolutePath().normalize();
         JdtLsService lsp = jdtLs;
         List<BuildDiagnostic> problems = lsp == null ? List.of() : lsp.diagnostics(normalized)
@@ -4122,6 +4134,10 @@ public class JavaIdeAdapter extends IdeAdapter {
                 () -> showOverrideMethods(context, true));
         context.registerShortcut("java.evaluateExpression", "alt F8",
                 () -> showEvaluateDialog(context, 0));
+        context.registerShortcut("java.pasteImports", "control V", EditorShortcutScope.EDITOR, () -> {
+            SwingUtilities.invokeLater(() -> onPasted(context));
+            return false;
+        });
         bindDebugShortcut(context, "F5", "java.debug.continue",
                 () -> withDebugSession(JavaDebugSession::continueExecution));
         bindDebugShortcut(context, "F6", "java.debug.pause",
@@ -4136,6 +4152,137 @@ public class JavaIdeAdapter extends IdeAdapter {
         bindDebugShortcut(context, "control F5", "java.debug.hotReload", this::runHotReload);
     }
 
+
+    private void onPasted(IdeEditorContext context) {
+        Path file = context.filePath();
+        if (interactiveServerFor(file) == null || context.isReadOnly()) {
+            return;
+        }
+        String pasted = clipboardText();
+        if (pasted == null || pasted.isBlank() || !TYPE_LIKE_NAME.matcher(pasted).find()) {
+            return;
+        }
+        String text = context.getText();
+        int offset = context.getCaretOffset() - pasted.length();
+        if (text == null || offset < 0 || !text.startsWith(pasted, offset)) {
+            return;
+        }
+        pendingPasteImports.put(JavaProjectConventions.normalize(file), new PendingPasteImport(
+                file, offset, pasted, rangeOf(text, offset, offset + pasted.length()),
+                System.currentTimeMillis() + PASTE_IMPORT_WINDOW_MS));
+    }
+
+    private static String clipboardText() {
+        try {
+            Object data = java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
+                    .getData(java.awt.datatransfer.DataFlavor.stringFlavor);
+            return data instanceof String value ? value.replace("\r\n", "\n").replace("\r", "\n") : null;
+        } catch (Exception unavailable) {
+            return null;
+        }
+    }
+
+    private static Range rangeOf(String text, int start, int end) {
+        return Range.of(positionOf(text, start), positionOf(text, end));
+    }
+
+    private static Position positionOf(String text, int offset) {
+        int line = 0;
+        int lineStart = 0;
+        for (int i = 0; i < offset; i++) {
+            if (text.charAt(i) == '\n') {
+                line++;
+                lineStart = i + 1;
+            }
+        }
+        return Position.of(line, offset - lineStart);
+    }
+
+    private void resolvePastedImports(Path path) {
+        Path key = JavaProjectConventions.normalize(path);
+        PendingPasteImport pending = pendingPasteImports.get(key);
+        if (pending == null) {
+            return;
+        }
+        JdtLsService lsp = interactiveServerFor(pending.file());
+        if (lsp == null || System.currentTimeMillis() > pending.deadline()) {
+            pendingPasteImports.remove(key, pending);
+            return;
+        }
+        background.execute(() -> {
+            String text = lsp.documentContent(pending.file());
+            if (text == null || !text.startsWith(pending.pasted(), pending.offset())) {
+                pendingPasteImports.remove(key, pending);
+                return;
+            }
+            ImportCandidates.Lookup lookup = lsp.importCandidates(pending.file(), text, pending.range());
+            if (!lookup.diagnosed() || !pendingPasteImports.remove(key, pending)) {
+                return;
+            }
+            SwingUtilities.invokeLater(() -> chooseImports(pending.file(), lookup.candidates()));
+        });
+    }
+
+    private void chooseImports(Path file, Map<String, List<String>> candidates) {
+        List<String> chosen = new ArrayList<>();
+        Deque<Map.Entry<String, List<String>>> ambiguous = new ArrayDeque<>();
+        candidates.forEach((name, options) -> {
+            if (options.size() == 1) {
+                chosen.add(options.getFirst());
+            } else if (options.size() > 1) {
+                ambiguous.add(Map.entry(name, options));
+            }
+        });
+        askNextImport(file, chosen, ambiguous);
+    }
+
+    private void askNextImport(Path file, List<String> chosen,
+                               Deque<Map.Entry<String, List<String>>> ambiguous) {
+        Map.Entry<String, List<String>> next = ambiguous.poll();
+        if (next == null) {
+            applyPastedImports(file, chosen);
+            return;
+        }
+        ImportChoicePanel panel = new ImportChoicePanel(next.getKey(), next.getValue(), choice -> {
+            if (choice != null) {
+                chosen.add(choice);
+            }
+            SwingUtilities.invokeLater(() -> askNextImport(file, chosen, ambiguous));
+        });
+        showPopup(PlatformPopupBuilder.builder()
+                .component(panel)
+                .title(text("pasteImports.title", "Importar classe"))
+                .size(460, Math.min(380, 120 + next.getValue().size() * 44))
+                .modalityType(java.awt.Dialog.ModalityType.MODELESS)
+                .onLoad(component -> panel.focusList())
+                .onClose(component -> panel.closed())
+                .build());
+    }
+
+    private void applyPastedImports(Path file, List<String> imports) {
+        IdeEditorContext editor = getEditor(file);
+        if (imports.isEmpty() || editor == null || editor.isReadOnly()) {
+            return;
+        }
+        JavaImportInserter.Result result = JavaImportInserter.insert(editor.getText(), imports);
+        if (result.insertedLines() == 0) {
+            return;
+        }
+        int line = editor.getCaretLine();
+        int col = editor.getCaretCol();
+        if (!editor.applyEdits(result.edits())) {
+            editor.setText(result.text());
+        }
+        editor.setCaretPosition(line >= result.firstLine() ? line + result.insertedLines() : line, col);
+        JdtLsService lsp = jdtLs;
+        if (lsp != null) {
+            lsp.changeDocument(file, editor.getText());
+        }
+        editor.refreshDiagnostics();
+        setStatusBarText(text("status.pasteImports", "Java: imports adicionados") + " - "
+                + imports.stream().map(name -> name.substring(name.lastIndexOf('.') + 1))
+                .collect(Collectors.joining(", ")));
+    }
 
     private void bindDebugShortcut(IdeEditorContext context, String stroke,
                                    String actionId, Runnable action) {
