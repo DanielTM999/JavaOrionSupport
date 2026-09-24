@@ -84,6 +84,9 @@ import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.deps.DependencyService;
 import dtm.ide.deps.MavenCentralClient;
 import dtm.ide.deps.OsvClient;
+import dtm.ide.deps.DependencySearchResult;
+import dtm.ide.deps.DependencyVersionChoice;
+import dtm.ide.deps.PomProperties;
 import dtm.ide.editor.AutoCompleteIdleTrigger;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
@@ -274,6 +277,7 @@ import java.util.Objects;
 import java.util.Map;
 import java.util.Set;
 import java.net.URI;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -323,7 +327,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
     private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
     private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
-    private static final long PASTE_IMPORT_WINDOW_MS = 5_000;
+    private static final long PASTE_IMPORT_WINDOW_MS = 20_000;
+    private static final long PASTE_IMPORT_RETRY_MS = 1_000;
     private static final Pattern TYPE_LIKE_NAME = Pattern.compile("\\b\\p{Lu}");
 
     private record PendingPasteImport(Path file, int offset, String pasted, Range range, long deadline) {
@@ -338,6 +343,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String LSP_PROGRESS_ID = "javaLanguageServer";
     private static final String LSP_WORK_PROGRESS_ID = "javaLanguageServerWork";
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
+    private static final String SYNC_PROGRESS_ID = "javaProjectSync";
+    private static final long SYNC_WORK_START_GRACE_MS = 3_000;
+    private static final long SYNC_WORK_MAX_MS = 120_000;
     private static final String DEPENDENCIES_TAB_ID = "javaDependencies";
     private static final Color DEBUG_LINE_COLOR = new Color(227, 100, 100, 80);
     private static final Pattern SNIPPET_DEFAULT = Pattern.compile("\\$\\{\\d+:([^}]*)}");
@@ -360,8 +368,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicLong problemsRefreshTicket = new AtomicLong();
     private final AtomicBoolean renameWaitCanceled = new AtomicBoolean();
     private final AtomicBoolean diagnosticReanalysisRunning = new AtomicBoolean();
+    private final PomProperties pomProperties = new PomProperties(this::pomLocalRepository);
     private final BuildFileCompletionProvider buildFileCompletion =
-            new BuildFileCompletionProvider(mavenCentral);
+            new BuildFileCompletionProvider(new EditorDependencyCatalog(), pomProperties);
     private final EditorTheme theme = new JavaEditorTheme(() -> requestEditorThemeConfig("java"));
     private final AtomicLong lifecycle = new AtomicLong();
     private final AtomicLong wordCaretTicket = new AtomicLong();
@@ -437,6 +446,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile CoverageProvisioner coverageProvisioner;
     private volatile String testPanelId;
     private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
+    private final AtomicLong syncGeneration = new AtomicLong();
+    private final AtomicReference<SyncWork> syncWork = new AtomicReference<>();
     private final MavenPluginGoals pluginGoals = new MavenPluginGoals();
     private final TodoScanner todoScanner = new TodoScanner();
     private final AtomicLong todoRefreshTicket = new AtomicLong();
@@ -460,6 +471,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile IdeEditorContext activeJavaEditor;
     private final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
     private final Map<Path, PendingPasteImport> pendingPasteImports = new ConcurrentHashMap<>();
+    private final Set<Path> pasteImportsResolving = ConcurrentHashMap.newKeySet();
     private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
     private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
     private final AtomicBoolean languageServerReadyHandled = new AtomicBoolean();
@@ -547,6 +559,13 @@ public class JavaIdeAdapter extends IdeAdapter {
         diskBaseline.clear();
         lspProgress.set(0);
         hideProgress(LSP_PROGRESS_ID);
+        syncGeneration.incrementAndGet();
+        syncWork.set(null);
+        hideProgress(SYNC_PROGRESS_ID);
+        JavaBuildToolsPanel toolsPanel = buildToolsPanel;
+        if (toolsPanel != null) {
+            toolsPanel.setSyncing(false);
+        }
         SwingUtilities.invokeLater(this::hideCodeActionLamp);
         clearStatusBarText();
     }
@@ -1111,6 +1130,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void publishLanguageServerWork(String message, int percent, boolean active) {
+        SyncWork sync = syncWork.get();
+        if (sync != null) {
+            sync.observe(active);
+        }
         if (!active) {
             if (languageServerWorkVisible.compareAndSet(true, false)) {
                 hideProgress(LSP_WORK_PROGRESS_ID);
@@ -1197,6 +1220,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         installTestGutter(editorContext);
         installCodeActionCommandHandler(editorContext);
         installJavaShortcuts(editorContext);
+        if (JavaProjectConventions.isMavenPom(editorContext.filePath())
+                && settings().isBuildFileCompletion()) {
+            dependencyManagerHost().warmLocalCatalog();
+        }
     }
 
     @Override
@@ -2377,11 +2404,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     .onClick(event -> requestRefreshCodeLenses(context.filePath()))
                     .build();
         }
-        return CodeLensItem.builder()
-                .text(text("lens.loading", "Buscando..."))
-                .tooltip(text("status.navigation.indexing",
-                        "Java: indexacao em andamento; tente novamente"))
-                .build();
+        return null;
     }
 
     private String countLabel(Kind kind, int count) {
@@ -2863,6 +2886,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     public List<Location> findDefinitions(IdeDefinitionContext context) {
         if (context == null) {
             return null;
+        }
+        if (JavaProjectConventions.isMavenPom(context.filePath())) {
+            return pomTarget(context.filePath(), context.text(), context.offset())
+                    .map(target -> List.of(target.location())).orElseGet(List::of);
         }
         List<Location> configTargets = configKeyUsages(context);
         if (configTargets != null) {
@@ -3419,6 +3446,10 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onWordClick(IdeWordClickContext context) {
+        if (isCtrlPomClick(context)) {
+            navigatePom(context.filePath(), context.text(), context.startOffset());
+            return;
+        }
         if (!isCtrlDefinitionClick(context)) return;
         long ticket = beginNavigation();
         long session = lifecycle.get();
@@ -3529,12 +3560,86 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     static boolean isCtrlDefinitionClick(IdeWordClickContext context) {
+        return isCtrlClick(context) && JavaProjectConventions.isJava(context.filePath());
+    }
+
+    static boolean isCtrlPomClick(IdeWordClickContext context) {
+        return isCtrlClick(context) && JavaProjectConventions.isMavenPom(context.filePath());
+    }
+
+    private static boolean isCtrlClick(IdeWordClickContext context) {
         return context != null
                 && context.filePath() != null
                 && context.editorContext() != null
-                && JavaProjectConventions.isJava(context.filePath())
                 && context.mouseButton() == MouseEvent.BUTTON1
                 && (context.modifiersEx() & InputEvent.CTRL_DOWN_MASK) != 0;
+    }
+
+    record PomTarget(Path file, int line, int col) {
+        Location location() {
+            Position position = new Position(line, col);
+            return new Location(file.toUri().toString(), new Range(position, position));
+        }
+    }
+
+    Optional<PomTarget> pomTarget(Path file, String text, int offset) {
+        if (file == null || text == null) {
+            return Optional.empty();
+        }
+        Optional<PomProperties.Placeholder> placeholder = PomProperties.placeholderAt(text, offset);
+        if (placeholder.isPresent()) {
+            return pomProperties.find(file, text, placeholder.get().name())
+                    .filter(PomProperties.Declaration::navigable)
+                    .map(declaration -> new PomTarget(declaration.file(), declaration.line(),
+                            declaration.col()));
+        }
+        return pomProperties.parentAt(file, text, offset)
+                .map(parent -> new PomTarget(parent.file(), parent.line(), parent.col()));
+    }
+
+    private void navigatePom(Path file, String text, int offset) {
+        long session = lifecycle.get();
+        background.submit(() -> {
+            Optional<PomTarget> target;
+            try {
+                target = pomTarget(file, text, offset);
+            } catch (Exception e) {
+                log.debug("Falha ao resolver destino no pom: {}", e.getMessage());
+                target = Optional.empty();
+            }
+            Optional<PomTarget> resolved = target;
+            SwingUtilities.invokeLater(() -> {
+                if (session != lifecycle.get()) return;
+                if (resolved.isEmpty()) {
+                    setStatusBarText(text("status.pomTargetMissing",
+                            "Maven: declaracao nao encontrada"));
+                    return;
+                }
+                openAt(resolved.get().file(), resolved.get().line(), resolved.get().col());
+            });
+        });
+    }
+
+    private Path pomLocalRepository() {
+        try {
+            return dependencyManagerHost().localRepository();
+        } catch (Exception e) {
+            log.debug("Repositorio Maven local indisponivel: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private final class EditorDependencyCatalog implements BuildFileCompletionProvider.Catalog {
+
+        @Override
+        public List<DependencySearchResult> search(String query) {
+            return dependencyManagerHost().editorCatalog().search(query);
+        }
+
+        @Override
+        public List<DependencyVersionChoice> versions(String groupId, String artifactId) {
+            return dependencyManagerHost().editorCatalog().versions(groupId, artifactId);
+        }
     }
 
     @Override
@@ -3584,6 +3689,12 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void navigateFromEditor(IdeEditorContext context, String action) {
+        if (context != null && JavaProjectConventions.isMavenPom(context.filePath())) {
+            if ("definition".equals(action)) {
+                navigatePom(context.filePath(), context.getText(), context.getCaretOffset());
+            }
+            return;
+        }
         if (context == null || !isNavigationAvailable(context.filePath())) return;
         Path file = context.filePath();
         NavigationRequest request = new NavigationRequest(context.getText(),
@@ -4155,7 +4266,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void onPasted(IdeEditorContext context) {
         Path file = context.filePath();
-        if (interactiveServerFor(file) == null || context.isReadOnly()) {
+        if (jdtLs == null || !JavaProjectConventions.isJava(file) || context.isReadOnly()) {
             return;
         }
         String pasted = clipboardText();
@@ -4204,22 +4315,36 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (pending == null) {
             return;
         }
-        JdtLsService lsp = interactiveServerFor(pending.file());
-        if (lsp == null || System.currentTimeMillis() > pending.deadline()) {
+        if (System.currentTimeMillis() > pending.deadline()) {
             pendingPasteImports.remove(key, pending);
             return;
         }
+        JdtLsService lsp = interactiveServerFor(pending.file());
+        if (lsp == null || !pasteImportsResolving.add(key)) {
+            return;
+        }
         background.execute(() -> {
-            String text = lsp.documentContent(pending.file());
-            if (text == null || !text.startsWith(pending.pasted(), pending.offset())) {
-                pendingPasteImports.remove(key, pending);
-                return;
+            boolean retry = false;
+            try {
+                String text = lsp.documentContent(pending.file());
+                if (text == null || !text.startsWith(pending.pasted(), pending.offset())) {
+                    return;
+                }
+                ImportCandidates.Lookup lookup = lsp.importCandidates(pending.file(), text, pending.range());
+                if (!lookup.diagnosed()) {
+                    retry = true;
+                    return;
+                }
+                if (pendingPasteImports.remove(key, pending)) {
+                    SwingUtilities.invokeLater(() -> chooseImports(pending.file(), lookup.candidates()));
+                }
+            } finally {
+                pasteImportsResolving.remove(key);
+                if (retry && pendingPasteImports.get(key) == pending) {
+                    background.schedule(() -> resolvePastedImports(path), PASTE_IMPORT_RETRY_MS,
+                            TimeUnit.MILLISECONDS);
+                }
             }
-            ImportCandidates.Lookup lookup = lsp.importCandidates(pending.file(), text, pending.range());
-            if (!lookup.diagnosed() || !pendingPasteImports.remove(key, pending)) {
-                return;
-            }
-            SwingUtilities.invokeLater(() -> chooseImports(pending.file(), lookup.candidates()));
         });
     }
 
@@ -5083,7 +5208,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (router != null) {
                 router.acceptCreated(file);
             }
-            requestProjectTreeViewRefresh();
+            requestProjectTreeRevealCreated(file);
             requestOpenFile(file);
         } catch (Exception e) {
             log.warn("Falha ao criar {}", file, e);
@@ -7147,37 +7272,97 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         long ticket = lifecycle.get();
+        long generation = syncGeneration.incrementAndGet();
         buildToolsSyncPending.set(false);
-        setStatusBarText(text("status.syncing", "Java: sincronizando o projeto..."));
+        String label = text("status.syncing", "Java: sincronizando o projeto...");
+        setStatusBarText(label);
+        showProgress(SYNC_PROGRESS_ID, label);
+        JavaBuildToolsPanel panel = buildToolsPanel;
+        if (panel != null) {
+            panel.setSyncing(true);
+        }
         background.submit(() -> {
-            BuildSystem build = buildSystem;
-            if (build != null) {
-                build.invalidateClasspathCache();
-            }
-            JavaProjectDescriptor reloaded = timed("describe(syncProject)",
-                    () -> JavaProjectConventions.describe(root));
-            if (!current(ticket, root)) {
-                return;
-            }
-            if (reloaded != null) {
-                descriptor = reloaded;
-            }
-            JdtLsService lsp = jdtLs;
-            applyLombokAgent(lsp, descriptor);
-            boolean agentChanged = lsp != null && lsp.needsRestartForLombokAgent();
-            if (agentChanged || lsp == null || !lsp.updateProjectConfiguration(root)) {
-                clearCaches();
-                return;
-            }
-            requestProjectTreeViewRefresh();
-            SwingUtilities.invokeLater(() -> {
+            boolean waiting = false;
+            try {
+                BuildSystem build = buildSystem;
+                if (build != null) {
+                    build.invalidateClasspathCache();
+                }
+                JavaProjectDescriptor reloaded = timed("describe(syncProject)",
+                        () -> JavaProjectConventions.describe(root));
                 if (!current(ticket, root)) {
                     return;
                 }
-                refreshBuildToolsPanel();
-                setStatusBarText(text("status.synced", "Java: projeto sincronizado"));
-            });
+                if (reloaded != null) {
+                    descriptor = reloaded;
+                }
+                JdtLsService lsp = jdtLs;
+                applyLombokAgent(lsp, descriptor);
+                boolean agentChanged = lsp != null && lsp.needsRestartForLombokAgent();
+                if (agentChanged || lsp == null) {
+                    clearCaches();
+                    return;
+                }
+                SyncWork work = new SyncWork();
+                syncWork.set(work);
+                if (!lsp.updateProjectConfiguration(root)) {
+                    syncWork.compareAndSet(work, null);
+                    clearCaches();
+                    return;
+                }
+                waiting = true;
+                work.completion().whenComplete((ignored, error) -> {
+                    syncWork.compareAndSet(work, null);
+                    finishSync(generation, ticket, root, true);
+                });
+            } finally {
+                if (!waiting) {
+                    finishSync(generation, ticket, root, false);
+                }
+            }
         });
+    }
+
+    private void finishSync(long generation, long ticket, Path root, boolean synced) {
+        if (syncGeneration.get() != generation) {
+            return;
+        }
+        hideProgress(SYNC_PROGRESS_ID);
+        JavaBuildToolsPanel panel = buildToolsPanel;
+        if (panel != null) {
+            panel.setSyncing(false);
+        }
+        if (!synced || !current(ticket, root)) {
+            return;
+        }
+        requestProjectTreeViewRefresh();
+        SwingUtilities.invokeLater(() -> {
+            if (!current(ticket, root)) {
+                return;
+            }
+            refreshBuildToolsPanel();
+            setStatusBarText(text("status.synced", "Java: projeto sincronizado"));
+        });
+    }
+
+    private static final class SyncWork {
+        private final CompletableFuture<Boolean> started = new CompletableFuture<>();
+        private final CompletableFuture<Void> finished = new CompletableFuture<>();
+
+        void observe(boolean active) {
+            if (active) {
+                started.complete(true);
+            } else if (started.isDone()) {
+                finished.complete(null);
+            }
+        }
+
+        CompletableFuture<Void> completion() {
+            return started.completeOnTimeout(false, SYNC_WORK_START_GRACE_MS, TimeUnit.MILLISECONDS)
+                    .thenCompose(active -> active
+                            ? finished.completeOnTimeout(null, SYNC_WORK_MAX_MS, TimeUnit.MILLISECONDS)
+                            : CompletableFuture.completedFuture(null));
+        }
     }
 
     private void refreshBuildToolsPanel() {

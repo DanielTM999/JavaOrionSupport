@@ -123,6 +123,7 @@ public class JdtLsService {
     private static final long REQUEST_TIMEOUT_MS = 4_000;
     private static final long INTERACTIVE_TIMEOUT_MS = 800;
     private static final long INDEXING_INTERACTIVE_TIMEOUT_MS = 2_000;
+    private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
     private static final long RENAME_TIMEOUT_MS = 60_000;
     private static final long INDEXING_COMPLETION_TIMEOUT_MS = 750;
     private static final long READY_COMPLETION_TIMEOUT_MS = 1_500;
@@ -2219,7 +2220,10 @@ public class JdtLsService {
         params.put("range", rangeParam(pasted));
         params.put("context", Map.of("diagnostics", unresolved, "only", List.of("quickfix")));
         JsonNode result = requestInteractive("textDocument/codeAction", params,
-                INTERACTIVE_TIMEOUT_MS);
+                IMPORT_CANDIDATES_TIMEOUT_MS);
+        if (result == null) {
+            return ImportCandidates.Lookup.PENDING;
+        }
         return new ImportCandidates.Lookup(true, ImportCandidates.fromActions(result));
     }
 

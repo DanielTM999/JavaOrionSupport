@@ -48,6 +48,27 @@ class ImportCandidatesTest {
     }
 
     @Test
+    void acceptsAPastedAnnotation() throws Exception {
+        String source = """
+                package demo;
+
+                class Demo {
+                    @Getter
+                    @Transactional(readOnly = true)
+                    String name;
+                }
+                """;
+        List<JsonNode> diagnostics = List.of(
+                diagnostic("16777218", "Getter cannot be resolved to a type", 3, 5, 3, 11),
+                diagnostic("16777218", "Transactional cannot be resolved to a type", 4, 4, 4, 18));
+
+        List<JsonNode> unresolved = ImportCandidates.unresolvedIn(diagnostics, source,
+                Range.of(3, 4, 4, 35));
+
+        assertEquals(2, unresolved.size());
+    }
+
+    @Test
     void groupsImportQuickFixesBySimpleName() throws Exception {
         JsonNode actions = JSON.readTree("""
                 [

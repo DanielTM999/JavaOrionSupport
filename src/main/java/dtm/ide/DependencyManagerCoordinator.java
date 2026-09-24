@@ -18,6 +18,7 @@ import dtm.ide.deps.MavenLocalRepositoryCatalog;
 import dtm.ide.deps.MavenLocalRepositoryResolver;
 import dtm.ide.deps.MavenVersionOrder;
 import dtm.ide.deps.OsvClient;
+import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.ui.DependencyManagerPanel;
@@ -34,6 +35,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
@@ -59,6 +61,8 @@ final class DependencyManagerCoordinator implements DependencyManagerPanel.Host,
     private final MavenLocalRepositoryCatalog localCatalog = new MavenLocalRepositoryCatalog();
     private final Map<String, CachedRemoteSearch> remoteSearchCache = new ConcurrentHashMap<>();
     private volatile Path configuredProject;
+    private volatile RepositoryLocation repositoryLocation;
+    private final AtomicBoolean warmingLocalCatalog = new AtomicBoolean();
     private volatile Runnable localChangeListener = () -> { };
     private volatile boolean localOnly;
 
@@ -300,7 +304,72 @@ final class DependencyManagerCoordinator implements DependencyManagerPanel.Host,
 
     synchronized void resetLocalRepository() {
         configuredProject = null;
+        repositoryLocation = null;
         localCatalog.reset();
+    }
+
+    BuildFileCompletionProvider.Catalog editorCatalog() {
+        return new BuildFileCompletionProvider.Catalog() {
+            @Override
+            public List<DependencySearchResult> search(String query) {
+                String bare = query == null ? "" : query.replace("*", "").trim();
+                if (bare.isEmpty()) {
+                    return List.of();
+                }
+                List<MavenLocalRepositoryCatalog.LocalArtifact> local = localCatalogReady()
+                        ? localCatalog.search(bare, true) : List.of();
+                List<MavenCentralClient.SearchResult> remote = skipRemote(bare)
+                        ? List.of() : remoteSearch(query).orElseGet(List::of);
+                return DependencySearchMerger.merge(bare, local, remote, true);
+            }
+
+            @Override
+            public List<DependencyVersionChoice> versions(String groupId, String artifactId) {
+                List<String> local = localCatalogReady()
+                        ? localCatalog.versions(groupId + ":" + artifactId, true) : List.of();
+                List<String> remote = localOnly || central.isCoolingDown()
+                        ? List.of() : central.versions(groupId, artifactId);
+                return DependencySearchMerger.mergeVersions(local, remote);
+            }
+        };
+    }
+
+    Path localRepository() {
+        JavaProjectDescriptor current = descriptor.get();
+        if (current == null) {
+            return null;
+        }
+        if (localCatalogReady() && localCatalog.repository() != null) {
+            return localCatalog.repository();
+        }
+        RepositoryLocation cached = repositoryLocation;
+        if (cached != null && cached.project().equals(current.root())) {
+            return cached.repository();
+        }
+        Path resolved = localResolver.resolve(current, buildSystem.get()).repository();
+        repositoryLocation = new RepositoryLocation(current.root(), resolved);
+        return resolved;
+    }
+
+    void warmLocalCatalog() {
+        localCatalogReady();
+    }
+
+    private boolean localCatalogReady() {
+        JavaProjectDescriptor current = descriptor.get();
+        if (current != null && current.root().equals(configuredProject)) {
+            return true;
+        }
+        if (current != null && warmingLocalCatalog.compareAndSet(false, true)) {
+            tasks.submit(() -> {
+                try {
+                    ensureLocalCatalog(false);
+                } finally {
+                    warmingLocalCatalog.set(false);
+                }
+            });
+        }
+        return false;
     }
 
     @Override
@@ -354,6 +423,9 @@ final class DependencyManagerCoordinator implements DependencyManagerPanel.Host,
         result.ifPresent(items -> remoteSearchCache.put(key,
                 new CachedRemoteSearch(List.copyOf(items), Instant.now())));
         return result;
+    }
+
+    private record RepositoryLocation(Path project, Path repository) {
     }
 
     private record CachedRemoteSearch(List<MavenCentralClient.SearchResult> results,

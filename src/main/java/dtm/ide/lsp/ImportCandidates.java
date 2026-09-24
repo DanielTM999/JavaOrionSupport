@@ -52,6 +52,9 @@ public final class ImportCandidates {
                 continue;
             }
             String name = text.substring(start, end);
+            if (name.startsWith("@")) {
+                name = name.substring(1).strip();
+            }
             if (isIdentifier(name) && diagnostic.path("message").asText("").startsWith(name + " ")) {
                 unresolved.add(diagnostic);
             }

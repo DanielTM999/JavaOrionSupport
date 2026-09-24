@@ -216,7 +216,25 @@ public final class JavaBuildToolsPanel extends JPanel {
     }
 
     public void setSyncPending(boolean pending) {
-        SwingUtilities.invokeLater(() -> syncBadge.setVisible(pending));
+        SwingUtilities.invokeLater(() -> {
+            if (pending && !syncButton.isEnabled()) {
+                return;
+            }
+            syncBadge.setText(text("status.syncPending", "Sincronizar"))
+                    .setTone(BadgeLabel.Tone.WARNING);
+            syncBadge.setVisible(pending);
+        });
+    }
+
+    public void setSyncing(boolean syncing) {
+        SwingUtilities.invokeLater(() -> {
+            syncButton.setEnabled(!syncing);
+            if (syncing) {
+                syncBadge.setText(text("status.syncing", "Sincronizando"))
+                        .setTone(BadgeLabel.Tone.INFO);
+            }
+            syncBadge.setVisible(syncing);
+        });
     }
 
     public void finished(String message, boolean successful) {
