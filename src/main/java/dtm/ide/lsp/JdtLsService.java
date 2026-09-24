@@ -147,6 +147,8 @@ public class JdtLsService {
     private static final long CODE_LENS_WORK_REFRESH_COOLDOWN_MS = 2_000;
     private static final long CODE_LENS_EDIT_REFRESH_DELAY_MS = 800;
     private static final long WARM_UP_TIMEOUT_MS = 8_000;
+    private static final long DIAGNOSTICS_SETTLE_QUIET_MS = 2_000;
+    private static final long DIAGNOSTICS_SETTLE_TIMEOUT_MS = 90_000;
 
     private static final List<String> TOKEN_TYPES = List.of(
             "namespace", "class", "interface", "enum", "enumMember", "type", "typeParameter",
@@ -223,6 +225,9 @@ public class JdtLsService {
     private final AtomicBoolean warmingUp = new AtomicBoolean();
     private final AtomicBoolean warmUpWorkStarted = new AtomicBoolean();
     private volatile long warmUpDeadline;
+    private volatile boolean diagnosticsSettled = true;
+    private volatile long diagnosticsSettleDeadline;
+    private final AtomicLong diagnosticsSettleTicket = new AtomicLong();
 
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
@@ -429,6 +434,8 @@ public class JdtLsService {
             readyLatch = new CountDownLatch(1);
             serviceReadyLatch = new CountDownLatch(1);
             progressAggregator.reset();
+            diagnosticsSettled = false;
+            diagnosticsSettleTicket.incrementAndGet();
         }
 
         long launchStarted = System.nanoTime();
@@ -492,6 +499,9 @@ public class JdtLsService {
             refreshOpenDocuments();
             drainPendingWatchedFiles();
             progressAggregator.restartBackgroundWork();
+            diagnosticsSettleDeadline = System.nanoTime()
+                    + TimeUnit.MILLISECONDS.toNanos(DIAGNOSTICS_SETTLE_TIMEOUT_MS);
+            scheduleDiagnosticsSettle();
             readyLatch.countDown();
             long ready = System.nanoTime();
             log.info("JDT LS pronto em {} ms (preparo {} ms, processo+initialize {} ms, importacao {} ms)",
@@ -780,8 +790,11 @@ public class JdtLsService {
         watchedFiles.clear();
         watchedFlushTicket.incrementAndGet();
         resyncTicket.incrementAndGet();
+        diagnosticsSettleTicket.incrementAndGet();
+        Set<Path> diagnosed = new java.util.LinkedHashSet<>(diagnosticsByPath.keySet());
         diagnosticsByPath.clear();
         rawDiagnosticsByPath.clear();
+        diagnosed.forEach(onDiagnosticsPublished);
         symbolCache.clear();
         codeLensCache.values().forEach(LensWork::cancel);
         codeLensCache.clear();
@@ -1081,8 +1094,58 @@ public class JdtLsService {
                     ? List.copyOf(diagnostics)
                     : DiagnosticRanges.compactMultiline(diagnostics, content));
             rawDiagnosticsByPath.put(key, List.copyOf(rawDiagnostics));
-            onDiagnosticsPublished.accept(path);
+            if (diagnosticsSettled) {
+                onDiagnosticsPublished.accept(path);
+            }
         }
+    }
+
+    boolean isDiagnosticsSettled() {
+        return diagnosticsSettled;
+    }
+
+    private void scheduleDiagnosticsSettle() {
+        if (diagnosticsSettled || state != State.READY) {
+            return;
+        }
+        long ticket = diagnosticsSettleTicket.incrementAndGet();
+        long remainingMs = TimeUnit.NANOSECONDS.toMillis(diagnosticsSettleDeadline - System.nanoTime());
+        long delay = Math.max(0, Math.min(DIAGNOSTICS_SETTLE_QUIET_MS, remainingMs));
+        CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS, executor)
+                .execute(() -> trySettleDiagnostics(ticket));
+    }
+
+    private void trySettleDiagnostics(long ticket) {
+        if (ticket != diagnosticsSettleTicket.get() || diagnosticsSettled || state != State.READY) {
+            return;
+        }
+        boolean expired = System.nanoTime() - diagnosticsSettleDeadline >= 0;
+        if (!expired && !progressAggregator.snapshot().idle()) {
+            scheduleDiagnosticsSettle();
+            return;
+        }
+        settleDiagnostics();
+    }
+
+    void settleDiagnostics() {
+        Set<Path> affected = new java.util.LinkedHashSet<>();
+        synchronized (this) {
+            if (diagnosticsSettled) {
+                return;
+            }
+            documents.uris().forEach(uri -> {
+                Path path = LspConversions.toPath(uri);
+                if (path != null) {
+                    diagnosticsByPath.remove(normalizePath(path));
+                    rawDiagnosticsByPath.remove(normalizePath(path));
+                    affected.add(path);
+                }
+            });
+            affected.addAll(diagnosticsByPath.keySet());
+            diagnosticsSettled = true;
+        }
+        resynchronizeOpenDocuments(resyncMode(), false, null);
+        affected.forEach(onDiagnosticsPublished);
     }
 
     private void onLanguageStatus(JsonNode params) {
@@ -1107,6 +1170,7 @@ public class JdtLsService {
             if (snapshot.idle()) {
                 progressAggregator.restartBackgroundWork();
             }
+            scheduleDiagnosticsSettle();
             return;
         }
         if (current == State.STARTING || current == State.INDEXING) {
@@ -1240,8 +1304,6 @@ public class JdtLsService {
         codeLensRefreshTickets.remove(uri);
         boolean wasSynced = documents.unmarkSynced(uri);
         documents.remove(uri);
-        diagnosticsByPath.remove(normalizePath(filePath));
-        rawDiagnosticsByPath.remove(normalizePath(filePath));
         symbolCache.remove(uri);
         discardCodeLenses(uri);
         completionCache.remove(uri);
@@ -2727,7 +2789,7 @@ public class JdtLsService {
     }
 
     public Collection<Diagnostic> diagnostics(Path filePath) {
-        if (filePath == null) {
+        if (filePath == null || !diagnosticsSettled) {
             return List.of();
         }
         return diagnosticsByPath.getOrDefault(normalizePath(filePath), List.of());

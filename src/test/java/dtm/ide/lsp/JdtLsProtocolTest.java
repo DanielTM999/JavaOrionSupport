@@ -197,6 +197,40 @@ class JdtLsProtocolTest {
     }
 
     @Test
+    void diagnosticsPublishedWhileTheProjectLoadsWaitForTheSettledAnalysis() throws Exception {
+        List<Path> published = new java.util.concurrent.CopyOnWriteArrayList<>();
+        service = new JdtLsService(null, null, null, published::add);
+        set("client", client);
+        set("state", JdtLsService.State.READY);
+        set("capabilities", allCapabilities());
+        set("diagnosticsSettled", false);
+        service.openDocument(FILE, TEXT);
+        drainNotifications();
+
+        service.onPublishDiagnostics(diagnostics(service.documentVersion(FILE),
+                "cannot be resolved", 1, 0, 1, 5));
+        service.onPublishDiagnostics(otherFileDiagnostics("unused import"));
+
+        assertTrue(published.isEmpty());
+        assertTrue(service.diagnostics(FILE).isEmpty());
+        assertTrue(service.diagnostics(OTHER_FILE).isEmpty());
+
+        service.settleDiagnostics();
+
+        assertTrue(service.isDiagnosticsSettled());
+        assertTrue(service.diagnostics(FILE).isEmpty());
+        assertEquals("unused import", service.diagnostics(OTHER_FILE).iterator().next().message());
+        assertTrue(published.contains(FILE));
+        assertTrue(published.contains(OTHER_FILE));
+        JsonNode reopened = awaitRequest("textDocument/didOpen");
+        assertEquals(FILE.toUri().toString(),
+                reopened.path("params").path("textDocument").path("uri").asText());
+
+        service.onPublishDiagnostics(diagnostics(service.documentVersion(FILE), "fresh", 1, 0, 1, 5));
+        assertEquals("fresh", service.diagnostics(FILE).iterator().next().message());
+    }
+
+    @Test
     void broadDiagnosticsAreCompactInTheEditorButRawForCodeActions() throws Exception {
         responses.put("textDocument/codeAction", "[]");
         service.openDocument(FILE, TEXT);
@@ -572,6 +606,18 @@ class JdtLsProtocolTest {
                 "message", message,
                 "source", "Java")));
         return JSON.valueToTree(params);
+    }
+
+    private static JsonNode otherFileDiagnostics(String message) {
+        return JSON.valueToTree(Map.of(
+                "uri", OTHER_FILE.toUri().toString(),
+                "diagnostics", List.of(Map.of(
+                        "range", Map.of(
+                                "start", Map.of("line", 0, "character", 0),
+                                "end", Map.of("line", 0, "character", 4)),
+                        "severity", 2,
+                        "message", message,
+                        "source", "Java"))));
     }
 
     private void set(String field, Object value) throws Exception {
