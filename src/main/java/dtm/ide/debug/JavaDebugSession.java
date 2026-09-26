@@ -18,16 +18,68 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
-public final class JavaDebugSession implements AutoCloseable {
+public final class JavaDebugSession implements AutoCloseable, DebuggerCompletionSource {
 
     private static final long REQUEST_TIMEOUT_SECONDS = 10;
+    private static final long COMPLETION_TIMEOUT_MILLIS = 1_500;
+
+    public record BreakpointSpec(String condition, String hitCondition, String logMessage) {
+
+        private static final BreakpointSpec PLAIN = new BreakpointSpec(null, null, null);
+
+        public BreakpointSpec {
+            condition = normalize(condition);
+            hitCondition = positive(hitCondition);
+            logMessage = normalize(logMessage);
+        }
+
+        public static BreakpointSpec plain() {
+            return PLAIN;
+        }
+
+        public static BreakpointSpec ofCondition(String condition) {
+            return new BreakpointSpec(condition, null, null);
+        }
+
+        public static BreakpointSpec of(BreakpointIde breakpoint) {
+            if (breakpoint == null) {
+                return PLAIN;
+            }
+            String condition = breakpoint.condition();
+            try {
+                return new BreakpointSpec(condition, breakpoint.hitCondition(), breakpoint.logMessage());
+            } catch (LinkageError olderIde) {
+                return ofCondition(condition);
+            }
+        }
+
+        private static String normalize(String value) {
+            return value == null || value.isBlank() ? null : value.trim();
+        }
+
+        private static String positive(String value) {
+            String trimmed = normalize(value);
+            if (trimmed == null) {
+                return null;
+            }
+            try {
+                int count = Integer.parseInt(trimmed);
+                return count > 0 ? String.valueOf(count) : null;
+            } catch (NumberFormatException invalid) {
+                return null;
+            }
+        }
+    }
+
+    public record Completion(String label, String insertText, String type) {
+    }
 
     private final int adapterPort;
     private final JavaAttachTarget attachTarget;
     private final Path projectRoot;
     private final Consumer<JavaDebugSnapshot> listener;
     private final Executor executor;
-    private final Map<Path, Map<Integer, String>> breakpoints = new ConcurrentHashMap<>();
+    private final Map<Path, Map<Integer, BreakpointSpec>> breakpoints = new ConcurrentHashMap<>();
     private final CountDownLatch initialized = new CountDownLatch(1);
     private final AtomicBoolean configured = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -35,6 +87,7 @@ public final class JavaDebugSession implements AutoCloseable {
     private volatile JavaDebugSnapshot snapshot = JavaDebugSnapshot.starting("Starting debugger...");
     private volatile int selectedFrameId;
     private volatile int selectedThreadId;
+    private volatile boolean completionsSupported;
 
     public JavaDebugSession(int adapterPort, int jdwpPort, Path projectRoot,
                             List<RunBreakpointData> initialBreakpoints,
@@ -69,7 +122,7 @@ public final class JavaDebugSession implements AutoCloseable {
         DapClient connected = connectWithRetry();
         client = connected;
         connected.setEventListener(this::onEvent);
-        request("initialize", Map.of(
+        JsonNode capabilities = request("initialize", Map.of(
                 "adapterID", "java",
                 "clientID", "orion-java",
                 "clientName", "Orion IDE",
@@ -78,6 +131,8 @@ public final class JavaDebugSession implements AutoCloseable {
                 "pathFormat", "path",
                 "supportsVariableType", true,
                 "supportsRunInTerminalRequest", false));
+        completionsSupported = capabilities != null
+                && capabilities.path("supportsCompletionsRequest").asBoolean(false);
 
         Map<String, Object> attach = new LinkedHashMap<>();
         attach.put("request", "attach");
@@ -193,14 +248,18 @@ public final class JavaDebugSession implements AutoCloseable {
     }
 
     public void updateBreakpoint(Path file, int line, boolean enabled, String condition) {
+        updateBreakpoint(file, line, enabled, BreakpointSpec.ofCondition(condition));
+    }
+
+    public void updateBreakpoint(Path file, int line, boolean enabled, BreakpointSpec spec) {
         if (file == null || line < 0) {
             return;
         }
         Path normalized = file.toAbsolutePath().normalize();
-        Map<Integer, String> lines = breakpoints.computeIfAbsent(normalized,
+        Map<Integer, BreakpointSpec> lines = breakpoints.computeIfAbsent(normalized,
                 ignored -> new ConcurrentHashMap<>());
         if (enabled) {
-            lines.put(line, condition == null ? "" : condition.trim());
+            lines.put(line, spec == null ? BreakpointSpec.plain() : spec);
         } else {
             lines.remove(line);
         }
@@ -210,7 +269,7 @@ public final class JavaDebugSession implements AutoCloseable {
     }
 
     private void configure() throws Exception {
-        for (Map.Entry<Path, Map<Integer, String>> entry : breakpoints.entrySet()) {
+        for (Map.Entry<Path, Map<Integer, BreakpointSpec>> entry : breakpoints.entrySet()) {
             sendBreakpoints(entry.getKey(), entry.getValue()).get(
                     REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         }
@@ -221,13 +280,20 @@ public final class JavaDebugSession implements AutoCloseable {
                 List.of(), List.of(), List.of()));
     }
 
-    private CompletableFuture<JsonNode> sendBreakpoints(Path file, Map<Integer, String> lines) {
+    private CompletableFuture<JsonNode> sendBreakpoints(Path file, Map<Integer, BreakpointSpec> lines) {
         List<Map<String, Object>> values = new ArrayList<>();
         lines.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
             Map<String, Object> breakpoint = new LinkedHashMap<>();
             breakpoint.put("line", entry.getKey() + 1);
-            if (!entry.getValue().isBlank()) {
-                breakpoint.put("condition", entry.getValue());
+            BreakpointSpec spec = entry.getValue();
+            if (spec.condition() != null) {
+                breakpoint.put("condition", spec.condition());
+            }
+            if (spec.hitCondition() != null) {
+                breakpoint.put("hitCondition", spec.hitCondition());
+            }
+            if (spec.logMessage() != null) {
+                breakpoint.put("logMessage", spec.logMessage());
             }
             values.add(breakpoint);
         });
@@ -335,6 +401,54 @@ public final class JavaDebugSession implements AutoCloseable {
         return List.copyOf(values);
     }
 
+    @Override
+    public boolean isCompletionsSupported() {
+        return completionsSupported;
+    }
+
+    @Override
+    public Path pausedSource() {
+        JavaDebugSnapshot current = snapshot;
+        if (current.state() != JavaDebugSnapshot.State.PAUSED || current.frames() == null) {
+            return null;
+        }
+        int frameId = selectedFrameId;
+        return current.frames().stream()
+                .filter(frame -> frameId <= 0 || frame.id() == frameId)
+                .map(JavaDebugSnapshot.StackFrame::source)
+                .filter(java.util.Objects::nonNull)
+                .findFirst()
+                .orElse(null);
+    }
+
+    @Override
+    public List<Completion> completions(String text, int column) {
+        DapClient current = client;
+        int frameId = selectedFrameId;
+        if (!completionsSupported || current == null || closed.get() || frameId <= 0 || text == null) {
+            return List.of();
+        }
+        try {
+            JsonNode body = current.request("completions", Map.of(
+                            "frameId", frameId,
+                            "text", text,
+                            "column", Math.max(1, column)))
+                    .get(COMPLETION_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            List<Completion> values = new ArrayList<>();
+            for (JsonNode target : body.path("targets")) {
+                String label = target.path("label").asText("");
+                if (label.isBlank()) {
+                    continue;
+                }
+                values.add(new Completion(label, target.path("text").asText(label),
+                        target.path("type").asText("")));
+            }
+            return List.copyOf(values);
+        } catch (Exception error) {
+            return List.of();
+        }
+    }
+
     private JsonNode request(String command, Object arguments) throws Exception {
         DapClient current = client;
         if (current == null) {
@@ -369,17 +483,16 @@ public final class JavaDebugSession implements AutoCloseable {
             if (data == null || data.getFile() == null) {
                 continue;
             }
-            Map<Integer, String> lines = new ConcurrentHashMap<>();
+            Map<Integer, BreakpointSpec> lines = new ConcurrentHashMap<>();
             if (data.getBreakpoints() != null && !data.getBreakpoints().isEmpty()) {
                 for (BreakpointIde breakpoint : data.getBreakpoints()) {
                     if (breakpoint != null && breakpoint.active() && breakpoint.line() >= 0) {
-                        lines.put(breakpoint.line(), breakpoint.condition() == null
-                                ? "" : breakpoint.condition());
+                        lines.put(breakpoint.line(), BreakpointSpec.of(breakpoint));
                     }
                 }
             } else if (data.getLines() != null) {
                 data.getLines().stream().filter(line -> line != null && line >= 0)
-                        .forEach(line -> lines.put(line, ""));
+                        .forEach(line -> lines.put(line, BreakpointSpec.plain()));
             }
             breakpoints.put(data.getFile().toAbsolutePath().normalize(), lines);
         }

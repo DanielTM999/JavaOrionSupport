@@ -253,6 +253,65 @@ class JavaLocalScopeTest {
         return JavaLocalScope.at(SOURCE, line, text.indexOf(token));
     }
 
+    @Test
+    void visibleAtListsWhatAConditionCanUseOnThatLine() {
+        String source = """
+                class Order {
+                    private int total;
+                    void apply(String user, int count) {
+                        int before = count;
+                        if (count > 1) {
+                            int inner = 2;
+                        }
+                        int after = 3;
+                        use(before);
+                    }
+                    void other(int unrelated) {
+                    }
+                }
+                """;
+
+        List<JavaLocalScope.Visible> visible = JavaLocalScope.visibleAt(source, 8);
+
+        List<String> names = visible.stream().map(JavaLocalScope.Visible::name).toList();
+        assertTrue(names.containsAll(List.of("before", "user", "count", "total", "after")), names.toString());
+        assertFalse(names.contains("inner"), names.toString());
+        assertFalse(names.contains("unrelated"), names.toString());
+        assertEquals(JavaLocalScope.Kind.PARAMETER, kindOf(visible, "user"));
+        assertEquals(JavaLocalScope.Kind.LOCAL, kindOf(visible, "before"));
+        assertEquals(JavaLocalScope.Kind.FIELD, kindOf(visible, "total"));
+        assertTrue(names.indexOf("before") < names.indexOf("total"), "locais antes dos campos");
+    }
+
+    @Test
+    void aLocalIsNotVisibleOnItsOwnDeclarationLineNorBefore() {
+        String source = """
+                class A {
+                    void m(int value) {
+                        use(value);
+                        int later = value;
+                    }
+                }
+                """;
+
+        List<String> onUse = JavaLocalScope.visibleAt(source, 2).stream().map(JavaLocalScope.Visible::name).toList();
+        List<String> onDeclaration = JavaLocalScope.visibleAt(source, 3).stream().map(JavaLocalScope.Visible::name).toList();
+
+        assertFalse(onUse.contains("later"), onUse.toString());
+        assertFalse(onDeclaration.contains("later"), onDeclaration.toString());
+        assertTrue(onDeclaration.contains("value"), onDeclaration.toString());
+    }
+
+    @Test
+    void brokenSourceHasNothingVisible() {
+        assertTrue(JavaLocalScope.visibleAt("class A { void m( { }", 0).isEmpty());
+        assertTrue(JavaLocalScope.visibleAt(null, 0).isEmpty());
+    }
+
+    private static JavaLocalScope.Kind kindOf(List<JavaLocalScope.Visible> visible, String name) {
+        return visible.stream().filter(v -> v.name().equals(name)).findFirst().orElseThrow().kind();
+    }
+
     private static List<Integer> lines(JavaLocalScope.Scope scope) {
         return scope.usages().stream().map(range -> range.start().line()).toList();
     }

@@ -58,6 +58,69 @@ class JavaDebugSessionTest {
     }
 
     @Test
+    void sendsHitCountsAndLogMessagesAndDropsInvalidHitCounts() throws Exception {
+        try (ServerSocket server = new ServerSocket(0)) {
+            CompletableFuture<List<JsonNode>> captured = new CompletableFuture<>();
+            Thread adapter = new Thread(() -> serve(server, captured));
+            adapter.setDaemon(true);
+            adapter.start();
+            RunBreakpointData breakpoint = RunBreakpointData.builder()
+                    .file(root.resolve("Demo.java"))
+                    .breakpoints(List.of(
+                            new BreakpointIde(6, true, "value > 3", "3", "value={value}"),
+                            new BreakpointIde(9, true, null, "abc", null)))
+                    .build();
+            JavaDebugSession session = new JavaDebugSession(server.getLocalPort(), 51003,
+                    root, List.of(breakpoint), value -> {
+                    });
+
+            session.start();
+            JsonNode sent = captured.get(2, TimeUnit.SECONDS).get(2).path("arguments").path("breakpoints");
+
+            assertEquals("value > 3", sent.get(0).path("condition").asText());
+            assertEquals("3", sent.get(0).path("hitCondition").asText());
+            assertEquals("value={value}", sent.get(0).path("logMessage").asText());
+            assertEquals(10, sent.get(1).path("line").asInt());
+            assertTrue(sent.get(1).path("hitCondition").isMissingNode());
+            assertTrue(sent.get(1).path("condition").isMissingNode());
+            session.close();
+        }
+    }
+
+    @Test
+    void completionsAskTheDebuggerForThePausedFrame() throws Exception {
+        try (ServerSocket server = new ServerSocket(0)) {
+            Path source = root.resolve("Demo.java");
+            CompletableFuture<JsonNode> captured = new CompletableFuture<>();
+            Thread adapter = new Thread(() -> servePausedWithCompletions(server, source, captured));
+            adapter.setDaemon(true);
+            adapter.start();
+            JavaDebugSession session = new JavaDebugSession(server.getLocalPort(), 51004,
+                    root, List.of(), value -> {
+                    });
+
+            session.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (session.snapshot().state() != JavaDebugSnapshot.State.PAUSED
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+
+            assertTrue(session.isCompletionsSupported());
+            assertEquals(source, session.pausedSource());
+            List<JavaDebugSession.Completion> completions = session.completions("user.get", 9);
+            JsonNode request = captured.get(2, TimeUnit.SECONDS);
+
+            assertEquals(11, request.path("arguments").path("frameId").asInt());
+            assertEquals("user.get", request.path("arguments").path("text").asText());
+            assertEquals(9, request.path("arguments").path("column").asInt());
+            assertEquals(List.of(new JavaDebugSession.Completion("getName", "getName()", "method")),
+                    completions);
+            session.close();
+        }
+    }
+
+    @Test
     void pauseResolvesAnActiveThreadBeforeSendingTheCommand() throws Exception {
         try (ServerSocket server = new ServerSocket(0)) {
             CompletableFuture<JsonNode> captured = new CompletableFuture<>();
@@ -123,6 +186,48 @@ class JavaDebugSessionTest {
                             """);
                 }
                 if ("pause".equals(command)) {
+                    captured.complete(request);
+                    return;
+                }
+            }
+        } catch (Exception error) {
+            captured.completeExceptionally(error);
+        }
+    }
+
+    private static void servePausedWithCompletions(ServerSocket server, Path source,
+                                                   CompletableFuture<JsonNode> captured) {
+        try (Socket socket = server.accept()) {
+            BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
+            BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream());
+            int sequence = 1;
+            while (true) {
+                JsonNode request = read(input);
+                String command = request.path("command").asText();
+                String body = switch (command) {
+                    case "initialize" -> "{\"supportsCompletionsRequest\":true}";
+                    case "threads" -> "{\"threads\":[{\"id\":1,\"name\":\"main\"}]}";
+                    case "stackTrace" -> "{\"stackFrames\":[{\"id\":11,\"name\":\"run\",\"line\":5,"
+                            + "\"source\":{\"path\":" + JSON.writeValueAsString(source.toString()) + "}}]}";
+                    case "scopes" -> "{\"scopes\":[]}";
+                    case "completions" -> "{\"targets\":[{\"label\":\"getName\",\"text\":\"getName()\","
+                            + "\"type\":\"method\"}]}";
+                    default -> "{}";
+                };
+                write(output, """
+                        {"seq":%d,"type":"response","request_seq":%d,"command":"%s","success":true,"body":%s}
+                        """.formatted(sequence++, request.path("seq").asInt(), command, body));
+                if ("attach".equals(command)) {
+                    write(output, """
+                            {"seq":90,"type":"event","event":"initialized","body":{}}
+                            """);
+                }
+                if ("configurationDone".equals(command)) {
+                    write(output, """
+                            {"seq":91,"type":"event","event":"stopped","body":{"reason":"breakpoint","threadId":1}}
+                            """);
+                }
+                if ("completions".equals(command)) {
                     captured.complete(request);
                     return;
                 }

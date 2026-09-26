@@ -49,6 +49,8 @@ import dtm.ide.api.project.editor.IdeWordClickContext;
 import dtm.ide.api.project.editor.SemanticToken;
 import dtm.ide.api.project.editor.EditorShortcutScope;
 import dtm.ide.api.project.editor.IdeEditorContext;
+import dtm.ide.api.project.editor.ConditionalBreakpointContext;
+import dtm.ide.api.project.editor.ConditionalBreakpointDialogView;
 import dtm.ide.api.project.editor.NativeEditorType;
 import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
 import dtm.ide.api.theme.EditorTheme;
@@ -116,6 +118,10 @@ import dtm.ide.lsp.LombokSupport;
 import dtm.ide.lsp.LombokSupportStatus;
 import dtm.ide.lsp.UsagesPopup;
 import dtm.ide.debug.BuildToolDebugListener;
+import dtm.ide.debug.BreakpointChanges;
+import dtm.ide.debug.ConditionCompletionProvider;
+import dtm.ide.debug.ConditionEditorSession;
+import dtm.ide.debug.ConditionLanguageService;
 import dtm.ide.debug.JavaAttachTarget;
 import dtm.ide.debug.JavaDebugSession;
 import dtm.ide.debug.JdwpRelay;
@@ -197,6 +203,7 @@ import dtm.ide.todo.TodoItem;
 import dtm.ide.todo.TodoScanner;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.BuildPromptPanel;
+import dtm.ide.ui.ConditionalBreakpointHints;
 import dtm.ide.ui.JavaProjectStructurePanel;
 import dtm.ide.ui.JavaTodoPanel;
 import dtm.ide.ui.JavaIcons;
@@ -463,6 +470,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile Path pluginRepositoryRoot;
     private volatile Path pluginRepositoryPath;
     private final AtomicBoolean naturalDebugEnd = new AtomicBoolean();
+    private final Map<Path, ConditionEditorSession> conditionSessions = new ConcurrentHashMap<>();
+    private final AtomicReference<ConditionEditorSession> activeConditionSession = new AtomicReference<>();
     private final TodoScanner todoScanner = new TodoScanner();
     private final AtomicLong todoRefreshTicket = new AtomicLong();
     private volatile JavaTodoPanel todoPanel;
@@ -969,7 +978,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         created.setMaxHeap(settings().getLanguageServerMemory());
         created.setStatusListener(this::publishLanguageServerStatus);
         created.setWorkListener(this::publishLanguageServerWork);
-        created.setCodeLensRefreshListener(this::requestRefreshCodeLenses);
+        created.setCodeLensRefreshListener(path -> {
+            if (path == null || !conditionSessions.containsKey(path.toAbsolutePath().normalize())) {
+                requestRefreshCodeLenses(path);
+            }
+        });
         created.setWarmUpCompleteListener(this::refreshJavaEditorsAfterIndexing);
         created.setLateCompletionListener(this::onLateCompletion);
         created.setDocumentUpgradeListener(this::onLanguageServerDocumentUpgrade);
@@ -983,6 +996,11 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         Path normalized = path.toAbsolutePath().normalize();
+        ConditionEditorSession conditionSession = conditionSessions.get(normalized);
+        if (conditionSession != null) {
+            conditionSession.diagnosticsPublished();
+            return;
+        }
         JdtLsService lsp = jdtLs;
         if (lsp != null && lsp.isReady()) {
             problems.supersedeCompilerProblems(normalized);
@@ -6483,15 +6501,142 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (session == null) {
             return;
         }
-        var breakpoint = event.getBreakpointIde();
-        boolean enabled = switch (event.getChangeType()) {
-            case ENABLED_STATE -> breakpoint.active();
-            case CONDITION -> true;
-            default -> event.isBreakpointAdded();
-        };
-        String condition = event.getChangeType() == dtm.ide.api.extension.event.BreakpointChangeType.CONDITION
-                ? event.getCondition() : breakpoint.condition();
-        session.updateBreakpoint(event.getFile(), breakpoint.line(), enabled, condition);
+        BreakpointChanges.Update update = BreakpointChanges.resolve(event);
+        session.updateBreakpoint(event.getFile(), event.getBreakpointIde().line(), update.enabled(),
+                update.spec());
+    }
+
+    @Override
+    public boolean isConditionalBreakpointEnabled(Path fileOpen) {
+        return fileOpen != null && fileOpen.getFileName() != null
+                && fileOpen.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".java");
+    }
+
+    @Override
+    public CodeEditor createConditionalBreakpointEditor(ConditionalBreakpointContext context) {
+        if (context == null || !isConditionalBreakpointEnabled(context.file())) {
+            return null;
+        }
+        String condition = context.currentCondition() == null ? "" : context.currentCondition();
+        CodeEditor editor;
+        try {
+            editor = requestEmbeddedCodeEditor("breakpoint-condition.java", condition,
+                    EmbeddedCodeEditorSettings.highlighted());
+        } catch (RuntimeException | LinkageError error) {
+            log.debug("IDE sem editor embutido para a condicao: {}", error.getMessage());
+            return null;
+        }
+        if (editor == null) {
+            return null;
+        }
+        AtomicReference<ConditionEditorSession> created = new AtomicReference<>();
+        ConditionEditorSession session = new ConditionEditorSession(context.file(), context.line(), condition,
+                () -> sourceTextOf(context), ConditionLanguageService.of(() -> jdtLs), () -> debugSession,
+                () -> {
+                    ConditionEditorSession closed = created.get();
+                    if (closed != null) {
+                        conditionSessions.remove(closed.syntheticPath(), closed);
+                        activeConditionSession.compareAndSet(closed, null);
+                    }
+                });
+        created.set(session);
+        editor.enableBookmark(false);
+        editor.enableBreakpoint(false);
+        editor.setFoldingEnabled(false);
+        editor.getGutter().enableLineNumber(true);
+        editor.addProvider(session.completionProvider());
+        editor.addProvider(session.diagnosticsProvider());
+        if (editor.getTextArea() != null) {
+            editor.getTextArea().setAutoCompleteOnTyping(true);
+            editor.getTextArea().setAutoCompleteTypingTrigger(c -> Character.isJavaIdentifierPart(c) || c == '.');
+        }
+        ConditionEditorSession previous = activeConditionSession.getAndSet(session);
+        if (previous != null && previous != session) {
+            previous.close();
+        }
+        conditionSessions.put(session.syntheticPath(), session);
+        session.bind(editor);
+        return editor;
+    }
+
+    @Override
+    public void configureConditionalBreakpointEditor(IdeEditorContext editorContext,
+                                                     ConditionalBreakpointContext context) {
+        if (editorContext == null || context == null || context.file() == null) {
+            return;
+        }
+        if (sessionFor(context) != null) {
+            return;
+        }
+        try {
+            TokenizerCodeEditorProvider tokenizer = editors.tokenizerFor(context.file());
+            if (tokenizer != null) {
+                editorContext.addProvider(tokenizer);
+            }
+            editorContext.addProvider(new ConditionCompletionProvider(context.file(), context.line(),
+                    () -> sourceTextOf(context), () -> debugSession));
+            editorContext.setAutoCompleteOnTyping(true);
+        } catch (RuntimeException | LinkageError error) {
+            log.debug("Editor de condicao sem recursos Java: {}", error.getMessage());
+        }
+    }
+
+    @Override
+    public void configureConditionalBreakpointDialog(ConditionalBreakpointDialogView dialogView) {
+        if (dialogView == null) {
+            return;
+        }
+        ConditionalBreakpointContext context = dialogView.getBreakpointContext();
+        try {
+            dialogView.setHitConditionSupported(true);
+            dialogView.setLogMessageSupported(true);
+        } catch (LinkageError olderIde) {
+            log.debug("IDE sem suporte a hit count/logpoint: {}", olderIde.getMessage());
+        }
+        if (context == null || context.file() == null) {
+            return;
+        }
+        dialogView.setDescription(text("breakpoint.description",
+                "Expressao Java avaliada antes desta linha. O debugger so para quando ela for true."));
+        ConditionEditorSession session = sessionFor(context);
+        List<String> visible = JavaLocalScope.visibleAt(sourceTextOf(context), context.line()).stream()
+                .map(JavaLocalScope.Visible::name).toList();
+        if (!visible.isEmpty()) {
+            dialogView.addComponent(ConditionalBreakpointHints.chips(
+                    text("breakpoint.visible", "Nesta linha:"), visible,
+                    session == null ? null : session::insertAtCaret));
+        }
+        if (session != null) {
+            try {
+                session.attach(dialogView);
+                dialogView.addCloseListener(session::close);
+            } catch (LinkageError olderIde) {
+                log.debug("IDE sem status de condicao: {}", olderIde.getMessage());
+            }
+        }
+    }
+
+    private ConditionEditorSession sessionFor(ConditionalBreakpointContext context) {
+        ConditionEditorSession session = activeConditionSession.get();
+        if (session == null || session.isClosed() || context == null || context.file() == null) {
+            return null;
+        }
+        boolean same = session.file().equals(context.file().toAbsolutePath().normalize())
+                && session.line() == context.line();
+        return same ? session : null;
+    }
+
+    private String sourceTextOf(ConditionalBreakpointContext context) {
+        IdeEditorContext source = context.sourceEditorContext();
+        String text = source == null ? null : source.getText();
+        if (text != null) {
+            return text;
+        }
+        try {
+            return Files.readString(context.file());
+        } catch (Exception error) {
+            return "";
+        }
     }
 
     private synchronized JavaRunSupport ensureRunSupport() {

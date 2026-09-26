@@ -892,5 +892,7 @@
   "JavaIdeAdapter.status.nothingToRun": "Nothing to run",
   "JavaIdeAdapter.status.noDebuggableJvm": "No debuggable JVM in these tasks (use run, bootRun or test)",
   "JavaIdeAdapter.action.clearBuild": "Clear build",
-  "JavaIdeAdapter.action.clearBuild.tip": "Clear the problems from the last build"
+  "JavaIdeAdapter.action.clearBuild.tip": "Clear the problems from the last build",
+  "JavaIdeAdapter.breakpoint.description": "Java expression evaluated before this line. The debugger only stops when it is true.",
+  "JavaIdeAdapter.breakpoint.visible": "On this line:"
 }

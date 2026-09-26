@@ -18,8 +18,8 @@ import java.util.*;
 
 public final class JavaLocalScope {
     private static final int CACHE_LIMIT = 32;
-    private static final Map<String, List<Scope>> CACHE = new LinkedHashMap<>(CACHE_LIMIT, .75f, true) {
-        @Override protected boolean removeEldestEntry(Map.Entry<String, List<Scope>> eldest) {
+    private static final Map<String, Parsed> CACHE = new LinkedHashMap<>(CACHE_LIMIT, .75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, Parsed> eldest) {
             return size() > CACHE_LIMIT;
         }
     };
@@ -29,6 +29,16 @@ public final class JavaLocalScope {
     private static StandardJavaFileManager fileManager;
 
     public record Scope(String name, Range declaration, boolean onDeclaration, int startLine, int endLine, List<Range> usages) { }
+
+    public enum Kind { LOCAL, PARAMETER, FIELD }
+
+    public record Visible(String name, Kind kind) { }
+
+    private record Declared(String name, Kind kind, int declarationLine, int startLine, int endLine) { }
+
+    private record Parsed(List<Scope> scopes, List<Declared> declared) {
+        static final Parsed EMPTY = new Parsed(List.of(), List.of());
+    }
 
     private JavaLocalScope() { }
 
@@ -48,6 +58,22 @@ public final class JavaLocalScope {
         return range.start().line() == line && col >= range.start().col() && col < range.end().col();
     }
 
+    public static List<Visible> visibleAt(String source, int line) {
+        if (source == null || source.isEmpty() || line < 0) return List.of();
+        Map<String, Visible> visible = new LinkedHashMap<>();
+        List<Declared> declared = new ArrayList<>(parsed(source).declared());
+        declared.sort(Comparator.comparingInt((Declared d) -> d.kind() == Kind.FIELD ? 1 : 0)
+                .thenComparing(Comparator.comparingInt(Declared::declarationLine).reversed()));
+        for (Declared candidate : declared) {
+            boolean inScope = candidate.startLine() <= line && line <= candidate.endLine();
+            boolean declaredBefore = candidate.declarationLine() < line;
+            if (inScope && declaredBefore) {
+                visible.putIfAbsent(candidate.name(), new Visible(candidate.name(), candidate.kind()));
+            }
+        }
+        return List.copyOf(visible.values());
+    }
+
     public static void warmUp() {
         scopes("class Warmup { void run() { int value = 0; } }");
     }
@@ -58,16 +84,20 @@ public final class JavaLocalScope {
     }
 
     private static List<Scope> scopes(String source) {
+        return parsed(source).scopes();
+    }
+
+    private static Parsed parsed(String source) {
         synchronized (CACHE) {
-            List<Scope> cached = CACHE.get(source);
+            Parsed cached = CACHE.get(source);
             if (cached != null) return cached;
         }
         synchronized (PARSE_LOCK) {
             synchronized (CACHE) {
-                List<Scope> cached = CACHE.get(source);
+                Parsed cached = CACHE.get(source);
                 if (cached != null) return cached;
             }
-            List<Scope> parsed = parse(source);
+            Parsed parsed = parse(source);
             synchronized (CACHE) {
                 CACHE.put(source, parsed);
             }
@@ -75,11 +105,11 @@ public final class JavaLocalScope {
         }
     }
 
-    private static List<Scope> parse(String source) {
+    private static Parsed parse(String source) {
         PARSES.incrementAndGet();
         try {
             if (compiler == null) compiler = ToolProvider.getSystemJavaCompiler();
-            if (compiler == null) return List.of();
+            if (compiler == null) return Parsed.EMPTY;
             var diagnostics = new DiagnosticCollector<JavaFileObject>();
             JavaFileObject file = new SimpleJavaFileObject(URI.create("string:///Buffer.java"),
                     JavaFileObject.Kind.SOURCE) {
@@ -91,15 +121,16 @@ public final class JavaLocalScope {
             CompilationUnitTree unit = task.parse().iterator().next();
             // Broken syntax can change nesting. Never guess a binding in that case.
             if (diagnostics.getDiagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR)) {
-                return List.of();
+                return Parsed.EMPTY;
             }
             Scanner scanner = new Scanner(source, unit, Trees.instance(task).getSourcePositions());
             scanner.scan(unit, null);
-            return scanner.symbols.stream().map(Symbol::snapshot).toList();
+            return new Parsed(scanner.symbols.stream().map(Symbol::snapshot).toList(),
+                    List.copyOf(scanner.declared));
         } catch (Exception | LinkageError unavailable) {
             // A host runtime without jdk.compiler still has semantic navigation through JDT LS.
             fileManager = null;
-            return List.of();
+            return Parsed.EMPTY;
         }
     }
 
@@ -126,6 +157,7 @@ public final class JavaLocalScope {
         final SourcePositions positions;
         final Deque<Frame> frames = new ArrayDeque<>();
         final List<Symbol> symbols = new ArrayList<>();
+        final List<Declared> declared = new ArrayList<>();
 
         Scanner(String source, CompilationUnitTree unit, SourcePositions positions) {
             this.code = JavaLexicalSource.mask(source);
@@ -138,8 +170,14 @@ public final class JavaLocalScope {
 
         @Override public Void visitClass(ClassTree tree, Void unused) {
             Frame frame = new Frame(tree);
+            int classStart = JavaLexicalSource.lineOf(lines, Math.max(0, start(tree)));
+            int classEnd = JavaLexicalSource.lineOf(lines, Math.max(0, end(tree) - 1));
             for (Tree member : tree.getMembers()) {
-                if (member instanceof VariableTree field) frame.bindings.put(field.getName().toString(), null);
+                if (member instanceof VariableTree field) {
+                    frame.bindings.put(field.getName().toString(), null);
+                    declared.add(new Declared(field.getName().toString(), Kind.FIELD,
+                            classStart, classStart, classEnd));
+                }
             }
             frames.push(frame);
             scan(tree.getMembers(), null);
@@ -176,6 +214,11 @@ public final class JavaLocalScope {
                             JavaLexicalSource.lineOf(lines, Math.max(0, end(frame.owner) - 1)));
                     frame.bindings.put(name, symbol);
                     symbols.add(symbol);
+                    boolean parameter = frame.owner instanceof MethodTree
+                            || frame.owner instanceof LambdaExpressionTree
+                            || frame.owner instanceof CatchTree;
+                    declared.add(new Declared(name, parameter ? Kind.PARAMETER : Kind.LOCAL,
+                            symbol.declaration.start().line(), symbol.startLine, symbol.endLine));
                 }
             }
             scan(tree.getInitializer(), null);
