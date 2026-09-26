@@ -77,10 +77,53 @@ class ModuleBuildStateTest {
         state.record(root, service);
         state.record(root, unrelated);
 
-        Set<Path> dependents = state.dependentsOf(root, Set.of("Lojista"));
+        Set<Path> dependents = state.dependentsOf(root, Set.of("a.Lojista"));
 
         assertTrue(dependents.contains(service));
         assertFalse(dependents.contains(unrelated));
+    }
+
+    @Test
+    void dependentsAreResolvedByPackageAndImports() {
+        Path explicit = source("b/Explicito.java",
+                "package b; import a.Lojista; public class Explicito { Lojista l; }");
+        Path other = source("b/Outro.java",
+                "package b; import z.Lojista; public class Outro { Lojista l; }");
+        Path qualified = source("c/Qualificado.java",
+                "package c; public class Qualificado { a.Lojista l; }");
+        Path unqualified = source("c/SemImport.java",
+                "package c; public class SemImport { Lojista l; }");
+        Path nested = source("d/Aninhado.java",
+                "package d; import a.Lojista.Item; public class Aninhado { Item i; Lojista x; }");
+        ModuleBuildState state = ModuleBuildState.load(stateFile());
+        state.reset("fp");
+        for (Path file : List.of(explicit, other, qualified, unqualified, nested)) {
+            state.record(root, file);
+        }
+
+        Set<Path> dependents = state.dependentsOf(root, Set.of("a.Lojista"));
+
+        assertTrue(dependents.contains(explicit));
+        assertTrue(dependents.contains(qualified));
+        assertTrue(dependents.contains(nested));
+        assertFalse(dependents.contains(other));
+        assertFalse(dependents.contains(unqualified));
+    }
+
+    @Test
+    void aTouchedButUnchangedSourceRefreshesItsTimestamp() throws Exception {
+        Path lojista = source("Lojista.java", "package a; public class Lojista {}");
+        ModuleBuildState state = ModuleBuildState.load(stateFile());
+        state.reset("fp");
+        state.record(root, lojista);
+        state.save();
+        Files.setLastModifiedTime(lojista, java.nio.file.attribute.FileTime.fromMillis(
+                System.currentTimeMillis() + 60_000));
+
+        ModuleBuildState reloaded = ModuleBuildState.load(stateFile());
+
+        assertTrue(reloaded.changes(root, List.of(lojista)).isEmpty());
+        assertTrue(reloaded.isDirty());
     }
 
     @Test
@@ -91,7 +134,7 @@ class ModuleBuildStateTest {
         state.reset("fp");
         state.record(root, holder);
 
-        assertTrue(state.dependentsOf(root, Set.of("Lojista")).isEmpty());
+        assertTrue(state.dependentsOf(root, Set.of("a.Lojista")).isEmpty());
     }
 
     @Test
@@ -137,7 +180,8 @@ class ModuleBuildStateTest {
 
     private Path source(String name, String content) {
         try {
-            Path file = root.resolve("src/main/java/a").resolve(name);
+            Path file = name.contains("/") ? root.resolve("src/main/java").resolve(name)
+                    : root.resolve("src/main/java/a").resolve(name);
             Files.createDirectories(file.getParent());
             Files.writeString(file, content, StandardCharsets.UTF_8);
             return file;

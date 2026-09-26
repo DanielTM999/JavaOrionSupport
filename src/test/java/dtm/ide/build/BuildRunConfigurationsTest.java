@@ -81,8 +81,27 @@ class BuildRunConfigurationsTest {
         assertEquals(List.of("clean", "package"),
                 BuildRunConfigurations.splitGoals("clean, package"));
         assertEquals(List.of("clean", "install"),
-                BuildRunConfigurations.splitGoals("Clean; Install"));
+                BuildRunConfigurations.splitGoals("clean; install"));
         assertTrue(BuildRunConfigurations.splitGoals("  ").isEmpty());
+    }
+
+    @Test
+    void goalsAndArgumentsKeepTheirCase() {
+        assertEquals(List.of("spring-boot:run", "-DskipTests", "-Dspring.profiles.active=dev,local",
+                        "-Pci"),
+                BuildRunConfigurations.splitGoals(
+                        "spring-boot:run -DskipTests -Dspring.profiles.active=dev,local -Pci"));
+    }
+
+    @Test
+    void savedConfigurationsRoundTripArgumentsExactly() {
+        BuildRunConfigurations configurations = new BuildRunConfigurations(root);
+        List<String> goals = List.of("clean", "install", "-DskipTests",
+                "-Dspring-boot.run.arguments=--server.port=8081 --debug");
+
+        assertTrue(configurations.save(new BuildRunConfigurations.Entry("Install", goals)));
+
+        assertEquals(goals, configurations.all().getFirst().goals());
     }
 
     @Test

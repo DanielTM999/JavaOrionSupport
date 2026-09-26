@@ -1,5 +1,6 @@
 package dtm.ide.ui;
 
+import dtm.ide.build.BuildCommand;
 import dtm.ide.build.BuildRunConfigurations;
 import dtm.ide.build.BuildToolModel;
 import dtm.ide.build.MavenPluginGoals;
@@ -24,15 +25,19 @@ import javax.swing.Icon;
 import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JMenu;
-import javax.swing.JOptionPane;
 import javax.swing.JPopupMenu;
 import javax.swing.JPanel;
+import javax.swing.JDialog;
+import javax.swing.JToggleButton;
 import javax.swing.SwingUtilities;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
+import java.awt.Dialog;
 import java.awt.Dimension;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.awt.FlowLayout;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -82,13 +87,36 @@ public final class JavaBuildToolsPanel extends JPanel {
         default List<MavenPluginGoals.Goal> goalsOf(BuildToolModel.Coordinate coordinate) {
             return List.of();
         }
+
+        default void debugGoals(BuildToolModel.Node context, List<String> goals) {
+        }
+
+        default boolean supportsDebug() {
+            return false;
+        }
+
+        default BuildRunConfigurations.ToolOptions toolOptions() {
+            return BuildRunConfigurations.ToolOptions.none();
+        }
+
+        default void toolOptionsChanged(BuildRunConfigurations.ToolOptions options) {
+        }
+
+        default boolean showPrompt(BuildPromptPanel prompt, String title) {
+            return false;
+        }
     }
 
     private static final String CARD_LOADING = "loading";
     private static final String CARD_EMPTY = "empty";
     private static final String CARD_TASKS = "tasks";
 
-    private record LoadedModel(BuildToolModel model, Set<String> activeProfiles) {
+    private record LoadedModel(BuildToolModel model, Set<String> activeProfiles,
+                               BuildRunConfigurations.ToolOptions options) {
+    }
+
+    private record Execution(BuildToolModel.Node context, List<String> goals, boolean single,
+                             boolean debug, String name) {
     }
 
     private final Host host;
@@ -108,6 +136,20 @@ public final class JavaBuildToolsPanel extends JPanel {
             JavaIcons.run(JavaIcons.SMALL));
     private final JButton stopButton = iconButton(text("action.stop", "Parar"),
             JavaIcons.stop(JavaIcons.SMALL));
+    private final JButton debugButton = iconButton(text("action.debug", "Depurar"),
+            JavaIcons.debug(JavaIcons.SMALL));
+    private final JToggleButton skipTestsToggle = toggle(text("toggle.skipTests", "Skip Tests"),
+            text("toggle.skipTests.tooltip", "Pular os testes (-DskipTests / -x test)"));
+    private final JToggleButton offlineToggle = toggle(text("toggle.offline", "Offline"),
+            text("toggle.offline.tooltip", "Executar sem acessar repositorios remotos"));
+    private final JButton runGoalButton = iconButton(text("action.runGoal", "Executar goal..."),
+            JavaIcons.goal(JavaIcons.SMALL));
+    private final JButton rerunButton = iconButton(text("action.rerun", "Re-executar ultimo"),
+            JavaIcons.rerun(JavaIcons.SMALL));
+    private final JButton expandButton = iconButton(text("action.expandAll", "Expandir tudo"),
+            JavaIcons.expand(JavaIcons.SMALL));
+    private final JButton collapseButton = iconButton(text("action.collapseAll", "Recolher tudo"),
+            JavaIcons.collapse(JavaIcons.SMALL));
     private final JLabel selection = new JLabel(" ");
     private final CardLayout cards = new CardLayout();
     private final JPanel body = new JPanel(cards);
@@ -121,6 +163,10 @@ public final class JavaBuildToolsPanel extends JPanel {
     private volatile BuildToolModel current = new BuildToolModel("Build Tools", List.of(), List.of());
     private final Set<String> activeProfiles = new LinkedHashSet<>();
     private boolean applyingProfiles;
+    private boolean applyingOptions;
+    private boolean running;
+    private Execution lastExecution;
+    private final java.util.Deque<String> recentCommands = new java.util.ArrayDeque<>();
     private long reloadTicket;
     private boolean filterRebuildQueued;
 
@@ -138,7 +184,11 @@ public final class JavaBuildToolsPanel extends JPanel {
                 UiTokens.space(2), UiTokens.space(2), UiTokens.space(2), UiTokens.space(2)));
         configureTree();
         configureFilter();
-        add(toolbar(), BorderLayout.NORTH);
+        JPanel north = new JPanel(new BorderLayout(0, UiTokens.space(1)));
+        north.setOpaque(false);
+        north.add(toolbar(), BorderLayout.NORTH);
+        north.add(secondaryToolbar(), BorderLayout.SOUTH);
+        add(north, BorderLayout.NORTH);
 
         ScrollPanel scroll = new ScrollPanel(tree).setScrollBarThickness(8)
                 .setPaintTrack(false).setUnitIncrement(UiTokens.scale(28));
@@ -164,6 +214,9 @@ public final class JavaBuildToolsPanel extends JPanel {
         syncBadge.setVisible(false);
         runButton.setEnabled(false);
         stopButton.setEnabled(false);
+        debugButton.setEnabled(false);
+        debugButton.setVisible(host.supportsDebug());
+        rerunButton.setEnabled(false);
         UiSupport.quietFocus(this);
         filter.setFocusable(true);
         tree.setFocusable(true);
@@ -179,7 +232,8 @@ public final class JavaBuildToolsPanel extends JPanel {
         cards.show(body, CARD_LOADING);
         refreshButton.setEnabled(false);
         status.setText(text("status.loading", "Carregando")).setTone(BadgeLabel.Tone.INFO);
-        CompletableFuture.supplyAsync(() -> new LoadedModel(host.load(), host.activeProfiles()), executor)
+        CompletableFuture.supplyAsync(() -> new LoadedModel(host.load(), host.activeProfiles(),
+                        host.toolOptions()), executor)
                 .whenComplete((value, error) -> SwingUtilities.invokeLater(() -> {
                     if (ticket != reloadTicket) {
                         return;
@@ -194,6 +248,7 @@ public final class JavaBuildToolsPanel extends JPanel {
                     current = value == null || value.model() == null
                             ? new BuildToolModel("Build Tools", List.of(), List.of()) : value.model();
                     reloadActiveProfiles(value == null ? Set.of() : value.activeProfiles());
+                    applyToolOptions(value == null ? null : value.options());
                     rebuild();
                     status.setText(current.projects().size() + " "
                                     + text("status.projects", "projeto(s)"))
@@ -213,6 +268,26 @@ public final class JavaBuildToolsPanel extends JPanel {
         if (!stored.equals(saved)) {
             host.profilesChanged(Set.copyOf(stored));
         }
+    }
+
+    private void applyToolOptions(BuildRunConfigurations.ToolOptions options) {
+        BuildRunConfigurations.ToolOptions resolved =
+                options == null ? BuildRunConfigurations.ToolOptions.none() : options;
+        applyingOptions = true;
+        try {
+            skipTestsToggle.setSelected(resolved.skipTests());
+            offlineToggle.setSelected(resolved.offline());
+        } finally {
+            applyingOptions = false;
+        }
+    }
+
+    private void onToolOptionsToggled() {
+        if (applyingOptions) {
+            return;
+        }
+        host.toolOptionsChanged(new BuildRunConfigurations.ToolOptions(
+                skipTestsToggle.isSelected(), offlineToggle.isSelected()));
     }
 
     public void setSyncPending(boolean pending) {
@@ -242,13 +317,29 @@ public final class JavaBuildToolsPanel extends JPanel {
             status.setText(message == null || message.isBlank()
                             ? text("status.finished", "Concluido") : message)
                     .setTone(successful ? BadgeLabel.Tone.SUCCESS : BadgeLabel.Tone.DANGER);
-            runButton.setEnabled(selectedExecutable() != null);
-            stopButton.setEnabled(false);
+            idle();
         });
     }
 
     public void warning(String message) {
-        SwingUtilities.invokeLater(() -> status.setText(message).setTone(BadgeLabel.Tone.WARNING));
+        SwingUtilities.invokeLater(() -> {
+            status.setText(message).setTone(BadgeLabel.Tone.WARNING);
+            idle();
+        });
+    }
+
+    private void idle() {
+        running = false;
+        refreshActionButtons();
+        stopButton.setEnabled(false);
+    }
+
+    private void refreshActionButtons() {
+        boolean executable = !running && selectedExecutable() != null;
+        runButton.setEnabled(executable);
+        debugButton.setEnabled(executable && host.supportsDebug());
+        rerunButton.setEnabled(!running && lastExecution != null);
+        runGoalButton.setEnabled(!running);
     }
 
     private ToolBarPanel toolbar() {
@@ -261,7 +352,8 @@ public final class JavaBuildToolsPanel extends JPanel {
             host.sync();
         });
         refreshButton.addActionListener(event -> reload());
-        runButton.addActionListener(event -> executeSelected());
+        runButton.addActionListener(event -> executeSelected(false));
+        debugButton.addActionListener(event -> executeSelected(true));
         stopButton.addActionListener(event -> {
             host.cancel();
             stopButton.setEnabled(false);
@@ -270,7 +362,22 @@ public final class JavaBuildToolsPanel extends JPanel {
 
         toolbar.addItem(toolBadge).addItem(filter).addSpacer()
                 .addItem(syncButton).addItem(refreshButton)
-                .addItem(runButton).addItem(stopButton);
+                .addItem(runButton).addItem(debugButton).addItem(stopButton);
+        return toolbar;
+    }
+
+    private ToolBarPanel secondaryToolbar() {
+        ToolBarPanel toolbar = new ToolBarPanel().setPaintSurface(false)
+                .setItemGap(UiTokens.space(1));
+        skipTestsToggle.addActionListener(event -> onToolOptionsToggled());
+        offlineToggle.addActionListener(event -> onToolOptionsToggled());
+        runGoalButton.addActionListener(event -> promptGoal());
+        rerunButton.addActionListener(event -> rerun());
+        expandButton.addActionListener(event -> tree.expandToDepth(2));
+        collapseButton.addActionListener(event -> tree.collapseAll());
+        toolbar.addItem(skipTestsToggle).addItem(offlineToggle).addSpacer()
+                .addItem(runGoalButton).addItem(rerunButton)
+                .addItem(expandButton).addItem(collapseButton);
         return toolbar;
     }
 
@@ -322,10 +429,10 @@ public final class JavaBuildToolsPanel extends JPanel {
                 UiTokens.space(1), UiTokens.space(1), UiTokens.space(1), UiTokens.space(1)));
 
         tree.addTreeSelectionListener(event -> {
-            runButton.setEnabled(selectedExecutable() != null);
+            refreshActionButtons();
             showSelectionDetail();
         });
-        tree.onTreeEvent(EventTreeView.NODE_DOUBLE_CLICK, event -> executeSelected());
+        tree.onTreeEvent(EventTreeView.NODE_DOUBLE_CLICK, event -> executeSelected(false));
         tree.onTreeEvent(EventTreeView.NODE_CHECK, event -> onProfileToggled(event.getNode()));
         tree.setPopupMenuProvider(context -> {
             focusPopupTarget(context.node());
@@ -576,7 +683,11 @@ public final class JavaBuildToolsPanel extends JPanel {
 
         if (value != null && value.executable()) {
             menu.item(text("menu.execute", "Executar"), JavaIcons.run(JavaIcons.SMALL),
-                    event -> executeSelected());
+                    event -> executeSelected(false));
+            if (host.supportsDebug()) {
+                menu.item(text("menu.debug", "Depurar"), JavaIcons.debug(JavaIcons.SMALL),
+                        event -> executeSelected(true));
+            }
             any = true;
         }
         if (value != null && value.kind() == BuildToolModel.Kind.RUN_CONFIG) {
@@ -626,14 +737,13 @@ public final class JavaBuildToolsPanel extends JPanel {
     }
 
     private void saveRunConfiguration(List<String> goals) {
-        String suggested = goals.isEmpty() ? "" : goals.getFirst();
-        String name = JOptionPane.showInputDialog(this,
-                text("dialog.runConfigurationName", "Nome da configuracao:"), suggested);
-        if (name == null || name.isBlank()) {
-            return;
-        }
-        host.saveRunConfiguration(new BuildRunConfigurations.Entry(name.trim(), goals));
-        rebuild();
+        String suggested = goals.isEmpty() ? "" : String.join(" ", goals);
+        BuildPromptPanel prompt = BuildPromptPanel.saveConfiguration(suggested, goals, name ->
+                SwingUtilities.invokeLater(() -> {
+                    host.saveRunConfiguration(new BuildRunConfigurations.Entry(name, goals));
+                    rebuild();
+                }));
+        showPrompt(prompt, text("dialog.saveConfiguration.title", "Salvar configuracao de execucao"));
     }
 
     private void onProfileToggled(TreeNode<BuildToolModel.Node> node) {
@@ -688,28 +798,112 @@ public final class JavaBuildToolsPanel extends JPanel {
         return value != null && value.executable() ? value : null;
     }
 
-    private void executeSelected() {
+    private void executeSelected(boolean debug) {
         BuildToolModel.Node node = selectedExecutable();
-        if (node == null) {
+        if (node == null || running) {
             return;
         }
         List<TreeNode<BuildToolModel.Node>> selected = selectedGoalNodes();
         List<String> goals = selectedGoals();
         if (selected.size() > 1 && !goals.isEmpty()) {
-            node = selected.getFirst().getData();
+            dispatch(new Execution(selected.getFirst().getData(), goals, false, debug,
+                    String.join(" ", goals)));
+            return;
         }
-        String executionName = selected.size() > 1 ? String.join(" ", goals) : node.name();
-        status.setText(text("status.running", "Executando") + " " + executionName)
+        boolean single = node.command().size() == 1
+                && node.kind() != BuildToolModel.Kind.RUN_CONFIG
+                && node.kind() != BuildToolModel.Kind.PLUGIN_GOAL;
+        dispatch(new Execution(node, node.command(), single, debug, node.name()));
+    }
+
+    private void promptGoal() {
+        if (running) {
+            return;
+        }
+        BuildToolModel.Node context = contextNode();
+        String initial = lastExecution == null ? "" : BuildCommand.joinArguments(lastExecution.goals());
+        String moduleName = context == null || context.module() == null ? "" : context.module().name();
+        BuildPromptPanel prompt = BuildPromptPanel.runGoal(initial, moduleName,
+                List.copyOf(recentCommands), suggestedCommands(), host.supportsDebug(), choice ->
+                        SwingUtilities.invokeLater(() -> {
+                            if (!running) {
+                                dispatch(new Execution(context, choice.goals(), false,
+                                        choice.debug(), String.join(" ", choice.goals())));
+                            }
+                        }));
+        showPrompt(prompt, text("dialog.runGoal.title", "Executar goal"));
+    }
+
+    private List<String> suggestedCommands() {
+        return "Gradle".equalsIgnoreCase(current.tool())
+                ? List.of("clean build", "build -x test", "test", "dependencies")
+                : List.of("clean install", "clean package -DskipTests", "test", "dependency:tree");
+    }
+
+    private void remember(List<String> goals) {
+        String command = BuildCommand.joinArguments(goals);
+        if (command.isBlank()) {
+            return;
+        }
+        recentCommands.remove(command);
+        recentCommands.addFirst(command);
+        while (recentCommands.size() > 3) {
+            recentCommands.removeLast();
+        }
+    }
+
+    private void showPrompt(BuildPromptPanel prompt, String title) {
+        if (host.showPrompt(prompt, title)) {
+            return;
+        }
+        JDialog dialog = new JDialog(SwingUtilities.getWindowAncestor(this), title,
+                Dialog.ModalityType.APPLICATION_MODAL);
+        dialog.setContentPane(prompt);
+        dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+        dialog.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowOpened(WindowEvent event) {
+                prompt.focusField();
+            }
+
+            @Override
+            public void windowClosed(WindowEvent event) {
+                prompt.closed();
+            }
+        });
+        dialog.setSize(prompt.popupSize());
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
+    }
+
+    private BuildToolModel.Node contextNode() {
+        TreeNode<BuildToolModel.Node> selected = tree.getSelectedNode();
+        BuildToolModel.Node value = selected == null ? null : selected.getData();
+        return value != null && value.module() != null ? value : null;
+    }
+
+    private void rerun() {
+        Execution last = lastExecution;
+        if (last != null && !running) {
+            dispatch(last);
+        }
+    }
+
+    private void dispatch(Execution execution) {
+        lastExecution = execution;
+        remember(execution.goals());
+        running = true;
+        status.setText((execution.debug() ? text("status.debugging", "Depurando")
+                        : text("status.running", "Executando")) + " " + execution.name())
                 .setTone(BadgeLabel.Tone.INFO);
-        runButton.setEnabled(false);
+        refreshActionButtons();
         stopButton.setEnabled(true);
-        if (selected.size() > 1) {
-            host.executeGoals(node, goals);
-        } else if (node.command().size() > 1 || node.kind() == BuildToolModel.Kind.RUN_CONFIG
-                || node.kind() == BuildToolModel.Kind.PLUGIN_GOAL) {
-            host.executeGoals(node, node.command());
+        if (execution.debug()) {
+            host.debugGoals(execution.context(), execution.goals());
+        } else if (execution.single()) {
+            host.execute(execution.context());
         } else {
-            host.execute(node);
+            host.executeGoals(execution.context(), execution.goals());
         }
     }
 
@@ -726,6 +920,14 @@ public final class JavaBuildToolsPanel extends JPanel {
             button.setIcon(icon);
         }
         button.setToolTipText(tooltip);
+        button.setFocusPainted(false);
+        return button;
+    }
+
+    private static JToggleButton toggle(String label, String tooltip) {
+        JToggleButton button = new JToggleButton(label);
+        button.setToolTipText(tooltip);
+        button.setFont(UiTokens.fontSmall());
         button.setFocusPainted(false);
         return button;
     }

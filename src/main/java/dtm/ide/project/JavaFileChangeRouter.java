@@ -28,8 +28,13 @@ public final class JavaFileChangeRouter {
     private static final long MAX_SCAN_FILES = 2_000;
 
     private static final Set<String> IGNORED_SEGMENTS = Set.of(
-            "target", "build", "out", "bin", ".git", ".gradle", ".mvn", ".idea",
-            ".orion", ".settings", "node_modules");
+            ".git", ".gradle", ".mvn", ".idea", ".orion", ".settings", "node_modules");
+
+    private static final Set<String> OUTPUT_SEGMENTS = Set.of(
+            "target", "target-orion", "build", "out", "bin");
+
+    private static final Set<String> SOURCE_SEGMENTS = Set.of(
+            "src", "java", "kotlin", "groovy", "scala", "resources");
 
     public enum Change {
         CREATED,
@@ -49,6 +54,7 @@ public final class JavaFileChangeRouter {
 
     private final Listener listener;
     private final Predicate<Path> editorManaged;
+    private final Path projectRoot;
     private final ScheduledExecutorService scheduler;
     private final Map<Path, Pending> pending = new ConcurrentHashMap<>();
     private final Map<Path, Stamp> known = new ConcurrentHashMap<>();
@@ -65,8 +71,13 @@ public final class JavaFileChangeRouter {
     }
 
     public JavaFileChangeRouter(Listener listener, Predicate<Path> editorManaged) {
+        this(listener, editorManaged, null);
+    }
+
+    public JavaFileChangeRouter(Listener listener, Predicate<Path> editorManaged, Path projectRoot) {
         this.listener = listener;
         this.editorManaged = editorManaged == null ? path -> false : editorManaged;
+        this.projectRoot = projectRoot == null ? null : projectRoot.toAbsolutePath().normalize();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "java-file-change-router");
             thread.setDaemon(true);
@@ -79,7 +90,7 @@ public final class JavaFileChangeRouter {
             return;
         }
         Path file = changedPath.toAbsolutePath().normalize();
-        if (isIgnored(file)) {
+        if (ignored(file)) {
             return;
         }
         if (kind == StandardWatchEventKinds.OVERFLOW) {
@@ -102,7 +113,7 @@ public final class JavaFileChangeRouter {
             return;
         }
         Path file = createdPath.toAbsolutePath().normalize();
-        if (roleOf(file) == null) {
+        if (ignored(file) || roleOf(file) == null) {
             return;
         }
         schedule(file, true, false, false);
@@ -113,7 +124,7 @@ public final class JavaFileChangeRouter {
             return;
         }
         Path root = directory.toAbsolutePath().normalize();
-        if (isIgnored(root)) {
+        if (ignored(root)) {
             return;
         }
         schedule(root, false, true, false);
@@ -184,7 +195,7 @@ public final class JavaFileChangeRouter {
         List<Path> found;
         try (Stream<Path> walk = Files.walk(directory, MAX_SCAN_DEPTH)) {
             found = walk.filter(Files::isRegularFile)
-                    .filter(path -> !isIgnored(path))
+                    .filter(path -> !ignored(path))
                     .filter(path -> roleOf(path) != null)
                     .limit(MAX_SCAN_FILES)
                     .toList();
@@ -202,7 +213,7 @@ public final class JavaFileChangeRouter {
         List<Path> found;
         try (Stream<Path> walk = Files.walk(directory, MAX_SCAN_DEPTH)) {
             found = walk.filter(Files::isRegularFile)
-                    .filter(path -> !isIgnored(path))
+                    .filter(path -> !ignored(path))
                     .filter(path -> roleOf(path) != null)
                     .limit(MAX_SCAN_FILES)
                     .toList();
@@ -266,9 +277,29 @@ public final class JavaFileChangeRouter {
         scheduler.shutdownNow();
     }
 
+    private boolean ignored(Path file) {
+        return isIgnored(file, projectRoot);
+    }
+
     static boolean isIgnored(Path file) {
-        for (Path segment : file) {
-            if (IGNORED_SEGMENTS.contains(segment.toString())) {
+        return isIgnored(file, null);
+    }
+
+    static boolean isIgnored(Path file, Path root) {
+        Path scope = root != null && file.startsWith(root) ? root.relativize(file) : file;
+        boolean insideSources = false;
+        for (Path segment : scope) {
+            String name = segment.toString();
+            if (IGNORED_SEGMENTS.contains(name)) {
+                return true;
+            }
+            String lower = name.toLowerCase(java.util.Locale.ROOT);
+            if (insideSources) {
+                continue;
+            }
+            if (SOURCE_SEGMENTS.contains(lower)) {
+                insideSources = true;
+            } else if (OUTPUT_SEGMENTS.contains(lower)) {
                 return true;
             }
         }

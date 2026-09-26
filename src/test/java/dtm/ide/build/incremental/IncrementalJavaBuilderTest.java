@@ -79,15 +79,38 @@ class IncrementalJavaBuilderTest {
     }
 
     @Test
-    void missingCompiledOutputForcesAFullBuild() throws Exception {
-        source("Lojista.java", "package a; public class Lojista {}");
+    void missingCompiledOutputIsRecompiledWithJavacWithoutTheMavenLifecycle() throws Exception {
+        Path lojista = source("Lojista.java", "package a; public class Lojista {}");
         builder().build(module(), false, line -> { });
         build.requests.clear();
+        int resolutions = build.classpathResolutions;
         Files.delete(module().outputDir().resolve("a/Lojista.class"));
 
-        builder().build(module(), false, line -> { });
+        BuildResult result = builder().build(module(), false, line -> { });
 
-        assertEquals(1, build.requests.size());
+        assertTrue(result.successful());
+        assertTrue(build.requests.isEmpty());
+        assertEquals(resolutions, build.classpathResolutions);
+        assertEquals(1, javacCalls.size());
+        assertTrue(javacCalls.getFirst().contains(lojista.toString()));
+    }
+
+    @Test
+    void aDeletedTargetFolderIsRebuiltWithJavacAndTheResourcesAreCopiedBack() throws Exception {
+        source("Lojista.java", "package a; public class Lojista {}");
+        resource("application.properties", "a=1");
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+        ModuleBuildState.discard(root.resolve("web/target"));
+
+        BuildResult result = builder().build(module(), false, line -> { });
+
+        assertTrue(result.successful());
+        assertTrue(build.requests.isEmpty());
+        assertTrue(build.toolCommands.isEmpty());
+        assertEquals(1, javacCalls.size());
+        assertEquals("a=1", Files.readString(
+                module().outputDir().resolve("application.properties")));
     }
 
     @Test
@@ -207,14 +230,77 @@ class IncrementalJavaBuilderTest {
         assertTrue(result.successful());
         assertTrue(build.requests.isEmpty());
         assertTrue(javacCalls.isEmpty());
-        assertEquals(List.of(List.of("resources:resources")), build.toolCommands);
+        assertTrue(build.toolCommands.isEmpty());
+        assertEquals("a=22", Files.readString(
+                module().outputDir().resolve("application.properties")));
 
-        build.toolCommands.clear();
         builder().build(module(), false, line -> {
         });
 
         assertTrue(build.toolCommands.isEmpty());
         assertTrue(build.requests.isEmpty());
+    }
+
+    @Test
+    void customResourceConfigurationStillUsesTheResourcesMojo() throws Exception {
+        source("Lojista.java", "package a; public class Lojista {}");
+        resource("application.properties", "a=1");
+        builder().build(module(), false, line -> {
+        });
+        Files.writeString(pomFile(), "<project><artifactId>web</artifactId><build><resources>"
+                + "<resource><directory>src/main/resources</directory><filtering>true</filtering>"
+                + "</resource></resources></build></project>", StandardCharsets.UTF_8);
+        builder().build(module(), false, line -> {
+        });
+        build.requests.clear();
+        build.toolCommands.clear();
+        resource("application.properties", "a=${versao}");
+
+        builder().build(module(), false, line -> {
+        });
+
+        assertEquals(List.of(List.of("resources:resources")), build.toolCommands);
+    }
+
+    @Test
+    void touchingASourceWithoutChangingItIsNotRecompiled() throws Exception {
+        Path lojista = source("Lojista.java", "package a; public class Lojista {}");
+        builder().build(module(), false, line -> {
+        });
+        Files.setLastModifiedTime(lojista, java.nio.file.attribute.FileTime.fromMillis(
+                System.currentTimeMillis() + 60_000));
+
+        builder().build(module(), false, line -> {
+        });
+        String saved = Files.readString(root.resolve(".orion/incremental/web.state"));
+
+        assertTrue(javacCalls.isEmpty());
+        assertTrue(saved.contains(String.valueOf(Files.getLastModifiedTime(lojista).toMillis())));
+    }
+
+    @Test
+    void aClassWithACommonNameOnlyRecompilesFilesThatReallyUseIt() throws Exception {
+        source("Font.java", "package a; public class Font {}");
+        Path user = source("Tela.java", "package a; public class Tela { Font fonte; }");
+        Path awt = write(root.resolve("web/src/main/java/b/Grafico.java"),
+                "package b; import java.awt.Font; public class Grafico { Font fonte; }");
+        Path wildcard = write(root.resolve("web/src/main/java/c/Painel.java"),
+                "package c; import a.*; public class Painel { Font fonte; }");
+        for (int index = 0; index < 8; index++) {
+            source("Outro" + index + ".java", "package a; public class Outro" + index + " {}");
+        }
+        builder().build(module(), false, line -> {
+        });
+        Files.writeString(root.resolve("web/src/main/java/a/Font.java"),
+                "package a; public class Font { int tamanho; }", StandardCharsets.UTF_8);
+
+        builder().build(module(), false, line -> {
+        });
+
+        List<String> compiled = javacCalls.getLast();
+        assertTrue(compiled.contains(user.toString()));
+        assertTrue(compiled.contains(wildcard.toString()));
+        assertFalse(compiled.contains(awt.toString()));
     }
 
     @Test

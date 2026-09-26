@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -103,6 +104,52 @@ class MavenPluginGoalsTest {
 
         assertTrue(goals.goalsOf("", "maven-surefire-plugin", "3.2.5").isEmpty());
         assertTrue(goals.goalsOf("org.apache.maven.plugins", null, "3.2.5").isEmpty());
+    }
+
+    @Test
+    void theRepositoryComesFromTheSupplier() throws IOException {
+        installPlugin("3.2.5");
+        AtomicReference<Path> configured = new AtomicReference<>(repository.resolve("missing"));
+        MavenPluginGoals goals = new MavenPluginGoals(configured::get);
+
+        assertTrue(goals.goalsOf("org.apache.maven.plugins", "maven-surefire-plugin", "3.2.5")
+                .isEmpty());
+        configured.set(repository);
+
+        assertEquals(2, goals.goalsOf("org.apache.maven.plugins", "maven-surefire-plugin", "3.2.5")
+                .size());
+    }
+
+    @Test
+    void aPropertyVersionFallsBackToTheNewestInstalledOne() throws IOException {
+        installPlugin("3.2.5");
+
+        List<MavenPluginGoals.Goal> goals = new MavenPluginGoals(repository)
+                .goalsOf("org.apache.maven.plugins", "maven-surefire-plugin", "${surefire.version}");
+
+        assertEquals(2, goals.size());
+    }
+
+    @Test
+    void aMissingDeclaredVersionFallsBackToTheNewestInstalledOne() throws IOException {
+        installPlugin("3.1.0");
+
+        List<MavenPluginGoals.Goal> goals = new MavenPluginGoals(repository)
+                .goalsOf("org.apache.maven.plugins", "maven-surefire-plugin", "3.2.5");
+
+        assertEquals(2, goals.size());
+    }
+
+    @Test
+    void anUnavailablePluginIsLookedUpAgainOnceInstalled() throws IOException {
+        MavenPluginGoals goals = new MavenPluginGoals(repository);
+        assertTrue(goals.goalsOf("org.apache.maven.plugins", "maven-surefire-plugin", "3.2.5")
+                .isEmpty());
+
+        installPlugin("3.2.5");
+
+        assertEquals(2, goals.goalsOf("org.apache.maven.plugins", "maven-surefire-plugin", "3.2.5")
+                .size());
     }
 
     private void installPlugin(String version) throws IOException {

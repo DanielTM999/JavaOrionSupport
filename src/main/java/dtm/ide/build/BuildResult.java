@@ -35,7 +35,7 @@ public record BuildResult(
                 : "build falhou com codigo " + exitCode + " (" + seconds + "s)";
     }
 
-    static BuildResult failed(String command, String reason) {
+    public static BuildResult failed(String command, String reason) {
         return new BuildResult(-1,
                 List.of(new BuildDiagnostic(null, 0, 0, null, reason, "build")),
                 Duration.ZERO, command);

@@ -54,7 +54,9 @@ import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
 import dtm.ide.api.theme.EditorTheme;
 import dtm.ide.api.project.diagnostics.IdeProblem;
 import dtm.ide.api.project.diagnostics.ProblemsActionHandle;
+import dtm.ide.build.BuildCommand;
 import dtm.ide.build.BuildDiagnostic;
+import dtm.ide.build.BuildToolDebug;
 import dtm.ide.build.BuildProgressTracker;
 import dtm.ide.build.ClasspathValidation;
 import dtm.ide.build.BuildRequest;
@@ -87,6 +89,7 @@ import dtm.ide.deps.OsvClient;
 import dtm.ide.deps.DependencySearchResult;
 import dtm.ide.deps.DependencyVersionChoice;
 import dtm.ide.deps.PomProperties;
+import dtm.ide.deps.MavenLocalRepositoryResolver;
 import dtm.ide.editor.AutoCompleteIdleTrigger;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
@@ -112,6 +115,7 @@ import dtm.ide.lsp.LombokAgentResolver;
 import dtm.ide.lsp.LombokSupport;
 import dtm.ide.lsp.LombokSupportStatus;
 import dtm.ide.lsp.UsagesPopup;
+import dtm.ide.debug.BuildToolDebugListener;
 import dtm.ide.debug.JavaAttachTarget;
 import dtm.ide.debug.JavaDebugSession;
 import dtm.ide.debug.JdwpRelay;
@@ -178,6 +182,7 @@ import dtm.ide.settings.HotReloadMode;
 import dtm.ide.test.JUnitTestDiscovery;
 import dtm.ide.test.JavaTest;
 import dtm.ide.test.JavaTestRunner;
+import dtm.ide.test.JUnitPlatformLauncher;
 import dtm.ide.test.JavaTestProblems;
 import dtm.ide.test.JavaSemanticTestDiscovery;
 import dtm.ide.ui.DependencyManagerPanel;
@@ -191,6 +196,7 @@ import dtm.ide.ui.JavaDeleteDialogPanel;
 import dtm.ide.todo.TodoItem;
 import dtm.ide.todo.TodoScanner;
 import dtm.ide.ui.JavaBuildToolsPanel;
+import dtm.ide.ui.BuildPromptPanel;
 import dtm.ide.ui.JavaProjectStructurePanel;
 import dtm.ide.ui.JavaTodoPanel;
 import dtm.ide.ui.JavaIcons;
@@ -327,6 +333,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
     private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
     private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
+    private static final long BUILD_SLOT_WAIT_MS = 600_000;
+    private static final long BUILD_SLOT_POLL_MS = 100;
     private static final long PASTE_IMPORT_WINDOW_MS = 20_000;
     private static final long PASTE_IMPORT_RETRY_MS = 1_000;
     private static final Pattern TYPE_LIKE_NAME = Pattern.compile("\\b\\p{Lu}");
@@ -374,6 +382,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final EditorTheme theme = new JavaEditorTheme(() -> requestEditorThemeConfig("java"));
     private final AtomicLong lifecycle = new AtomicLong();
     private final AtomicLong wordCaretTicket = new AtomicLong();
+    private final AtomicReference<CodeActionPrefetch> codeActionPrefetch = new AtomicReference<>();
     private final AtomicLong navigationTicket = new AtomicLong();
     private final AtomicLong navigationRequestTicket = new AtomicLong();
     private final AtomicLong hotReloadTicket = new AtomicLong();
@@ -421,6 +430,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String MENU_ID_MARK_DIRECTORY = "java.tree.markDirectory";
 
     private volatile JdtLsService jdtLs;
+    private volatile boolean unloaded;
     private volatile LombokAgentResolver lombokResolver;
     private final LombokSupport lombokSupport = new LombokSupport(this::onLombokStatusChanged);
     private volatile BuildSystem buildSystem;
@@ -430,6 +440,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JavaRunSupport runSupport;
     private final AtomicReference<BuildProgressTracker> runBuildProgress = new AtomicReference<>();
     private final AtomicReference<IncrementalJavaBuilder> startupBuilder = new AtomicReference<>();
+    private final AtomicReference<JavaTestRunner> activeTestRunner = new AtomicReference<>();
     private volatile JavaDebugSession debugSession;
     private volatile JavaDebugPanel debugPanel;
     private volatile String debugPanelId;
@@ -448,7 +459,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
     private final AtomicLong syncGeneration = new AtomicLong();
     private final AtomicReference<SyncWork> syncWork = new AtomicReference<>();
-    private final MavenPluginGoals pluginGoals = new MavenPluginGoals();
+    private final MavenPluginGoals pluginGoals = new MavenPluginGoals(this::pluginRepository);
+    private volatile Path pluginRepositoryRoot;
+    private volatile Path pluginRepositoryPath;
+    private final AtomicBoolean naturalDebugEnd = new AtomicBoolean();
     private final TodoScanner todoScanner = new TodoScanner();
     private final AtomicLong todoRefreshTicket = new AtomicLong();
     private volatile JavaTodoPanel todoPanel;
@@ -515,7 +529,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
             lsp.resetProjectState();
-            background.submit(lsp::stop);
+            lsp.stopAsync();
         }
 
         descriptor = null;
@@ -572,16 +586,20 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onUnload() {
+        unloaded = true;
         lifecycle.incrementAndGet();
         ProblemsActionHandle action = clearBuildAction;
         clearBuildAction = null;
         if (action != null) {
             action.unregister();
         }
-        JdtLsService lsp = jdtLs;
-        jdtLs = null;
+        JdtLsService lsp;
+        synchronized (this) {
+            lsp = jdtLs;
+            jdtLs = null;
+        }
         if (lsp != null) {
-            stopLanguageServerAsync(lsp);
+            lsp.shutdown();
         }
         unregisterFileWatcher();
         DependencyManagerCoordinator coordinator = dependencyCoordinator;
@@ -592,13 +610,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         autoCompleteIdle.cancel();
         springIndex.shutdown();
         lexicalIndex.shutdown();
+        dtm.ide.build.JavacDaemons.shutdownAll();
         background.close();
-    }
-
-    private static void stopLanguageServerAsync(JdtLsService lsp) {
-        Thread stopper = new Thread(lsp::shutdown, "java-orion-support-unload");
-        stopper.setDaemon(true);
-        stopper.start();
     }
 
     @Override
@@ -792,6 +805,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!current(ticket, root) || build.isRunning() || !buildRunning.compareAndSet(false, true)) {
             return;
         }
+        if (isStartupBuildCached(current, build)) {
+            buildRunning.set(false);
+            setStatusBarText(text("status.buildCached", "Java: build em cache (sem mudancas)"));
+            return;
+        }
 
         BuildProgressTracker progress = new BuildProgressTracker(
                 text("progress.buildingModule", "Buildando modulo"), current, null,
@@ -913,7 +931,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         lsp.start(root, jdk, progressListener()).whenComplete((unused, error) -> {
             hideProgress(LSP_PROGRESS_ID);
             if (!current(ticket, root)) {
-                lsp.stop();
+                if (!root.equals(projectRoot)) {
+                    lsp.stopAsyncIfBoundTo(root);
+                }
                 finishDiagnosticReanalysis(ticket, root, false);
                 return;
             }
@@ -932,6 +952,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private synchronized JdtLsService ensureLanguageServer() {
+        if (unloaded) {
+            throw new IllegalStateException("plugin Java descarregado");
+        }
         JdtLsService existing = jdtLs;
         if (existing != null) {
             return existing;
@@ -948,6 +971,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         created.setWorkListener(this::publishLanguageServerWork);
         created.setCodeLensRefreshListener(this::requestRefreshCodeLenses);
         created.setWarmUpCompleteListener(this::refreshJavaEditorsAfterIndexing);
+        created.setLateCompletionListener(this::onLateCompletion);
         created.setDocumentUpgradeListener(this::onLanguageServerDocumentUpgrade);
         languageServerReadyHandled.set(false);
         jdtLs = created;
@@ -958,10 +982,13 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (path == null) {
             return;
         }
-        requestRefreshDiagnostics(path);
-        resolvePastedImports(path);
         Path normalized = path.toAbsolutePath().normalize();
         JdtLsService lsp = jdtLs;
+        if (lsp != null && lsp.isReady()) {
+            problems.supersedeCompilerProblems(normalized);
+        }
+        requestRefreshDiagnostics(path);
+        resolvePastedImports(path);
         List<BuildDiagnostic> problems = lsp == null ? List.of() : lsp.diagnostics(normalized)
                 .stream()
                 .map(diagnostic -> new BuildDiagnostic(normalized,
@@ -1284,6 +1311,33 @@ public class JavaIdeAdapter extends IdeAdapter {
                 JavaProjectConventions.normalize(editor.filePath()), editor.getCaretOffset());
     }
 
+    private void onLateCompletion(Path filePath, int line, int col) {
+        SwingUtilities.invokeLater(() -> {
+            IdeEditorContext editor = activeJavaEditor;
+            if (editor == null || debugActive.get() || !Objects.equals(
+                    JavaProjectConventions.normalize(editor.filePath()),
+                    JavaProjectConventions.normalize(filePath))) {
+                return;
+            }
+            String text = editor.getText();
+            int offset = editor.getCaretOffset();
+            if (text == null || offset < 0 || offset > text.length()) {
+                return;
+            }
+            int caretLine = 0;
+            int lineStart = 0;
+            for (int index = 0; index < offset; index++) {
+                if (text.charAt(index) == '\n') {
+                    caretLine++;
+                    lineStart = index + 1;
+                }
+            }
+            if (caretLine == line && offset - lineStart == col) {
+                requestCodeEditorAutocomplete();
+            }
+        });
+    }
+
     private void fireIdleCompletion() {
         log.debug("Autocomplete: disparo automatico apos {} ms de pausa", AUTO_COMPLETE_IDLE_DELAY_MS);
         requestCodeEditorAutocomplete();
@@ -1339,10 +1393,13 @@ public class JavaIdeAdapter extends IdeAdapter {
                             : JdtLsService.CompletionTrigger.INVOKED;
             List<AutoCompleteItem> semantic = lsp.complete(context.filePath(), context.text(),
                     context.caretLine(), context.caretCol(), trigger, triggerCharacter,
-                    lsp.documentVersion(context.filePath()));
+                    lsp.documentVersion(context.filePath()), true);
             if (semantic.isEmpty()) {
-                semantic = filterCompletionSuggestions(
-                        lsp.cachedCompletions(context.filePath()), context.prefix());
+                semantic = filterCompletionSuggestions(lsp.cachedCompletions(context.filePath(),
+                        context.text(), context.caretLine(), context.caretCol()), context.prefix());
+            }
+            if (semantic.isEmpty()) {
+                semantic = fastCompletion.suggestions(context);
             }
             return mergeCompletionSuggestions(semantic, snippetsLocal);
         }
@@ -1351,8 +1408,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         List<AutoCompleteItem> local = mergeCompletionSuggestions(lexical, snippetsLocal);
         List<AutoCompleteItem> contextual = List.of();
         if (lsp != null && lsp.isInteractive()) {
-            contextual = filterCompletionSuggestions(
-                    lsp.cachedCompletions(context.filePath()), context.prefix());
+            contextual = filterCompletionSuggestions(lsp.cachedCompletions(context.filePath(),
+                    context.text(), context.caretLine(), context.caretCol()), context.prefix());
             lsp.warmCompletion(context.filePath(), context.text(),
                     context.caretLine(), context.caretCol());
         }
@@ -1849,7 +1906,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         JavaFileChangeRouter router = new JavaFileChangeRouter(this::onWatchedFileChanged,
-                path -> javaEditors.containsKey(JavaProjectConventions.normalize(path)));
+                path -> javaEditors.containsKey(JavaProjectConventions.normalize(path)), projectRoot);
         projectFileWatcher = watcher;
         fileChangeRouter = router;
         fileWatcherListenerId = watcher.addFileWatcherListener(router::accept);
@@ -2033,9 +2090,20 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         JavaFileChangeRouter router = fileChangeRouter;
-        if (router != null) {
-            router.acceptCreated(newPath);
+        if (router == null) {
+            return;
         }
+        if (!Files.isDirectory(newPath)) {
+            router.acceptCreated(newPath);
+            return;
+        }
+        background.submit(() -> {
+            try (Stream<Path> files = Files.walk(newPath)) {
+                files.filter(Files::isRegularFile).forEach(router::acceptCreated);
+            } catch (IOException | java.io.UncheckedIOException e) {
+                log.debug("Falha ao anunciar arquivos da pasta renomeada {}: {}", newPath, e.getMessage());
+            }
+        });
     }
 
     @Override
@@ -3265,6 +3333,17 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (context == null) {
             return null;
         }
+        CodeActionPrefetch prefetch = codeActionPrefetch.get();
+        if (prefetch != null && prefetch.matches(context)) {
+            List<CodeAction> prefetched = prefetch.await();
+            if (prefetched != null) {
+                return prefetched;
+            }
+        }
+        return computeCodeActions(context);
+    }
+
+    private List<CodeAction> computeCodeActions(IdeCodeActionContext context) {
         List<CodeAction> actions = new ArrayList<>(suppressionActions(context));
         JdtLsService lsp = interactiveServerFor(context.filePath());
         List<CodeAction> semantic = lsp == null ? null : lsp.codeActions(context.filePath(),
@@ -3762,6 +3841,46 @@ public class JavaIdeAdapter extends IdeAdapter {
                 showCodeActionLamp(context, severity);
             }
         });
+        prefetchCodeActions(context);
+    }
+
+    private void prefetchCodeActions(IdeWordCaretContext context) {
+        IdeCodeActionContext actionContext = new IdeCodeActionContext(context.text(),
+                context.filePath(), Range.point(context.line(), context.col()), List.of());
+        CodeActionPrefetch prefetch = new CodeActionPrefetch(actionContext, new CompletableFuture<>());
+        codeActionPrefetch.set(prefetch);
+        try {
+            prefetch.actions().complete(computeCodeActions(actionContext));
+        } catch (RuntimeException e) {
+            prefetch.actions().completeExceptionally(e);
+        }
+    }
+
+    private record CodeActionPrefetch(IdeCodeActionContext context,
+                                      CompletableFuture<List<CodeAction>> actions) {
+
+        private static final long WAIT_MS = 3_000;
+
+        boolean matches(IdeCodeActionContext other) {
+            Range range = other.range();
+            return range != null && range.start() != null && range.start().equals(range.end())
+                    && range.start().equals(context.range().start())
+                    && other.filePath() != null && context.filePath() != null
+                    && other.filePath().toAbsolutePath().normalize()
+                            .equals(context.filePath().toAbsolutePath().normalize())
+                    && Objects.equals(other.text(), context.text());
+        }
+
+        List<CodeAction> await() {
+            try {
+                return actions.get(WAIT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (Exception e) {
+                return null;
+            }
+        }
     }
 
     private boolean supportsCodeActionLamp(Path filePath) {
@@ -4447,8 +4566,46 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
-            background.submit(() -> lsp.executeCodeAction(rawAction));
+            background.submit(() -> applyResolvedCodeAction(lsp, rawAction));
         }
+    }
+
+    private void applyResolvedCodeAction(JdtLsService lsp, String rawAction) {
+        JdtLsService.ResolvedCodeAction resolved = lsp.resolveCodeAction(rawAction);
+        if (resolved == null) {
+            setStatusBarText(text("status.codeActionFailed",
+                    "Java: nao foi possivel aplicar a correcao"));
+            return;
+        }
+        if (!resolved.edit().isEmpty()
+                && onUi(() -> applyWorkspaceEdit(lsp, resolved.edit())) == null) {
+            return;
+        }
+        if (resolved.commandJson() != null) {
+            lsp.executeCodeAction(resolved.commandJson());
+        }
+    }
+
+    private Boolean applyWorkspaceEdit(JdtLsService lsp, IdeWorkspaceEdit edit) {
+        boolean skipped = false;
+        for (IdeWorkspaceEdit.Operation operation : edit.operations()) {
+            if (!(operation instanceof IdeWorkspaceEdit.TextEdits textEdits)) {
+                skipped = true;
+                continue;
+            }
+            IdeEditorContext editor = getEditor(textEdits.file(), true);
+            if (editor == null || editor.isReadOnly() || !editor.applyEdits(textEdits.edits())) {
+                skipped = true;
+                continue;
+            }
+            lsp.changeDocument(textEdits.file(), editor.getText());
+            editor.refreshDiagnostics();
+        }
+        if (skipped) {
+            setStatusBarText(text("status.codeActionPartial",
+                    "Java: a correcao nao pode ser aplicada por completo"));
+        }
+        return !skipped;
     }
 
     private static String sourcePromptId(String rawAction) {
@@ -4760,6 +4917,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (editorContext != null && JavaProjectConventions.isJava(editorContext.filePath())) {
             if (lsp != null) {
                 lsp.changeDocument(editorContext.filePath(), editorContext.getText());
+            }
+            Path edited = editorContext.filePath().toAbsolutePath().normalize();
+            if (problems.supersedeAll(edited)) {
+                requestRefreshDiagnostics(edited);
+                refreshProblemsPanel();
             }
             refreshRunButtonsForCurrentFile();
         }
@@ -5231,8 +5393,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void contributeEditorMenu(IdeMenuBuilder menu, IdeEditorContext editorContext) {
-        if (menu == null || editorContext == null
-                || !JavaProjectConventions.isJava(editorContext.filePath())) return;
+        if (menu == null || editorContext == null) return;
+        if (JavaProjectConventions.isBuildFile(editorContext.filePath())) {
+            contributeBuildFileEditorMenu(menu);
+            return;
+        }
+        if (!JavaProjectConventions.isJava(editorContext.filePath())) return;
         boolean enabled = isNavigationAvailable(editorContext.filePath());
         boolean debugPaused = isDebugPaused();
         String debugExpression = selectedDebugExpression(editorContext);
@@ -5258,6 +5424,18 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .item(text("debug.addWatch", "Add Watch"), debugPaused
                                 && debugExpression != null,
                         event -> addDebugWatch(debugExpression));
+    }
+
+    private void contributeBuildFileEditorMenu(IdeMenuBuilder menu) {
+        JavaProjectDescriptor current = descriptor;
+        if (current == null || !current.kind().hasBuildTool()) return;
+        menu.separator()
+                .item(text("tree.sync", "Sincronizar projeto"),
+                        JavaIcons.sync(JavaIcons.SMALL), event -> syncProject())
+                .item(text("tree.reload", "Recarregar projeto"),
+                        JavaIcons.java(JavaIcons.SMALL), event -> clearCaches())
+                .item(text("menu.buildTools", "Build Tools"),
+                        JavaIcons.buildTool(current, JavaIcons.SMALL), event -> openBuildTools());
     }
 
     @Override
@@ -5548,9 +5726,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         if (configuration != null && JavaRunTypes.BUILD_TOOL.contains(configuration.getType())
                 && !JavaRunTypes.TEST.equals(configuration.getType())) {
-            return ensureRunSupport().failure(text("error.buildToolDebug",
-                    "Depurar o processo Maven/Gradle nao depura a aplicacao produzida. "
-                            + "Use uma configuracao Remote JVM."));
+            return launchBuildToolDebug(configuration, context);
         }
         RunConfigurationData resolved = resolveCurrentFileConfiguration(configuration).orElse(null);
         if (resolved == null) {
@@ -5629,6 +5805,67 @@ public class JavaIdeAdapter extends IdeAdapter {
         });
         return ProcessLauncher.message(text("remote.listening", "Aguardando a JVM conectar em")
                 + " " + settings.host() + ":" + settings.port());
+    }
+
+    private RunProcessHandle launchBuildToolDebug(RunConfigurationData configuration,
+                                                  RunExecutionContext context) {
+        JavaModule targetModule = resolveDebugModule(configuration);
+        AtomicReference<RunProcessHandle> launched = new AtomicReference<>();
+        BuildToolDebugListener listener;
+        try {
+            listener = openBuildDebugListener(targetModule, () -> {
+                RunProcessHandle running = launched.get();
+                if (running != null) {
+                    running.terminate();
+                }
+            });
+        } catch (IOException error) {
+            return ensureRunSupport().failure(text("error.buildDebugListen",
+                    "Nao foi possivel abrir a porta de debug:") + " " + rootMessage(error));
+        }
+        RunProcessHandle handle = launchWithBuildProgress(configuration,
+                () -> ensureRunSupport().launch(configuration, context, listener.listenPort()));
+        if (!handle.isAlive()) {
+            listener.close();
+            return handle;
+        }
+        launched.set(handle);
+        trackRunningProcess(configuration, handle);
+        requestSetRunButtonRunning(true);
+        background.submit(() -> {
+            try {
+                while (handle.isAlive() && !listener.isClosed()) {
+                    Thread.sleep(200);
+                }
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } finally {
+                listener.close();
+            }
+        });
+        return handle;
+    }
+
+    private BuildToolDebugListener openBuildDebugListener(JavaModule targetModule,
+                                                          Runnable cancelProcess) throws IOException {
+        return BuildToolDebugListener.open((target, detached) -> startDebugSession(target,
+                        debugContextOf(null),
+                        () -> detached.accept(!naturalDebugEnd.getAndSet(false)),
+                        targetModule, null),
+                cancelProcess, background);
+    }
+
+    private Path pluginRepository() {
+        Path root = projectRoot;
+        Path cached = pluginRepositoryPath;
+        if (cached != null && Objects.equals(root, pluginRepositoryRoot)) {
+            return cached;
+        }
+        Path resolved = new MavenLocalRepositoryResolver().resolve(descriptor, buildSystem)
+                .repository();
+        pluginRepositoryRoot = root;
+        pluginRepositoryPath = resolved;
+        return resolved;
     }
 
     private RunExecutionContext debugContextOf(RunExecutionContext context) {
@@ -5872,7 +6109,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             debugSession = null;
             debugProcessHandle = null;
             closeDebugRelay();
-            terminateDebuggee();
             requestSetRunButtonRunning(hasRunningProcess());
             setDebugEditorAssistEnabled(true);
         }
@@ -5890,6 +6126,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         requestSetHotReloadButtonEnabled(hotReloadable);
         if (!snapshot.message().isBlank()) {
             setStatusBarText("Java Debug: " + snapshot.message().trim());
+        }
+        if (!active) {
+            naturalDebugEnd.set(snapshot.state() == JavaDebugSnapshot.State.TERMINATED);
+            terminateDebuggee();
+            naturalDebugEnd.set(false);
         }
     }
 
@@ -6301,12 +6542,50 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (initial.percent() >= 0) {
             updateProgress(RUN_BUILD_PROGRESS_ID, initial.label(), initial.percent());
         }
+        boolean slot = false;
         try {
+            slot = awaitBuildSlot();
             return launcher.get();
         } finally {
+            if (slot) {
+                buildRunning.set(false);
+            }
             runBuildProgress.compareAndSet(progress, null);
             hideProgress(RUN_BUILD_PROGRESS_ID);
         }
+    }
+
+    private JavaTestRunner newTestRunner(JavaProjectDescriptor current, BuildSystem build) {
+        JdkService jdks = jdkService;
+        JavaTestRunner runner = new JavaTestRunner(current, build, this::getProjectJdk,
+                settings().isIncrementalBuild()
+                        ? new JUnitPlatformLauncher(jdks == null ? null : jdks.sdkRoot(),
+                                this::pomLocalRepository)
+                        : null);
+        activeTestRunner.set(runner);
+        return runner;
+    }
+
+    private boolean awaitBuildSlot() {
+        if (buildRunning.compareAndSet(false, true)) {
+            return true;
+        }
+        updateProgress(RUN_BUILD_PROGRESS_ID, text("progress.waitingBuild",
+                "Aguardando o build em andamento"), -1);
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(BUILD_SLOT_WAIT_MS);
+        while (System.nanoTime() < deadline) {
+            if (buildRunning.compareAndSet(false, true)) {
+                return true;
+            }
+            try {
+                Thread.sleep(BUILD_SLOT_POLL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        log.info("Build anterior nao terminou em {} ms; seguindo com o Run", BUILD_SLOT_WAIT_MS);
+        return false;
     }
 
     private RunChainHost chainHost() {
@@ -6605,11 +6884,13 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final class BuildToolsHost implements JavaBuildToolsPanel.Host {
         @Override
         public BuildToolModel load() {
+            pluginGoals.clearCache();
             return BuildToolModel.load(descriptor);
         }
 
         @Override
         public void sync() {
+            pluginRepositoryPath = null;
             syncProject();
         }
 
@@ -6628,6 +6909,16 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
 
         @Override
+        public BuildRunConfigurations.ToolOptions toolOptions() {
+            return new BuildRunConfigurations(projectRoot).toolOptions();
+        }
+
+        @Override
+        public void toolOptionsChanged(BuildRunConfigurations.ToolOptions options) {
+            new BuildRunConfigurations(projectRoot).saveToolOptions(options);
+        }
+
+        @Override
         public List<BuildRunConfigurations.Entry> runConfigurations() {
             return new BuildRunConfigurations(projectRoot).all();
         }
@@ -6643,34 +6934,40 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
 
         @Override
+        public boolean supportsDebug() {
+            return true;
+        }
+
+        @Override
+        public boolean showPrompt(BuildPromptPanel prompt, String title) {
+            showPopup(PlatformPopupBuilder.builder()
+                    .component(prompt)
+                    .title(title)
+                    .size(prompt.popupSize())
+                    .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
+                    .onLoad(component -> prompt.focusField())
+                    .onClose(component -> prompt.closed())
+                    .build());
+            return true;
+        }
+
+        @Override
         public void executeGoals(BuildToolModel.Node context, List<String> goals) {
-            BuildSystem build = ensureBuildSystem();
-            if (build == null || goals == null || goals.isEmpty()) {
+            runToolGoals(context == null ? null : context.module(), goals, false);
+        }
+
+        @Override
+        public void debugGoals(BuildToolModel.Node context, List<String> goals) {
+            runToolGoals(context == null ? null : context.module(), goals, true);
+        }
+
+        @Override
+        public void execute(BuildToolModel.Node command) {
+            if (command == null || !command.executable()) {
+                reject(text("status.nothingToRun", "Nada para executar"));
                 return;
             }
-            if (build.isRunning()) {
-                buildToolsPanel.warning(text("status.buildRunning",
-                        "Ja existe um build em andamento"));
-                return;
-            }
-            OutputPanelHandle output = requestOutputPanel("Build", OutputPanelOptions.interactive(null));
-            if (output != null) {
-                output.clear();
-                output.show();
-            }
-            JavaModule module = context == null ? null : context.module();
-            background.submit(() -> {
-                BuildResult result = build.executeToolCommand(module, goals,
-                        line -> writeOutput(output, line));
-                publishBuildDiagnostics(result, true);
-                if (!result.summary().isEmpty()) {
-                    writeOutput(output, result.summary());
-                }
-                JavaBuildToolsPanel panel = buildToolsPanel;
-                if (panel != null) {
-                    panel.finished(result.summary(), result.successful());
-                }
-            });
+            runToolGoals(command.module(), command.command(), false);
         }
 
         @Override
@@ -6682,23 +6979,85 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
 
         @Override
-        public void execute(BuildToolModel.Node command) {
+        public void cancel() {
+            BuildSystem build = buildSystem;
+            if (build != null) {
+                build.cancel();
+            }
+        }
+
+        private void reject(String message) {
+            JavaBuildToolsPanel panel = buildToolsPanel;
+            if (panel != null) {
+                panel.warning(message);
+            }
+        }
+
+        private void runToolGoals(JavaModule module, List<String> goals, boolean debug) {
             BuildSystem build = ensureBuildSystem();
-            if (build == null || command == null || !command.executable()) {
+            if (build == null || goals == null || goals.isEmpty()) {
+                reject(text("status.buildToolUnavailable", "Nenhum build tool disponivel"));
                 return;
             }
             if (build.isRunning()) {
-                buildToolsPanel.warning(text("status.buildRunning", "Ja existe um build em andamento"));
+                reject(text("status.buildRunning", "Ja existe um build em andamento"));
                 return;
             }
+            JavaProjectDescriptor current = descriptor;
+            boolean gradle = current != null && current.isGradle();
+            BuildRunConfigurations.ToolOptions toolOptions =
+                    new BuildRunConfigurations(projectRoot).toolOptions();
+            List<String> arguments = new ArrayList<>();
+            if (toolOptions.skipTests()) {
+                arguments.addAll(gradle ? List.of("-x", "test") : List.of("-DskipTests"));
+            }
+            Map<String, String> environment = new LinkedHashMap<>();
+            BuildToolDebugListener listener = null;
+            if (debug) {
+                try {
+                    listener = openBuildDebugListener(module, build::cancel);
+                    BuildToolDebug.Plan plan = gradle
+                            ? BuildToolDebug.gradle(goals, arguments, listener.listenPort())
+                            : BuildToolDebug.maven(goals, arguments, listener.listenPort(),
+                                    System.getenv());
+                    if (!plan.debuggable()) {
+                        listener.close();
+                        reject(text("status.noDebuggableJvm",
+                                "Nenhuma JVM depuravel nessas tasks (use run, bootRun ou test)"));
+                        return;
+                    }
+                    arguments.addAll(plan.arguments());
+                    environment.putAll(plan.environment());
+                } catch (Exception error) {
+                    if (listener != null) {
+                        listener.close();
+                    }
+                    reject(text("error.buildDebugListen", "Nao foi possivel abrir a porta de debug:")
+                            + " " + rootMessage(error));
+                    return;
+                }
+            }
+            BuildCommand.Options options = new BuildCommand.Options(List.of(), arguments,
+                    toolOptions.offline(), environment);
             OutputPanelHandle output = requestOutputPanel("Build", OutputPanelOptions.interactive(null));
             if (output != null) {
                 output.clear();
                 output.show();
             }
+            BuildToolDebugListener debugListener = listener;
             background.submit(() -> {
-                BuildResult result = build.executeToolCommand(command.module(), command.command(),
-                        line -> writeOutput(output, line));
+                BuildResult result;
+                try {
+                    result = build.executeToolCommand(module, goals, options,
+                            line -> writeOutput(output, line));
+                } catch (RuntimeException error) {
+                    writeOutput(output, rootMessage(error));
+                    result = BuildResult.failed(build.name(), rootMessage(error));
+                } finally {
+                    if (debugListener != null) {
+                        debugListener.close();
+                    }
+                }
                 publishBuildDiagnostics(result, true);
                 if (!result.summary().isEmpty()) {
                     writeOutput(output, result.summary());
@@ -6708,14 +7067,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                     panel.finished(result.summary(), result.successful());
                 }
             });
-        }
-
-        @Override
-        public void cancel() {
-            BuildSystem build = buildSystem;
-            if (build != null) {
-                build.cancel();
-            }
         }
     }
 
@@ -6756,10 +7107,10 @@ public class JavaIdeAdapter extends IdeAdapter {
             requestShowRunOutput();
 
             background.submit(() -> {
-                JavaTestRunner runner = new JavaTestRunner(current, build);
+                JavaTestRunner runner = newTestRunner(current, build);
                 JavaTestRunner.TestRun run = runner.run(tests, current.rootModule(),
                         line -> writeOutput(panel, line));
-                publishBuildDiagnostics(JavaTestProblems.withTestFailures(run, tests), true);
+                publishTestDiagnostics(JavaTestProblems.withTestFailures(run, tests));
                 setStatusBarText("Java: " + run.summary());
                 onFinished.accept(run);
             });
@@ -6811,11 +7162,11 @@ public class JavaIdeAdapter extends IdeAdapter {
                     onFinished.accept(null);
                     return;
                 }
-                JavaTestRunner runner = new JavaTestRunner(current, build);
+                JavaTestRunner runner = newTestRunner(current, build);
                 JavaTestRunner.CoverageRun coverageRun = runner.runWithCoverage(
                         tests, moduleOf(tests, current), agent, line -> writeOutput(panel, line));
                 JavaTestRunner.TestRun run = coverageRun.testRun();
-                publishBuildDiagnostics(JavaTestProblems.withTestFailures(run, tests), true);
+                publishTestDiagnostics(JavaTestProblems.withTestFailures(run, tests));
                 setStatusBarText("Java: " + run.summary());
                 onFinished.accept(run);
                 readCoverage(coverageRun.execFile(), current);
@@ -6845,14 +7196,14 @@ public class JavaIdeAdapter extends IdeAdapter {
                     .breakpoints(requestWorkspaceBreakpoints())
                     .build();
             background.submit(() -> {
-                JavaTestRunner runner = new JavaTestRunner(current, build);
+                JavaTestRunner runner = newTestRunner(current, build);
                 JavaTestRunner.TestRun run = runner.debug(tests, targetModule, jdwpPort,
                         line -> writeOutput(panel, line));
-                publishBuildDiagnostics(JavaTestProblems.withTestFailures(run, tests), true);
+                publishTestDiagnostics(JavaTestProblems.withTestFailures(run, tests));
                 setStatusBarText("Java: " + run.summary());
                 onFinished.accept(run);
             });
-            startDebugSession(jdwpPort, context, build::cancel, targetModule);
+            startDebugSession(jdwpPort, context, this::cancel, targetModule);
         }
 
         private JavaModule moduleOf(List<JavaTest> tests, JavaProjectDescriptor current) {
@@ -6866,6 +7217,10 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public void cancel() {
+            JavaTestRunner running = activeTestRunner.get();
+            if (running != null) {
+                running.cancel();
+            }
             BuildSystem build = buildSystem;
             if (build != null) {
                 build.cancel();
@@ -7164,6 +7519,16 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (action == BuildSystem.BuildAction.REBUILD || action == BuildSystem.BuildAction.CLEAN) {
             discardIncrementalState();
         }
+        JavaProjectDescriptor current = descriptor;
+        if ((action == BuildSystem.BuildAction.COMPILE || action == BuildSystem.BuildAction.TEST_COMPILE)
+                && preferences.isIncrementalBuild() && current != null) {
+            JavaModule target = module == null ? current.rootModule() : module;
+            IncrementalJavaBuilder builder =
+                    new IncrementalJavaBuilder(current, () -> build, this::getProjectJdk);
+            if (target != null && builder.isApplicable(target)) {
+                return builder.build(target, action == BuildSystem.BuildAction.TEST_COMPILE, output);
+            }
+        }
         BuildRequest request = BuildRequest.of(action, module)
                 .withOffline(preferences.isBuildOffline());
         return build.execute(request, output);
@@ -7189,6 +7554,15 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure) {
+        publishBuildDiagnostics(result, revealOnFailure, BuildProblemsCoordinator.Channel.BUILD);
+    }
+
+    private void publishTestDiagnostics(BuildResult result) {
+        publishBuildDiagnostics(result, true, BuildProblemsCoordinator.Channel.TEST);
+    }
+
+    private void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure,
+                                         BuildProblemsCoordinator.Channel channel) {
         if (result == null) {
             return;
         }
@@ -7198,7 +7572,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 ? List.copyOf(reported)
                 : List.of(new BuildDiagnostic(null, 0, 0, DiagnosticSeverity.ERROR,
                         result.summary(), "build"));
-        Set<Path> affected = problems.replaceBuild(published);
+        Set<Path> affected = problems.replace(channel, published);
         affected.forEach(this::requestRefreshDiagnostics);
 
         refreshProblemsPanel();

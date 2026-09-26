@@ -37,6 +37,8 @@ public final class MavenBuildService implements BuildSystem {
 
     private static final String TEST_OUTPUT_DIR = "target/test-classes";
     private static final String REACTOR_CLASSPATH_FILE = "target/orion-classpath.txt";
+    private static final String PERSISTED_CLASSPATH_DIR = ".orion/classpath";
+    private static final String PERSISTED_CLASSPATH_FORMAT = "1";
 
     private volatile Supplier<Set<String>> activeProfiles;
 
@@ -108,29 +110,40 @@ public final class MavenBuildService implements BuildSystem {
 
     @Override
     public Optional<String> resolveRuntimeClasspath(JavaModule module) {
-        return resolveClasspath(module, false);
+        return resolveClasspath(module, "runtime");
     }
 
     @Override
     public Optional<String> resolveTestClasspath(JavaModule module) {
-        return resolveClasspath(module, true);
+        return resolveClasspath(module, "test");
     }
 
-    private Optional<String> resolveClasspath(JavaModule module, boolean test) {
+    @Override
+    public Optional<String> resolveCompileClasspath(JavaModule module) {
+        return resolveClasspath(module, "compile");
+    }
+
+    private Optional<String> resolveClasspath(JavaModule module, String scope) {
         if (module == null) {
             return Optional.empty();
         }
-        String key = cacheKey(module, test);
+        boolean test = "test".equals(scope);
+        String key = cacheKey(module, scope);
         String cached = classpathCache.get(key);
         if (cached != null) {
             return Optional.of(cached);
         }
-        Optional<String> resolved = resolveInModule(module, test);
+        String fingerprint = persistentFingerprint(module, scope);
+        Optional<String> resolved = readPersisted(module, scope, fingerprint);
         if (resolved.isEmpty()) {
-            resolved = resolveInReactor(module, test);
-        }
-        if (resolved.isEmpty()) {
-            return Optional.empty();
+            resolved = resolveInModule(module, scope);
+            if (resolved.isEmpty()) {
+                resolved = resolveInReactor(module, scope);
+            }
+            if (resolved.isEmpty()) {
+                return Optional.empty();
+            }
+            persist(module, scope, fingerprint, resolved.get());
         }
         String full = prefixOutputDirs(module, test)
                 + ReactorClasspath.substituteWorkspaceModules(resolved.get(), descriptor, module,
@@ -139,7 +152,73 @@ public final class MavenBuildService implements BuildSystem {
         return Optional.of(full);
     }
 
-    private Optional<String> resolveInModule(JavaModule module, boolean test) {
+    private Path persistedFile(JavaModule module, String scope) {
+        return descriptor.root().resolve(PERSISTED_CLASSPATH_DIR)
+                .resolve(module.artifactId() + "-" + scope + ".classpath");
+    }
+
+    String persistentFingerprint(JavaModule module, String scope) {
+        List<String> parts = new ArrayList<>();
+        parts.add(PERSISTED_CLASSPATH_FORMAT);
+        parts.add(scope);
+        parts.add(module.root().toString());
+        parts.add(String.join(",", new java.util.TreeSet<>(activeProfiles())));
+        JdkInstallation jdk = jdkSupplier == null ? null : jdkSupplier.get();
+        parts.add(jdk == null ? "" : jdk.home().toString());
+        Set<Path> poms = new java.util.TreeSet<>();
+        poms.add(descriptor.root().resolve("pom.xml"));
+        for (JavaModule candidate : descriptor.modules()) {
+            poms.add(candidate.root().resolve("pom.xml"));
+        }
+        poms.add(descriptor.root().resolve(".mvn").resolve("maven.config"));
+        for (Path pom : poms) {
+            parts.add(pom + "=" + contentHash(pom));
+        }
+        return dtm.ide.build.incremental.ModuleBuildState.fingerprintOf(parts.toArray(String[]::new));
+    }
+
+    private static String contentHash(Path file) {
+        try {
+            return Files.isRegularFile(file)
+                    ? dtm.ide.build.incremental.ModuleBuildState.fingerprintOf(Files.readString(file))
+                    : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private Optional<String> readPersisted(JavaModule module, String scope, String fingerprint) {
+        Path file = persistedFile(module, scope);
+        try {
+            if (!Files.isRegularFile(file)) {
+                return Optional.empty();
+            }
+            List<String> lines = Files.readAllLines(file);
+            if (lines.size() < 2 || !lines.get(0).equals(fingerprint)) {
+                return Optional.empty();
+            }
+            String classpath = lines.get(1).trim();
+            if (classpath.isBlank() || ClasspathValidation.hasMissingJar(classpath)) {
+                return Optional.empty();
+            }
+            return Optional.of(classpath);
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    private void persist(JavaModule module, String scope, String fingerprint, String classpath) {
+        Path file = persistedFile(module, scope);
+        try {
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, fingerprint + System.lineSeparator() + classpath
+                    + System.lineSeparator());
+        } catch (Exception e) {
+            log.debug("Nao foi possivel gravar o classpath de {}: {}", module.artifactId(), e.getMessage());
+        }
+    }
+
+    private Optional<String> resolveInModule(JavaModule module, String scope) {
         Path outputFile = null;
         try {
             outputFile = Files.createTempFile("orion-classpath", ".txt");
@@ -147,7 +226,7 @@ public final class MavenBuildService implements BuildSystem {
             command.add("-q");
             command.add("dependency:build-classpath");
             command.add("-Dmdep.outputFile=" + outputFile);
-            command.add("-Dmdep.includeScope=" + (test ? "test" : "runtime"));
+            command.add("-Dmdep.includeScope=" + scope);
             appendActiveProfiles(command);
 
             int exitCode = classpathRunner.run(command, module.root(),
@@ -165,7 +244,7 @@ public final class MavenBuildService implements BuildSystem {
         }
     }
 
-    private Optional<String> resolveInReactor(JavaModule module, boolean test) {
+    private Optional<String> resolveInReactor(JavaModule module, String scope) {
         if (module.root().equals(descriptor.root())) {
             return Optional.empty();
         }
@@ -175,7 +254,7 @@ public final class MavenBuildService implements BuildSystem {
             command.add("-q");
             command.add("dependency:build-classpath");
             command.add("-Dmdep.outputFile=" + REACTOR_CLASSPATH_FILE);
-            command.add("-Dmdep.includeScope=" + (test ? "test" : "runtime"));
+            command.add("-Dmdep.includeScope=" + scope);
             command.add("-pl");
             command.add(relativeModulePath(module));
             command.add("-am");
@@ -222,9 +301,8 @@ public final class MavenBuildService implements BuildSystem {
         }
     }
 
-    private String cacheKey(JavaModule module, boolean test) {
-        return (test ? "test|" : "runtime|") + String.join(",", activeProfiles())
-                + "|" + module.root();
+    private String cacheKey(JavaModule module, String scope) {
+        return scope + "|" + String.join(",", activeProfiles()) + "|" + module.root();
     }
 
     private static String prefixOutputDirs(JavaModule module, boolean test) {
@@ -238,6 +316,15 @@ public final class MavenBuildService implements BuildSystem {
     @Override
     public void invalidateClasspathCache() {
         classpathCache.clear();
+        Path persisted = descriptor.root().resolve(PERSISTED_CLASSPATH_DIR);
+        if (!Files.isDirectory(persisted)) {
+            return;
+        }
+        try (var files = Files.list(persisted)) {
+            files.forEach(MavenBuildService::deleteQuietly);
+        } catch (Exception e) {
+            log.debug("Nao foi possivel limpar {}: {}", persisted, e.getMessage());
+        }
     }
 
     @Override
@@ -265,19 +352,32 @@ public final class MavenBuildService implements BuildSystem {
     @Override
     public BuildResult executeToolCommand(JavaModule module, List<String> goals,
                                           Consumer<String> output) {
+        return executeToolCommand(module, goals, BuildCommand.Options.none(), output);
+    }
+
+    @Override
+    public BuildResult executeToolCommand(JavaModule module, List<String> goals,
+                                          BuildCommand.Options options, Consumer<String> output) {
+        BuildCommand.Options resolved = options == null ? BuildCommand.Options.none() : options;
         List<String> command = new ArrayList<>(baseCommand());
         command.addAll(goals == null ? List.of() : goals);
         appendModuleSelection(command, module);
-        Set<String> profiles = activeProfiles();
+        Set<String> profiles = new LinkedHashSet<>(resolved.profiles());
+        profiles.addAll(activeProfiles());
         if (!profiles.isEmpty()) {
             command.add("-P" + String.join(",", profiles));
         }
+        if (resolved.offline()) {
+            command.add("-o");
+        }
+        command.addAll(resolved.extraArguments());
+        Map<String, String> environment = environmentFor(BuildRequest.of(BuildAction.COMPILE, module));
+        environment.putAll(resolved.environment());
         Instant start = Instant.now();
         BuildDiagnosticParser parser = new BuildDiagnosticParser(descriptor.root());
         emit(output, "> " + String.join(" ", command));
         AtomicBoolean successMarker = new AtomicBoolean();
-        int exit = runner.run(command, descriptor.root(), environmentFor(
-                BuildRequest.of(BuildAction.COMPILE, module)), line -> {
+        int exit = runner.run(command, descriptor.root(), environment, line -> {
             parser.accept(line);
             if (line.contains("BUILD SUCCESS")) {
                 successMarker.set(true);

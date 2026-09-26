@@ -54,6 +54,9 @@ public final class ClasspathValidation {
             }
             try {
                 Path path = Path.of(entry).toAbsolutePath().normalize();
+                if (isOutputDirectory(path)) {
+                    continue;
+                }
                 if (Files.exists(path)) {
                     stamps.add(path + ":" + Files.size(path) + ":"
                             + Files.getLastModifiedTime(path).toMillis());
@@ -67,5 +70,14 @@ public final class ClasspathValidation {
         java.util.Collections.sort(stamps);
         return dtm.ide.build.incremental.ModuleBuildState.fingerprintOf(
                 stamps.toArray(String[]::new));
+    }
+
+    private static boolean isOutputDirectory(Path path) {
+        if (Files.isDirectory(path)) {
+            return true;
+        }
+        String name = path.getFileName() == null ? "" : path.getFileName().toString()
+                .toLowerCase(java.util.Locale.ROOT);
+        return !Files.exists(path) && !name.endsWith(".jar") && !name.endsWith(".zip");
     }
 }

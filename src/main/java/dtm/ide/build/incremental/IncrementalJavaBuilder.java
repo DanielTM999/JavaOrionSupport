@@ -7,7 +7,9 @@ import dtm.ide.build.BuildResult;
 import dtm.ide.build.ClasspathValidation;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.build.JavacCommands;
+import dtm.ide.build.JavacDaemons;
 import dtm.ide.build.ProcessRunner;
+import dtm.ide.deps.MavenLocalRepositoryResolver;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
@@ -17,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -25,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -35,6 +39,7 @@ public final class IncrementalJavaBuilder {
     public static final String STATE_DIRECTORY = ".orion/incremental";
 
     private static final String GENERATED_SOURCES = "target/generated-sources/annotations";
+    private static final String GENERATED_TEST_SOURCES = "target/generated-test-sources/test-annotations";
     private static final String TEST_OUTPUT_DIR = "target/test-classes";
     private static final double FULL_MODULE_RATIO = 0.4;
 
@@ -54,7 +59,12 @@ public final class IncrementalJavaBuilder {
     private final Supplier<JdkInstallation> jdkSupplier;
     private final ProcessRunner runner = new ProcessRunner();
 
-    private JavacExecutor javac = runner::run;
+    private static final Map<Path, Path> LOCAL_REPOSITORIES = new ConcurrentHashMap<>();
+
+    private final Map<Path, Boolean> resourceLayouts = new ConcurrentHashMap<>();
+    private Supplier<Path> localRepository;
+
+    private JavacExecutor javac = this::runJavac;
     private ModuleListener moduleListener = (module, index, total) -> { };
 
     public IncrementalJavaBuilder(JavaProjectDescriptor descriptor,
@@ -66,8 +76,37 @@ public final class IncrementalJavaBuilder {
     }
 
     public IncrementalJavaBuilder withJavac(JavacExecutor executor) {
-        this.javac = executor == null ? runner::run : executor;
+        this.javac = executor == null ? this::runJavac : executor;
         return this;
+    }
+
+    private int runJavac(List<String> command, Path workingDirectory, Map<String, String> environment,
+                         Consumer<String> output) {
+        return JavacDaemons.run(command, workingDirectory, environment, output, runner);
+    }
+
+    public IncrementalJavaBuilder withLocalRepository(Supplier<Path> repository) {
+        this.localRepository = repository;
+        return this;
+    }
+
+    private List<Path> processorPathOf(JavaModule module) {
+        List<AnnotationProcessorPaths.Coordinate> declared = AnnotationProcessorPaths.declared(
+                module.root().resolve(JavaProjectConventions.POM_FILE),
+                descriptor.root().resolve(JavaProjectConventions.POM_FILE));
+        if (declared.isEmpty()) {
+            return List.of();
+        }
+        Path repository = null;
+        try {
+            repository = localRepository != null ? localRepository.get()
+                    : LOCAL_REPOSITORIES.computeIfAbsent(descriptor.root(), ignored ->
+                            new MavenLocalRepositoryResolver().resolve(descriptor, buildSupplier.get())
+                                    .repository());
+        } catch (Exception e) {
+            log.debug("Repositorio local do Maven indisponivel: {}", e.getMessage());
+        }
+        return AnnotationProcessorPaths.resolve(declared, repository);
     }
 
     public IncrementalJavaBuilder withModuleListener(ModuleListener listener) {
@@ -126,7 +165,9 @@ public final class IncrementalJavaBuilder {
                 continue;
             }
             moduleListener.starting(plan.module(), index + 1, total);
-            BuildResult result = buildIncremental(plan, false, output);
+            BuildResult result = plan.recompileAll()
+                    ? recompileModule(plan, false, output)
+                    : buildIncremental(plan, false, output);
             diagnostics.addAll(result.diagnostics());
             if (!result.successful()) {
                 return new BuildResult(result.exitCode(), diagnostics,
@@ -154,6 +195,7 @@ public final class IncrementalJavaBuilder {
 
     public void cancel() {
         runner.cancel();
+        JavacDaemons.cancelAll();
     }
 
     public boolean isRunning() {
@@ -161,7 +203,13 @@ public final class IncrementalJavaBuilder {
     }
 
     private record ModulePlan(JavaModule module, String classpath, ModuleBuildState state,
-                              String fingerprint, Path stateFile, boolean full, String reason) {
+                              String fingerprint, Path stateFile, boolean full, String reason,
+                              boolean recompileAll) {
+
+        ModulePlan(JavaModule module, String classpath, ModuleBuildState state, String fingerprint,
+                   Path stateFile, boolean full, String reason) {
+            this(module, classpath, state, fingerprint, stateFile, full, reason, false);
+        }
     }
 
     public boolean isUpToDate(JavaModule target) {
@@ -213,6 +261,18 @@ public final class IncrementalJavaBuilder {
         }
         Path stateFile = stateFileOf(module, test);
         ModuleBuildState state = ModuleBuildState.load(stateFile);
+        String localFingerprint = localFingerprintOf(module);
+        String storedClasspath = state.classpath();
+        if (state.matchesLocally(localFingerprint) && !storedClasspath.isBlank()
+                && !ClasspathValidation.hasMissingJar(storedClasspath)
+                && state.classpathFingerprint().equals(ClasspathValidation.fingerprint(storedClasspath))) {
+            ModulePlan plan = new ModulePlan(module, storedClasspath, state,
+                    fingerprintOf(localFingerprint, storedClasspath), stateFile, false,
+                    outputIsComplete(module, test, sources) ? "estado incremental ausente" : "saida incompleta",
+                    true);
+            log.info("Recompilacao do modulo {} com javac: {}", module.artifactId(), plan.reason());
+            return plan;
+        }
 
         Optional<String> classpath = classpathOf(module, test);
         if (classpath.isEmpty()) {
@@ -233,10 +293,41 @@ public final class IncrementalJavaBuilder {
         return plan;
     }
 
+    private BuildResult recompileModule(ModulePlan plan, boolean test, Consumer<String> output) {
+        JavaModule module = plan.module();
+        List<Path> sources = collectSources(module, test);
+        BuildResult result = sources.isEmpty() ? ok()
+                : compile(module, test, new LinkedHashSet<>(sources), plan.classpath(),
+                        outputDirOf(module, test), output);
+        if (!result.successful()) {
+            if (!result.diagnostics().isEmpty()) {
+                return result;
+            }
+            log.info("javac falhou sem diagnosticos em {}; voltando para o Maven", module.artifactId());
+            BuildResult fallback = delegate(module, test, output, "javac indisponivel");
+            if (fallback.successful()) {
+                refreshState(module, test, plan.state(), plan.fingerprint(), plan.classpath(),
+                        plan.stateFile());
+            }
+            return fallback;
+        }
+        if (hasResources(module, test)) {
+            BuildResult resources = copyResources(module, test, output);
+            if (!resources.successful()) {
+                return resources;
+            }
+        }
+        refreshState(module, test, plan.state(), plan.fingerprint(), plan.classpath(),
+                plan.stateFile());
+        return result;
+    }
+
     private BuildResult buildTests(JavaModule module, Consumer<String> output) {
         ModulePlan plan = planOf(module, true);
         if (!plan.full()) {
-            BuildResult result = buildIncremental(plan, true, output);
+            BuildResult result = plan.recompileAll()
+                    ? recompileModule(plan, true, output)
+                    : buildIncremental(plan, true, output);
             return result.successful() ? syncResources(module, List.of(plan), true, output) : result;
         }
         if (plan.fingerprint() == null) {
@@ -296,19 +387,82 @@ public final class IncrementalJavaBuilder {
             modules.add(plan.module());
         }
         emit(output, "[" + labelOf(modules) + "] resources alterados");
-        BuildResult result = copyResources(target, test, output);
-        if (!result.successful()) {
-            return result;
+        boolean inProcess = modules.stream().allMatch(this::usesDefaultResources);
+        if (inProcess) {
+            for (JavaModule module : modules) {
+                BuildResult copied = copyResourcesInProcess(module, test, output);
+                if (!copied.successful()) {
+                    return copied;
+                }
+            }
+        } else {
+            BuildResult result = copyResourcesWithMaven(target, test, output);
+            if (!result.successful()) {
+                return result;
+            }
         }
         for (int index = 0; index < stale.size(); index++) {
             ModuleBuildState state = stale.get(index).state();
             state.recordResources(fingerprints.get(index));
             state.save();
         }
-        return result;
+        return ok();
     }
 
-    private BuildResult copyResources(JavaModule target, boolean test, Consumer<String> output) {
+    private BuildResult copyResources(JavaModule module, boolean test, Consumer<String> output) {
+        return usesDefaultResources(module)
+                ? copyResourcesInProcess(module, test, output)
+                : copyResourcesWithMaven(module, test, output);
+    }
+
+    private BuildResult copyResourcesInProcess(JavaModule module, boolean test, Consumer<String> output) {
+        Path outputDir = outputDirOf(module, test);
+        int copied = 0;
+        try {
+            for (Path root : resourceRootsOf(module, test)) {
+                List<Path> files;
+                try (Stream<Path> walk = Files.walk(root)) {
+                    files = walk.filter(Files::isRegularFile).toList();
+                }
+                for (Path file : files) {
+                    Path destination = outputDir.resolve(root.relativize(file).toString());
+                    if (isSameCopy(file, destination)) {
+                        continue;
+                    }
+                    Files.createDirectories(destination.getParent());
+                    Files.copy(file, destination, StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.COPY_ATTRIBUTES);
+                    copied++;
+                }
+            }
+        } catch (Exception e) {
+            log.info("Copia de resources de {} falhou ({}); usando o Maven", module.artifactId(),
+                    e.getMessage());
+            return copyResourcesWithMaven(module, test, output);
+        }
+        emit(output, "[" + module.artifactId() + "] " + copied + " resource(s) copiado(s)"
+                + (test ? " de teste" : ""));
+        return ok();
+    }
+
+    private static boolean isSameCopy(Path source, Path destination) {
+        try {
+            return Files.isRegularFile(destination)
+                    && Files.size(source) == Files.size(destination)
+                    && Files.getLastModifiedTime(source).equals(Files.getLastModifiedTime(destination));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    boolean usesDefaultResources(JavaModule module) {
+        return resourceLayouts.computeIfAbsent(module.root(), ignored ->
+                !MavenResourceLayout.customizes(module.root().resolve(JavaProjectConventions.POM_FILE))
+                        && !MavenResourceLayout.customizes(
+                                descriptor.root().resolve(JavaProjectConventions.POM_FILE)));
+    }
+
+    private BuildResult copyResourcesWithMaven(JavaModule target, boolean test, Consumer<String> output) {
         BuildSystem build = buildSupplier.get();
         if (build == null) {
             return new BuildResult(-1, List.of(new BuildDiagnostic(null, 0, 0, null,
@@ -328,6 +482,9 @@ public final class IncrementalJavaBuilder {
         List<Path> sources = collectSources(module, test);
         ModuleBuildState.Changes changes = state.changes(module.root(), sources);
         if (changes.isEmpty()) {
+            if (state.isDirty()) {
+                state.save();
+            }
             emit(output, "[" + module.artifactId() + "] sem mudancas");
             return ok();
         }
@@ -366,10 +523,11 @@ public final class IncrementalJavaBuilder {
         Set<Path> selected = new LinkedHashSet<>(changes.touched());
         Set<String> types = new LinkedHashSet<>();
         for (Path source : changes.deleted()) {
-            types.addAll(state.typesOf(module.root(), source));
+            types.addAll(state.qualifiedTypesOf(module.root(), source));
         }
         for (Path source : changes.touched()) {
-            types.addAll(declaredTypesOf(source));
+            types.addAll(state.qualifiedTypesOf(module.root(), source));
+            types.addAll(qualifiedTopLevelTypesOf(source));
         }
         selected.addAll(state.dependentsOf(module.root(), types));
         selected.removeAll(changes.deleted());
@@ -388,7 +546,7 @@ public final class IncrementalJavaBuilder {
         Path argumentFile = null;
         try {
             Files.createDirectories(outputDir);
-            Path generated = module.root().resolve(GENERATED_SOURCES);
+            Path generated = module.root().resolve(test ? GENERATED_TEST_SOURCES : GENERATED_SOURCES);
             Files.createDirectories(generated);
 
             List<String> command = new ArrayList<>();
@@ -404,6 +562,14 @@ public final class IncrementalJavaBuilder {
             command.add("-nowarn");
             command.add("-cp");
             command.add(classpath);
+            List<Path> processors = processorPathOf(module);
+            if (!processors.isEmpty()) {
+                List<String> entries = new ArrayList<>();
+                processors.forEach(processor -> entries.add(processor.toString()));
+                entries.add(classpath);
+                command.add("-processorpath");
+                command.add(String.join(java.io.File.pathSeparator, entries));
+            }
             JavacCommands.releaseArgument(descriptor, jdk, List.of()).ifPresent(release -> {
                 command.add("--release");
                 command.add(release);
@@ -525,7 +691,7 @@ public final class IncrementalJavaBuilder {
         }
         Optional<String> classpath = test
                 ? build.resolveTestClasspath(module)
-                : build.resolveRuntimeClasspath(module);
+                : build.resolveCompileClasspath(module);
         return classpath.filter(value -> !value.isBlank());
     }
 
@@ -561,6 +727,13 @@ public final class IncrementalJavaBuilder {
                 continue;
             }
             Path parent = relative.get().getParent();
+            String fileName = relative.get().getFileName().toString();
+            String stem = fileName.substring(0, fileName.length() - ".java".length());
+            Path expected = parent == null ? outputDir.resolve(stem + ".class")
+                    : outputDir.resolve(parent).resolve(stem + ".class");
+            if (Files.isRegularFile(expected)) {
+                continue;
+            }
             for (String type : topLevelTypesOf(source)) {
                 Path classFile = parent == null
                         ? outputDir.resolve(type + ".class")
@@ -639,9 +812,10 @@ public final class IncrementalJavaBuilder {
         return sources;
     }
 
-    private static Set<String> declaredTypesOf(Path source) {
+    private static Set<String> qualifiedTopLevelTypesOf(Path source) {
         try {
-            return new LinkedHashSet<>(ModuleBuildState.typesDeclaredIn(Files.readString(source)));
+            return new LinkedHashSet<>(ModuleBuildState.topLevelQualifiedTypesDeclaredIn(
+                    Files.readString(source)));
         } catch (Exception e) {
             return Set.of();
         }

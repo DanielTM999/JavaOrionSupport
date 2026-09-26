@@ -63,6 +63,26 @@ class JavaFileChangeRouterTest {
     }
 
     @Test
+    void packagesNamedLikeOutputFoldersAreStillWatched() {
+        assertFalse(JavaFileChangeRouter.isIgnored(
+                Path.of("/projeto/src/main/java/com/acme/build/Plano.java")));
+        assertFalse(JavaFileChangeRouter.isIgnored(
+                Path.of("/projeto/src/main/java/com/acme/out/Saida.java")));
+        assertTrue(JavaFileChangeRouter.isIgnored(
+                Path.of("/projeto/modulo/Target/classes/A.class")));
+    }
+
+    @Test
+    void aProjectStoredBelowABinFolderIsJudgedFromItsOwnRoot() {
+        Path projectRoot = Path.of("/opt/bin/projeto");
+
+        assertFalse(JavaFileChangeRouter.isIgnored(
+                projectRoot.resolve("src/main/java/a/A.java"), projectRoot));
+        assertTrue(JavaFileChangeRouter.isIgnored(
+                projectRoot.resolve("target/classes/a/A.class"), projectRoot));
+    }
+
+    @Test
     void classifiesTheFilesItCaresAbout(@TempDir Path dir) throws Exception {
         Path java = Files.writeString(dir.resolve("Cliente.java"), "class Cliente {}");
         Path yaml = Files.writeString(dir.resolve("application.yml"), "server:\n  port: 8080\n");

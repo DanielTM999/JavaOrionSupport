@@ -7,7 +7,9 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ClasspathValidationTest {
@@ -37,5 +39,31 @@ class ClasspathValidationTest {
     @Test
     void acceptsBlankClasspath() {
         assertFalse(ClasspathValidation.hasMissingJar("  "));
+    }
+
+    @Test
+    void recreatingAnOutputDirectoryKeepsTheFingerprint() throws Exception {
+        Path jar = Files.writeString(root.resolve("dependency.jar"), "jar");
+        Path classes = Files.createDirectories(root.resolve("target/classes"));
+        String classpath = classes + File.pathSeparator + jar;
+        String before = ClasspathValidation.fingerprint(classpath);
+
+        Files.delete(classes);
+        String whileMissing = ClasspathValidation.fingerprint(classpath);
+        Files.createDirectories(classes);
+        Files.writeString(classes.resolve("A.class"), "novo");
+
+        assertEquals(before, whileMissing);
+        assertEquals(before, ClasspathValidation.fingerprint(classpath));
+    }
+
+    @Test
+    void aRepublishedJarChangesTheFingerprint() throws Exception {
+        Path jar = Files.writeString(root.resolve("dependency.jar"), "jar");
+        String before = ClasspathValidation.fingerprint(jar.toString());
+
+        Files.writeString(jar, "jar republicado");
+
+        assertNotEquals(before, ClasspathValidation.fingerprint(jar.toString()));
     }
 }

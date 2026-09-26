@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -41,14 +42,19 @@ public final class MavenPluginGoals {
     private static final Pattern VERSION_DIRECTORY = Pattern.compile("^\\d[\\w.\\-]*$");
 
     private final Map<String, List<Goal>> cache = new ConcurrentHashMap<>();
-    private final Path localRepository;
+    private final Supplier<Path> localRepository;
 
     public MavenPluginGoals() {
         this(defaultLocalRepository());
     }
 
     public MavenPluginGoals(Path localRepository) {
-        this.localRepository = localRepository;
+        this(() -> localRepository);
+    }
+
+    public MavenPluginGoals(Supplier<Path> localRepository) {
+        this.localRepository = localRepository == null ? MavenPluginGoals::defaultLocalRepository
+                : localRepository;
     }
 
     static Path defaultLocalRepository() {
@@ -60,18 +66,32 @@ public final class MavenPluginGoals {
         if (groupId == null || groupId.isBlank() || artifactId == null || artifactId.isBlank()) {
             return List.of();
         }
-        String key = groupId + ":" + artifactId + ":" + (version == null ? "" : version);
+        String effectiveVersion = version == null || version.contains("${") ? "" : version.trim();
+        Path repository = repository();
+        String key = repository + "|" + groupId + ":" + artifactId + ":" + effectiveVersion;
         List<Goal> cached = cache.get(key);
         if (cached != null) {
             return cached;
         }
-        List<Goal> goals = read(groupId, artifactId, version);
-        cache.put(key, goals);
+        List<Goal> goals = read(repository, groupId, artifactId, effectiveVersion);
+        if (!goals.isEmpty()) {
+            cache.put(key, goals);
+        }
         return goals;
     }
 
-    private List<Goal> read(String groupId, String artifactId, String version) {
-        Optional<Path> jar = locate(groupId, artifactId, version);
+    private Path repository() {
+        try {
+            Path resolved = localRepository.get();
+            return resolved == null ? defaultLocalRepository() : resolved;
+        } catch (RuntimeException error) {
+            log.debug("Repositorio local do Maven indisponivel: {}", error.getMessage());
+            return defaultLocalRepository();
+        }
+    }
+
+    private List<Goal> read(Path repository, String groupId, String artifactId, String version) {
+        Optional<Path> jar = locate(repository, groupId, artifactId, version);
         if (jar.isEmpty()) {
             return List.of();
         }
@@ -89,11 +109,12 @@ public final class MavenPluginGoals {
         }
     }
 
-    private Optional<Path> locate(String groupId, String artifactId, String version) {
-        if (localRepository == null) {
+    private Optional<Path> locate(Path repository, String groupId, String artifactId,
+                                  String version) {
+        if (repository == null) {
             return Optional.empty();
         }
-        Path artifactRoot = localRepository;
+        Path artifactRoot = repository;
         for (String segment : groupId.split("\\.")) {
             artifactRoot = artifactRoot.resolve(segment);
         }
@@ -108,7 +129,15 @@ public final class MavenPluginGoals {
             return Optional.empty();
         }
         Path jar = artifactRoot.resolve(effective).resolve(artifactId + "-" + effective + ".jar");
-        return Files.isRegularFile(jar) ? Optional.of(jar) : Optional.empty();
+        if (Files.isRegularFile(jar)) {
+            return Optional.of(jar);
+        }
+        String newest = newestVersion(artifactRoot).orElse("");
+        if (newest.isBlank() || newest.equals(effective)) {
+            return Optional.empty();
+        }
+        Path fallback = artifactRoot.resolve(newest).resolve(artifactId + "-" + newest + ".jar");
+        return Files.isRegularFile(fallback) ? Optional.of(fallback) : Optional.empty();
     }
 
     private static Optional<String> newestVersion(Path artifactRoot) {

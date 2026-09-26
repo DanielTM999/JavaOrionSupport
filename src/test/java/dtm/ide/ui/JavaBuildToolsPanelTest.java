@@ -1,5 +1,6 @@
 package dtm.ide.ui;
 
+import dtm.ide.build.BuildRunConfigurations;
 import dtm.ide.build.BuildToolModel;
 import dtm.stools.component.inputfields.textfield.MaskedTextField;
 import dtm.stools.component.tree.TreePopupContext;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import javax.swing.JButton;
 import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
+import javax.swing.JToggleButton;
 import javax.swing.SwingUtilities;
 import javax.swing.tree.TreeNode;
 import java.awt.Component;
@@ -239,6 +241,304 @@ class JavaBuildToolsPanelTest {
 
         await(() -> executed.get() != null);
         assertEquals("execute:install", executed.get());
+    }
+
+    @Test
+    void theDebugButtonSendsTheSelectionToTheDebugger() throws Exception {
+        AtomicReference<String> executed = new AtomicReference<>();
+        BuildToolModel model = modelWithCommands("demo", "clean", "compile", "install");
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(
+                debuggingHost(model, executed)));
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 5);
+
+        onEdtRun(() -> {
+            tree.selectNodes(List.of(goalNodes(tree).get(2)));
+            findButton(panel, "Depurar").doClick();
+        });
+
+        assertEquals("debugGoals:install", executed.get());
+    }
+
+    @Test
+    void aRejectedRunGivesTheButtonsBack() throws Exception {
+        AtomicReference<JavaBuildToolsPanel> self = new AtomicReference<>();
+        BuildToolModel model = modelWithCommands("demo", "clean");
+        JavaBuildToolsPanel.Host host = new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+                self.get().warning("busy");
+            }
+
+            @Override
+            public void cancel() {
+            }
+        };
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(host));
+        self.set(panel);
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 3);
+
+        JButton run = onEdt(() -> findButton(panel, "Executar"));
+        JButton stop = onEdt(() -> findButton(panel, "Parar"));
+        onEdtRun(() -> {
+            tree.selectNodes(List.of(goalNodes(tree).getFirst()));
+            run.doClick();
+        });
+
+        await(() -> onEdtUnchecked(() -> run.isEnabled() && !stop.isEnabled()));
+    }
+
+    @Test
+    void theRerunButtonRepeatsTheLastExecution() throws Exception {
+        AtomicReference<String> executed = new AtomicReference<>();
+        AtomicReference<JavaBuildToolsPanel> self = new AtomicReference<>();
+        AtomicInteger runs = new AtomicInteger();
+        BuildToolModel model = modelWithCommands("demo", "clean", "install");
+        JavaBuildToolsPanel.Host host = new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+                runs.incrementAndGet();
+                executed.set(String.join(" ", command.command()));
+                self.get().finished("", true);
+            }
+
+            @Override
+            public void cancel() {
+            }
+        };
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(host));
+        self.set(panel);
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 4);
+        JButton rerun = onEdt(() -> findButtonStartingWith(panel, "Re-executar"));
+        assertTrue(!onEdt(rerun::isEnabled), "nada para re-executar antes da primeira execucao");
+
+        onEdtRun(() -> {
+            tree.selectNodes(List.of(goalNodes(tree).get(1)));
+            findButton(panel, "Executar").doClick();
+        });
+        await(() -> onEdtUnchecked(rerun::isEnabled));
+        onEdtRun(() -> {
+            tree.selectNodes(List.of(goalNodes(tree).getFirst()));
+            rerun.doClick();
+        });
+
+        assertEquals(2, runs.get());
+        assertEquals("install", executed.get());
+    }
+
+    @Test
+    void theRunGoalPromptGoesThroughTheHostPopup() throws Exception {
+        AtomicReference<BuildPromptPanel> shown = new AtomicReference<>();
+        AtomicReference<String> executed = new AtomicReference<>();
+        BuildToolModel model = modelWithCommands("demo", "clean");
+        JavaBuildToolsPanel.Host host = new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+            }
+
+            @Override
+            public void executeGoals(BuildToolModel.Node context, List<String> goals) {
+                executed.set(String.join(" ", goals));
+            }
+
+            @Override
+            public void cancel() {
+            }
+
+            @Override
+            public boolean showPrompt(BuildPromptPanel prompt, String title) {
+                shown.set(prompt);
+                return true;
+            }
+        };
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(host));
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1);
+
+        onEdtRun(() -> findButtonStartingWith(panel, "Executar goal").doClick());
+        assertTrue(shown.get() != null, "o prompt deveria ser exibido pelo host");
+        onEdtRun(() -> {
+            shown.get().setFieldText("clean install -DskipTests");
+            shown.get().answer(false);
+        });
+
+        await(() -> executed.get() != null);
+        assertEquals("clean install -DskipTests", executed.get());
+    }
+
+    @Test
+    void savingAConfigurationGoesThroughTheHostPopup() throws Exception {
+        AtomicReference<BuildPromptPanel> shown = new AtomicReference<>();
+        AtomicReference<BuildRunConfigurations.Entry> saved = new AtomicReference<>();
+        BuildToolModel model = modelWithCommands("demo", "clean", "install");
+        JavaBuildToolsPanel.Host host = new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+            }
+
+            @Override
+            public void cancel() {
+            }
+
+            @Override
+            public void saveRunConfiguration(BuildRunConfigurations.Entry entry) {
+                saved.set(entry);
+            }
+
+            @Override
+            public boolean showPrompt(BuildPromptPanel prompt, String title) {
+                shown.set(prompt);
+                return true;
+            }
+        };
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(host));
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1 && visibleRows(tree) >= 4);
+
+        onEdtRun(() -> {
+            List<dtm.stools.component.tree.TreeNode<BuildToolModel.Node>> goals = goalNodes(tree);
+            tree.selectNodes(goals);
+            JPopupMenu popup = tree.getPopupMenuProvider()
+                    .apply(new TreePopupContext<>(tree, goals.getFirst(), goals, null));
+            for (Component component : popup.getComponents()) {
+                if (component instanceof JMenuItem item && item.getText().startsWith("Salvar")) {
+                    item.doClick();
+                }
+            }
+        });
+        assertTrue(shown.get() != null, "o nome deveria ser pedido pelo popup do host");
+        onEdtRun(() -> {
+            shown.get().setFieldText("Build Completo");
+            shown.get().answer(false);
+        });
+
+        await(() -> saved.get() != null);
+        assertEquals("Build Completo", saved.get().name());
+        assertEquals(List.of("clean", "install"), saved.get().goals());
+    }
+
+    @Test
+    void theToolTogglesReflectAndReportTheSavedOptions() throws Exception {
+        AtomicReference<BuildRunConfigurations.ToolOptions> saved = new AtomicReference<>(
+                new BuildRunConfigurations.ToolOptions(true, false));
+        BuildToolModel model = modelWithCommands("demo", "clean");
+        JavaBuildToolsPanel.Host host = new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+            }
+
+            @Override
+            public void cancel() {
+            }
+
+            @Override
+            public BuildRunConfigurations.ToolOptions toolOptions() {
+                return saved.get();
+            }
+
+            @Override
+            public void toolOptionsChanged(BuildRunConfigurations.ToolOptions options) {
+                saved.set(options);
+            }
+        };
+        JavaBuildToolsPanel panel = onEdt(() -> new JavaBuildToolsPanel(host));
+        TreeView<BuildToolModel.Node> tree = find(panel, TreeView.class);
+        await(() -> rootChildren(tree) == 1);
+        JToggleButton skipTests = onEdt(() -> findToggle(panel, "Skip Tests"));
+        JToggleButton offline = onEdt(() -> findToggle(panel, "Offline"));
+        await(() -> onEdtUnchecked(skipTests::isSelected));
+        assertTrue(!onEdt(offline::isSelected));
+
+        onEdtRun(offline::doClick);
+
+        assertEquals(new BuildRunConfigurations.ToolOptions(true, true), saved.get());
+    }
+
+    private static JavaBuildToolsPanel.Host debuggingHost(BuildToolModel model,
+                                                          AtomicReference<String> executed) {
+        return new JavaBuildToolsPanel.Host() {
+            @Override
+            public BuildToolModel load() {
+                return model;
+            }
+
+            @Override
+            public void execute(BuildToolModel.Node command) {
+                executed.set("execute:" + String.join(" ", command.command()));
+            }
+
+            @Override
+            public boolean supportsDebug() {
+                return true;
+            }
+
+            @Override
+            public void debugGoals(BuildToolModel.Node context, List<String> goals) {
+                executed.set("debugGoals:" + String.join(" ", goals));
+            }
+
+            @Override
+            public void cancel() {
+            }
+        };
+    }
+
+    private static JButton findButtonStartingWith(Container root, String prefix) {
+        if (root instanceof JButton button && button.getToolTipText() != null
+                && button.getToolTipText().startsWith(prefix)) {
+            return button;
+        }
+        for (Component component : root.getComponents()) {
+            if (component instanceof Container child) {
+                try {
+                    return findButtonStartingWith(child, prefix);
+                } catch (AssertionError ignored) {
+                }
+            }
+        }
+        throw new AssertionError("Button not found: " + prefix);
+    }
+
+    private static JToggleButton findToggle(Container root, String label) {
+        if (root instanceof JToggleButton toggle && label.equals(toggle.getText())) {
+            return toggle;
+        }
+        for (Component component : root.getComponents()) {
+            if (component instanceof Container child) {
+                try {
+                    return findToggle(child, label);
+                } catch (AssertionError ignored) {
+                }
+            }
+        }
+        throw new AssertionError("Toggle not found: " + label);
     }
 
     private static List<dtm.stools.component.tree.TreeNode<BuildToolModel.Node>> goalNodes(

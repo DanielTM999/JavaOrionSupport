@@ -169,6 +169,9 @@ public final class LspJsonRpcClient {
             IOException reason = new IOException("Language server encerrou a conexao");
             pending.values().forEach(future -> future.completeExceptionally(reason));
             pending.clear();
+            if (!closed) {
+                close();
+            }
         }
     }
 

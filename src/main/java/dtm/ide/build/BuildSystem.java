@@ -33,6 +33,10 @@ public interface BuildSystem {
         return resolveRuntimeClasspath(module);
     }
 
+    default Optional<String> resolveCompileClasspath(JavaModule module) {
+        return resolveRuntimeClasspath(module);
+    }
+
     default BuildResult refreshDependencies(JavaModule module, DependencyCoordinate dependency,
                                             Consumer<String> output) {
         return BuildResult.failed(name(), "Atualizacao forcada de dependencias nao suportada.");
@@ -43,6 +47,11 @@ public interface BuildSystem {
     default BuildResult executeToolCommand(JavaModule module, List<String> command,
                                            Consumer<String> output) {
         return BuildResult.failed(name(), "Comando de build nao suportado.");
+    }
+
+    default BuildResult executeToolCommand(JavaModule module, List<String> command,
+                                           BuildCommand.Options options, Consumer<String> output) {
+        return executeToolCommand(module, command, output);
     }
 
     /**

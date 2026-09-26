@@ -58,6 +58,23 @@ class JdtLsServiceTest {
         }
     }
 
+    @Test
+    void deletingASourceDoesNotReimportTheMavenProject() {
+        assertFalse(JdtLsService.affectsProjectStructure(Path.of("/p/src/main/java/a/App.java")));
+        assertTrue(JdtLsService.affectsProjectStructure(Path.of("/p/modulo/pom.xml")));
+        assertTrue(JdtLsService.affectsProjectStructure(Path.of("/p/src/test")));
+        assertFalse(JdtLsService.affectsProjectStructure(Path.of("/p/src/main/java/a/servico")));
+    }
+
+    @Test
+    void theCompletionCacheIsKeyedByTheTextBeforeTheWordBeingTyped() {
+        String text = "class A {\n    void m() { lista.st }\n}";
+
+        assertEquals("    void m() { lista.", JdtLsService.linePrefixAtWordStart(text, 1, 22));
+        assertEquals("    void m() { lista.", JdtLsService.linePrefixAtWordStart(text, 1, 21));
+        assertEquals("    void m() { ", JdtLsService.linePrefixAtWordStart(text, 1, 20));
+    }
+
     public static class IdleServer {
         public static void main(String[] args) throws Exception {
             System.out.print("R");
@@ -385,5 +402,31 @@ class JdtLsServiceTest {
         assertEquals(java.util.Map.of("line", 1, "character", 3), range.get("end"));
         assertEquals(2, change.get("rangeLength"));
         assertEquals("hree", change.get("text"));
+    }
+
+    @Test
+    void codeActionsOnlyCarryTheDiagnosticsOfTheRequestedLines() throws Exception {
+        ObjectMapper json = new ObjectMapper();
+        List<com.fasterxml.jackson.databind.JsonNode> diagnostics = List.of(
+                json.readTree("{\"message\":\"a\",\"range\":{\"start\":{\"line\":2,\"character\":0},"
+                        + "\"end\":{\"line\":2,\"character\":4}}}"),
+                json.readTree("{\"message\":\"b\",\"range\":{\"start\":{\"line\":5,\"character\":1},"
+                        + "\"end\":{\"line\":7,\"character\":2}}}"),
+                json.readTree("{\"message\":\"c\",\"range\":{\"start\":{\"line\":9,\"character\":0},"
+                        + "\"end\":{\"line\":9,\"character\":3}}}"));
+
+        List<String> onLineTwo = JdtLsService.diagnosticsIntersecting(diagnostics,
+                dtm.stools.component.panels.editor.code.api.Range.point(2, 3))
+                .stream().map(node -> node.path("message").asText()).toList();
+        List<String> insideTheSpan = JdtLsService.diagnosticsIntersecting(diagnostics,
+                dtm.stools.component.panels.editor.code.api.Range.point(6, 0))
+                .stream().map(node -> node.path("message").asText()).toList();
+        List<String> elsewhere = JdtLsService.diagnosticsIntersecting(diagnostics,
+                dtm.stools.component.panels.editor.code.api.Range.point(4, 0))
+                .stream().map(node -> node.path("message").asText()).toList();
+
+        assertEquals(List.of("a"), onLineTwo);
+        assertEquals(List.of("b"), insideTheSpan);
+        assertTrue(elsewhere.isEmpty());
     }
 }

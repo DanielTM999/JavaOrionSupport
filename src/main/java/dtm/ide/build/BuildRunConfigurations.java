@@ -8,7 +8,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
 
@@ -33,6 +32,15 @@ public final class BuildRunConfigurations {
 
     private static final String KEY_PREFIX = "buildRun.";
     private static final String KEY_ACTIVE_PROFILES = "buildProfiles";
+    private static final String KEY_SKIP_TESTS = "buildSkipTests";
+    private static final String KEY_OFFLINE = "buildOffline";
+
+    public record ToolOptions(boolean skipTests, boolean offline) {
+
+        public static ToolOptions none() {
+            return new ToolOptions(false, false);
+        }
+    }
 
     private final Path projectRoot;
 
@@ -63,7 +71,7 @@ public final class BuildRunConfigurations {
             return false;
         }
         Properties properties = load();
-        properties.setProperty(KEY_PREFIX + entry.name(), String.join(" ", entry.goals()));
+        properties.setProperty(KEY_PREFIX + entry.name(), BuildCommand.joinArguments(entry.goals()));
         return store(properties);
     }
 
@@ -105,15 +113,43 @@ public final class BuildRunConfigurations {
         return store(properties);
     }
 
-    public static List<String> splitGoals(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return List.of();
+    public ToolOptions toolOptions() {
+        Properties properties = load();
+        return new ToolOptions(Boolean.parseBoolean(properties.getProperty(KEY_SKIP_TESTS)),
+                Boolean.parseBoolean(properties.getProperty(KEY_OFFLINE)));
+    }
+
+    public boolean saveToolOptions(ToolOptions options) {
+        if (projectRoot == null) {
+            return false;
         }
+        ToolOptions resolved = options == null ? ToolOptions.none() : options;
+        Properties properties = load();
+        store(properties, KEY_SKIP_TESTS, resolved.skipTests());
+        store(properties, KEY_OFFLINE, resolved.offline());
+        return store(properties);
+    }
+
+    private static void store(Properties properties, String key, boolean value) {
+        if (value) {
+            properties.setProperty(key, Boolean.TRUE.toString());
+        } else {
+            properties.remove(key);
+        }
+    }
+
+    public static List<String> splitGoals(String raw) {
         List<String> goals = new ArrayList<>();
-        for (String part : raw.split("[,;\\s]+")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                goals.add(trimmed.toLowerCase(Locale.ROOT));
+        for (String token : BuildCommand.parseArguments(raw)) {
+            if (token.startsWith("-")) {
+                goals.add(token);
+                continue;
+            }
+            for (String part : token.split("[,;]+")) {
+                String trimmed = part.trim();
+                if (!trimmed.isEmpty()) {
+                    goals.add(trimmed);
+                }
             }
         }
         return List.copyOf(goals);

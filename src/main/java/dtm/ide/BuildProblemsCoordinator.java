@@ -6,16 +6,26 @@ import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 final class BuildProblemsCoordinator {
 
-    private final Map<Path, List<Diagnostic>> buildDiagnostics = new ConcurrentHashMap<>();
+    enum Channel {
+        BUILD,
+        TEST
+    }
+
+    private static final Set<String> COMPILER_SOURCES = Set.of("javac", "maven", "gradle", "ecj");
+
+    private final Map<Channel, List<BuildDiagnostic>> channels = new EnumMap<>(Channel.class);
     private final Map<Path, List<BuildDiagnostic>> liveProblems = new ConcurrentHashMap<>();
+    private volatile Map<Path, List<Diagnostic>> buildDiagnostics = Map.of();
     private volatile List<BuildDiagnostic> buildProblems = List.of();
 
     List<Diagnostic> diagnostics(Path file) {
@@ -45,26 +55,44 @@ final class BuildProblemsCoordinator {
     }
 
     Set<Path> replaceBuild(List<BuildDiagnostic> problems) {
+        return replace(Channel.BUILD, problems);
+    }
+
+    synchronized Set<Path> replace(Channel channel, List<BuildDiagnostic> problems) {
         Set<Path> affected = new LinkedHashSet<>(buildDiagnostics.keySet());
-        buildProblems = problems == null ? List.of() : List.copyOf(problems);
-        buildDiagnostics.clear();
-        BuildDiagnosticParser.byFile(buildProblems).forEach((file, diagnostics) ->
-                buildDiagnostics.put(file, diagnostics.stream()
-                        .map(BuildDiagnostic::toEditorDiagnostic)
-                        .toList()));
+        channels.put(channel, problems == null ? List.of() : List.copyOf(problems));
+        reindex();
         affected.addAll(buildDiagnostics.keySet());
         return affected;
     }
 
-    Set<Path> clearBuild() {
-        return replaceBuild(List.of());
+    synchronized Set<Path> clearBuild() {
+        Set<Path> affected = new LinkedHashSet<>(buildDiagnostics.keySet());
+        channels.clear();
+        reindex();
+        return affected;
     }
 
-    Set<Path> clearAll() {
+    synchronized boolean supersedeCompilerProblems(Path file) {
+        return removeMatching(problem -> file.equals(problem.file()) && isCompilerProblem(problem));
+    }
+
+    synchronized boolean supersedeAll(Path file) {
+        return removeMatching(problem -> file.equals(problem.file()));
+    }
+
+    static boolean isCompilerProblem(BuildDiagnostic problem) {
+        return problem.file() != null
+                && problem.file().getFileName() != null
+                && problem.file().getFileName().toString().endsWith(".java")
+                && COMPILER_SOURCES.contains(problem.source());
+    }
+
+    synchronized Set<Path> clearAll() {
         Set<Path> affected = paths();
-        buildDiagnostics.clear();
+        channels.clear();
         liveProblems.clear();
-        buildProblems = List.of();
+        reindex();
         return affected;
     }
 
@@ -72,15 +100,41 @@ final class BuildProblemsCoordinator {
         liveProblems.clear();
     }
 
-    void removeBelow(Path deleted) {
-        buildDiagnostics.keySet().removeIf(candidate -> candidate.startsWith(deleted));
+    synchronized void removeBelow(Path deleted) {
         liveProblems.keySet().removeIf(candidate -> candidate.startsWith(deleted));
-        List<BuildDiagnostic> retained = new ArrayList<>();
-        for (BuildDiagnostic problem : buildProblems) {
-            if (problem.file() == null || !problem.file().startsWith(deleted)) {
-                retained.add(problem);
+        removeMatching(problem -> problem.file() != null && problem.file().startsWith(deleted));
+    }
+
+    private boolean removeMatching(Predicate<BuildDiagnostic> matcher) {
+        boolean changed = false;
+        for (Map.Entry<Channel, List<BuildDiagnostic>> entry : channels.entrySet()) {
+            List<BuildDiagnostic> retained = new ArrayList<>(entry.getValue().size());
+            for (BuildDiagnostic problem : entry.getValue()) {
+                if (matcher.test(problem)) {
+                    changed = true;
+                } else {
+                    retained.add(problem);
+                }
             }
+            entry.setValue(List.copyOf(retained));
         }
-        buildProblems = List.copyOf(retained);
+        if (changed) {
+            reindex();
+        }
+        return changed;
+    }
+
+    private void reindex() {
+        List<BuildDiagnostic> all = new ArrayList<>();
+        for (Channel channel : Channel.values()) {
+            all.addAll(channels.getOrDefault(channel, List.of()));
+        }
+        Map<Path, List<Diagnostic>> index = new ConcurrentHashMap<>();
+        BuildDiagnosticParser.byFile(all).forEach((file, diagnostics) ->
+                index.put(file, diagnostics.stream()
+                        .map(BuildDiagnostic::toEditorDiagnostic)
+                        .toList()));
+        buildProblems = List.copyOf(all);
+        buildDiagnostics = index;
     }
 }

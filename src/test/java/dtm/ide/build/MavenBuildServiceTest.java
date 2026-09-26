@@ -102,6 +102,47 @@ class MavenBuildServiceTest {
 
         assertFalse(arguments.stream().anyMatch(argument -> argument.startsWith("-DmanualInclude=")));
     }
+    @Test
+    void aPersistedClasspathIsReusedUntilAPomChanges() throws Exception {
+        JavaModule module = rootModule();
+        java.nio.file.Files.writeString(root.resolve("pom.xml"), "<project/>");
+        Path jar = java.nio.file.Files.writeString(root.resolve("dependency.jar"), "jar");
+        MavenBuildService service = service(descriptor(module));
+        Path persisted = root.resolve(".orion/classpath/" + module.artifactId() + "-runtime.classpath");
+        java.nio.file.Files.createDirectories(persisted.getParent());
+        java.nio.file.Files.writeString(persisted,
+                service.persistentFingerprint(module, "runtime") + "\n" + jar + "\n");
+
+        assertEquals(java.util.Optional.of(module.outputDir() + java.io.File.pathSeparator + jar),
+                service.resolveRuntimeClasspath(module));
+
+        java.nio.file.Files.writeString(root.resolve("pom.xml"), "<project><!-- nova --></project>");
+        MavenBuildService afterPomChange = service(descriptor(module));
+
+        assertTrue(afterPomChange.resolveRuntimeClasspath(module).isEmpty());
+    }
+
+    @Test
+    void toolCommandOptionsReachTheMavenProcess() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win"));
+        java.nio.file.Files.writeString(executable(),
+                "@echo ARGS %*\r\n@echo OPTS %MAVEN_OPTS%\r\n");
+        MavenBuildService service = service(descriptor(rootModule()));
+        List<String> output = new java.util.ArrayList<>();
+
+        BuildResult result = service.executeToolCommand(null, List.of("exec:java"),
+                new BuildCommand.Options(List.of(), List.of("-DskipTests"), true,
+                        java.util.Map.of("MAVEN_OPTS", "-Dorion.debug=on")), output::add);
+
+        assertTrue(result.successful(), String.join("\n", output));
+        String args = output.stream().filter(line -> line.startsWith("ARGS")).findFirst().orElse("");
+        assertTrue(args.contains("exec:java"), args);
+        assertTrue(args.contains("-o"), args);
+        assertTrue(args.contains("-DskipTests"), args);
+        assertTrue(output.contains("OPTS -Dorion.debug=on"), String.join("\n", output));
+    }
+
     private MavenBuildService service(JavaProjectDescriptor descriptor) {
         BuildToolProvisioner provisioner = new BuildToolProvisioner(null, null) {
             @Override

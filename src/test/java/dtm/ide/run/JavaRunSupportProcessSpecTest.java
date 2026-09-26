@@ -188,6 +188,38 @@ class JavaRunSupportProcessSpecTest {
     }
 
     @Test
+    void debuggingAMavenConfigurationConnectsTheForkedApplicationBackToTheIde() {
+        spec(configuration(JavaRunTypes.MAVEN, Map.of(
+                JavaRunTypes.GOALS, "spring-boot:run")), 5123);
+
+        assertEquals(List.of("-Dspring-boot.run.jvmArguments="
+                        + "-agentlib:jdwp=transport=dt_socket,server=n,suspend=y,address=127.0.0.1:5123"),
+                build.lastOptions.extraArguments());
+    }
+
+    @Test
+    void debuggingAnInProcessMavenGoalUsesMavenOpts() {
+        spec(configuration(JavaRunTypes.MAVEN, Map.of(
+                JavaRunTypes.GOALS, "exec:java")), 5123);
+
+        assertTrue(build.lastOptions.environment().get("MAVEN_OPTS")
+                .endsWith("server=n,suspend=y,address=127.0.0.1:5123"));
+    }
+
+    @Test
+    void debuggingGradleTasksWithoutAJvmFailsClearly() {
+        JavaProjectDescriptor gradleProject = new JavaProjectDescriptor(root,
+                JavaProjectKind.GRADLE, descriptor.modules(), false, false, 21, null);
+        JavaRunSupport gradleSupport = new JavaRunSupport(() -> gradleProject, () -> jdk,
+                () -> build, line -> {
+                });
+
+        assertThrows(IllegalStateException.class, () -> gradleSupport.processSpec(
+                configuration(JavaRunTypes.GRADLE, Map.of(JavaRunTypes.TASKS, "dependencies")),
+                gradleProject, 5123));
+    }
+
+    @Test
     void buildToolConfigurationsRequireAtLeastOneTarget() {
         assertThrows(IllegalStateException.class,
                 () -> spec(configuration(JavaRunTypes.MAVEN, Map.of()), 0));

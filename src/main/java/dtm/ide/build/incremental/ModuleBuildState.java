@@ -16,11 +16,13 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 public final class ModuleBuildState {
 
-    public static final String FORMAT_VERSION = "3";
+    public static final String FORMAT_VERSION = "4";
 
     private static final String HEADER = "#orion-incremental";
     private static final String FIELD_SEPARATOR = "\t";
@@ -40,8 +42,12 @@ public final class ModuleBuildState {
     }
 
     private record Entry(long modified, long size, String hash, List<String> types,
-                         List<String> references) {
+                         List<String> references, String packageName, List<String> imports) {
     }
+
+    private static final Pattern PACKAGE = Pattern.compile("\\bpackage\\s+([\\w$.]+)\\s*;");
+    private static final Pattern IMPORT = Pattern.compile(
+            "\\bimport\\s+(?:static\\s+)?([\\w$]+(?:\\s*\\.\\s*[\\w$]+)*(?:\\s*\\.\\s*\\*)?)\\s*;");
 
     private final Path stateFile;
     private final Map<String, Entry> entries = new LinkedHashMap<>();
@@ -52,6 +58,7 @@ public final class ModuleBuildState {
 
     private String fingerprint = "";
     private boolean loaded;
+    private boolean dirty;
 
     private ModuleBuildState(Path stateFile) {
         this.stateFile = stateFile;
@@ -116,7 +123,7 @@ public final class ModuleBuildState {
             Entry entry = entries.get(key);
             if (entry == null) {
                 added.add(source);
-            } else if (isStale(entry, source)) {
+            } else if (isStale(key, entry, source)) {
                 modified.add(source);
             }
         }
@@ -129,38 +136,112 @@ public final class ModuleBuildState {
         return new Changes(List.copyOf(added), List.copyOf(modified), List.copyOf(deleted));
     }
 
-    private static boolean isStale(Entry entry, Path source) {
+    private boolean isStale(String key, Entry entry, Path source) {
         try {
             long modified = Files.getLastModifiedTime(source).toMillis();
             long size = Files.size(source);
             if (entry.modified() == modified && entry.size() == size) {
                 return false;
             }
-            return !entry.hash().equals(hashOf(Files.readAllBytes(source)));
+            if (!entry.hash().equals(hashOf(Files.readAllBytes(source)))) {
+                return true;
+            }
+            entries.put(key, new Entry(modified, size, entry.hash(), entry.types(),
+                    entry.references(), entry.packageName(), entry.imports()));
+            dirty = true;
+            return false;
         } catch (Exception e) {
             return true;
         }
     }
 
-    public Set<Path> dependentsOf(Path moduleRoot, Set<String> types) {
-        if (types.isEmpty()) {
+    public boolean isDirty() {
+        return dirty;
+    }
+
+    public Set<Path> dependentsOf(Path moduleRoot, Set<String> qualifiedTypes) {
+        if (qualifiedTypes.isEmpty()) {
             return Set.of();
+        }
+        Map<String, Set<String>> packagesBySimpleName = new LinkedHashMap<>();
+        for (String qualified : qualifiedTypes) {
+            int dot = qualified.lastIndexOf('.');
+            String simple = dot < 0 ? qualified : qualified.substring(dot + 1);
+            String packageName = dot < 0 ? "" : qualified.substring(0, dot);
+            packagesBySimpleName.computeIfAbsent(simple, ignored -> new LinkedHashSet<>())
+                    .add(packageName);
         }
         Set<Path> dependents = new LinkedHashSet<>();
         for (Map.Entry<String, Entry> entry : entries.entrySet()) {
-            for (String reference : entry.getValue().references()) {
-                if (types.contains(reference)) {
-                    dependents.add(moduleRoot.resolve(entry.getKey()));
-                    break;
-                }
+            Path file = moduleRoot.resolve(entry.getKey());
+            if (dependsOnAny(entry.getValue(), file, packagesBySimpleName)) {
+                dependents.add(file);
             }
         }
         return dependents;
     }
 
+    private static boolean dependsOnAny(Entry entry, Path file,
+                                        Map<String, Set<String>> packagesBySimpleName) {
+        for (String reference : entry.references()) {
+            Set<String> packages = packagesBySimpleName.get(reference);
+            if (packages == null) {
+                continue;
+            }
+            for (String packageName : packages) {
+                if (resolvesTo(entry, file, reference, packageName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static boolean resolvesTo(Entry entry, Path file, String simpleName, String packageName) {
+        String qualified = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
+        for (String imported : entry.imports()) {
+            if (imported.equals(qualified) || imported.startsWith(qualified + ".")) {
+                return true;
+            }
+        }
+        for (String imported : entry.imports()) {
+            if (!imported.endsWith(".*") && imported.endsWith("." + simpleName)) {
+                return false;
+            }
+        }
+        if (entry.packageName().equals(packageName)) {
+            return true;
+        }
+        if (!packageName.isEmpty() && entry.imports().contains(packageName + ".*")) {
+            return true;
+        }
+        return !packageName.isEmpty() && mentions(file, qualified);
+    }
+
+    private static boolean mentions(Path file, String qualified) {
+        try {
+            return JavaLexicalSource.mask(Files.readString(file)).replaceAll("\\s+", "")
+                    .contains(qualified);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
     public Set<String> typesOf(Path moduleRoot, Path source) {
         Entry entry = entries.get(key(moduleRoot, source));
         return entry == null ? Set.of() : new LinkedHashSet<>(entry.types());
+    }
+
+    public Set<String> qualifiedTypesOf(Path moduleRoot, Path source) {
+        Entry entry = entries.get(key(moduleRoot, source));
+        if (entry == null) {
+            return Set.of();
+        }
+        Set<String> qualified = new LinkedHashSet<>();
+        for (String type : entry.types()) {
+            qualified.add(entry.packageName().isEmpty() ? type : entry.packageName() + "." + type);
+        }
+        return qualified;
     }
 
     public int size() {
@@ -171,12 +252,16 @@ public final class ModuleBuildState {
         try {
             byte[] bytes = Files.readAllBytes(source);
             String content = new String(bytes, StandardCharsets.UTF_8);
+            String masked = JavaLexicalSource.mask(content);
             entries.put(key(moduleRoot, source), new Entry(
                     Files.getLastModifiedTime(source).toMillis(),
                     bytes.length,
                     hashOf(bytes),
                     typesDeclaredIn(content),
-                    typeReferencesIn(content)));
+                    typeReferencesIn(content),
+                    packageOf(masked),
+                    importsOf(masked)));
+            dirty = true;
         } catch (Exception e) {
             log.debug("Nao foi possivel registrar {}: {}", source, e.getMessage());
         }
@@ -203,7 +288,9 @@ public final class ModuleBuildState {
                         .append(value.size()).append(FIELD_SEPARATOR)
                         .append(value.hash()).append(FIELD_SEPARATOR)
                         .append(String.join(VALUE_SEPARATOR, value.types())).append(FIELD_SEPARATOR)
-                        .append(String.join(VALUE_SEPARATOR, value.references()))
+                        .append(String.join(VALUE_SEPARATOR, value.references())).append(FIELD_SEPARATOR)
+                        .append(value.packageName()).append(FIELD_SEPARATOR)
+                        .append(String.join(VALUE_SEPARATOR, value.imports()))
                         .append(System.lineSeparator());
             }
             Path temporary = stateFile.resolveSibling(stateFile.getFileName() + ".tmp");
@@ -214,6 +301,7 @@ public final class ModuleBuildState {
             } catch (AtomicMoveNotSupportedException e) {
                 Files.move(temporary, stateFile, StandardCopyOption.REPLACE_EXISTING);
             }
+            dirty = false;
         } catch (Exception e) {
             log.debug("Nao foi possivel gravar {}: {}", stateFile, e.getMessage());
         }
@@ -251,12 +339,13 @@ public final class ModuleBuildState {
             resourcesFingerprint = lines.get(5);
             for (String line : lines.subList(6, lines.size())) {
                 String[] fields = line.split(FIELD_SEPARATOR, -1);
-                if (fields.length < 6) {
+                if (fields.length < 8) {
                     continue;
                 }
                 entries.put(fields[0], new Entry(Long.parseLong(fields[1]),
                         Long.parseLong(fields[2]), fields[3],
-                        splitValues(fields[4]), splitValues(fields[5])));
+                        splitValues(fields[4]), splitValues(fields[5]),
+                        fields[6], splitValues(fields[7])));
             }
             loaded = true;
         } catch (Exception e) {
@@ -299,6 +388,29 @@ public final class ModuleBuildState {
             }
         }
         return List.copyOf(names);
+    }
+
+    static String packageOf(String maskedContent) {
+        Matcher matcher = PACKAGE.matcher(maskedContent);
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    static List<String> importsOf(String maskedContent) {
+        Set<String> imports = new LinkedHashSet<>();
+        Matcher matcher = IMPORT.matcher(maskedContent);
+        while (matcher.find()) {
+            imports.add(matcher.group(1).replaceAll("\\s+", ""));
+        }
+        return List.copyOf(imports);
+    }
+
+    static List<String> topLevelQualifiedTypesDeclaredIn(String content) {
+        String packageName = packageOf(JavaLexicalSource.mask(content));
+        List<String> qualified = new ArrayList<>();
+        for (String type : topLevelTypesDeclaredIn(content)) {
+            qualified.add(packageName.isEmpty() ? type : packageName + "." + type);
+        }
+        return qualified;
     }
 
     static List<String> typeReferencesIn(String content) {

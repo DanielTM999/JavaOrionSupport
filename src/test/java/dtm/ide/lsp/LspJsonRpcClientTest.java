@@ -117,6 +117,25 @@ class LspJsonRpcClientTest {
         serverOutput.close();
     }
 
+    @Test
+    void aServerThatClosesItsPipeMarksTheClientClosed() throws Exception {
+        PipedInputStream clientInput = new PipedInputStream();
+        PipedOutputStream serverOutput = new PipedOutputStream(clientInput);
+        LspJsonRpcClient client = new LspJsonRpcClient(clientInput, new ByteArrayOutputStream(),
+                "lsp-eof-test");
+        var pending = client.request("textDocument/hover", Map.of());
+
+        serverOutput.close();
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!client.isClosed() && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertTrue(client.isClosed());
+        assertTrue(pending.isCompletedExceptionally());
+        assertTrue(client.request("textDocument/hover", Map.of()).isCompletedExceptionally());
+    }
+
     private static String awaitOutput(ByteArrayOutputStream output, String expected) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
         String value;

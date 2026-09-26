@@ -217,19 +217,35 @@ public final class GradleBuildService implements BuildSystem {
     @Override
     public BuildResult executeToolCommand(JavaModule module, List<String> tasks,
                                           Consumer<String> output) {
+        return executeToolCommand(module, tasks, BuildCommand.Options.none(), output);
+    }
+
+    @Override
+    public BuildResult executeToolCommand(JavaModule module, List<String> tasks,
+                                          BuildCommand.Options options, Consumer<String> output) {
+        BuildCommand.Options resolved = options == null ? BuildCommand.Options.none() : options;
         List<String> command = new ArrayList<>(baseCommand());
         if (tasks != null) {
-            tasks.forEach(task -> command.add(module == null ? task : taskPath(module, task)));
+            tasks.forEach(task -> command.add(module == null || task.startsWith("-")
+                    ? task : taskPath(module, task)));
+        }
+        if (resolved.offline()) {
+            command.add("--offline");
+        }
+        for (String profile : resolved.profiles()) {
+            command.add("-P" + profile);
         }
         for (String profile : activeProfiles()) {
             command.add("-P" + profile);
         }
+        command.addAll(resolved.extraArguments());
+        Map<String, String> environment = environmentFor(BuildRequest.of(BuildAction.COMPILE, module));
+        environment.putAll(resolved.environment());
         Instant start = Instant.now();
         BuildDiagnosticParser parser = new BuildDiagnosticParser(descriptor.root());
         emit(output, "> " + String.join(" ", command));
         AtomicBoolean successMarker = new AtomicBoolean();
-        int exit = runner.run(command, descriptor.root(), environmentFor(
-                BuildRequest.of(BuildAction.COMPILE, module)), line -> {
+        int exit = runner.run(command, descriptor.root(), environment, line -> {
             parser.accept(line);
             if (line.contains("BUILD SUCCESSFUL")) {
                 successMarker.set(true);

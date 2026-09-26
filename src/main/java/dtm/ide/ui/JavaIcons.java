@@ -71,6 +71,18 @@ public final class JavaIcons {
         return colored("/imgs/java-debug.svg", size, UiTokens.info());
     }
 
+    public static Icon rerun(int size) {
+        return colored("/imgs/java-rerun.svg", size, UiTokens.success());
+    }
+
+    public static Icon expand(int size) {
+        return tinted("/imgs/java-expand.svg", size);
+    }
+
+    public static Icon collapse(int size) {
+        return tinted("/imgs/java-collapse.svg", size);
+    }
+
     public static Icon sync(int size) {
         return colored("/imgs/java-sync.svg", size, UiTokens.primary());
     }

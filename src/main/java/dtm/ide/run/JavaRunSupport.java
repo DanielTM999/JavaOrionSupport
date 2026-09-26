@@ -8,6 +8,7 @@ import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.incremental.IncrementalJavaBuilder;
 import dtm.ide.build.BuildSystem;
+import dtm.ide.build.BuildToolDebug;
 import dtm.ide.run.chain.RunChainExecutor;
 import dtm.ide.run.chain.RunChainHost;
 import dtm.ide.run.chain.RunChainStep;
@@ -199,7 +200,7 @@ public class JavaRunSupport {
         return switch (type) {
             case JavaRunTypes.JAR -> jarSpec(configuration, descriptor, debugPort);
             case JavaRunTypes.MAVEN, JavaRunTypes.GRADLE ->
-                    buildToolSpec(configuration, descriptor);
+                    buildToolSpec(configuration, descriptor, debugPort);
             case JavaRunTypes.TEST -> testSpec(configuration, descriptor, debugPort);
             default -> buildCommand(configuration, descriptor,
                     RunJdkResolver.resolve(propertiesOf(configuration), jdkSupplier),
@@ -297,7 +298,7 @@ public class JavaRunSupport {
     // --- Maven e Gradle ------------------------------------------------------
 
     private ProcessSpec buildToolSpec(RunConfigurationData configuration,
-                                      JavaProjectDescriptor descriptor) {
+                                      JavaProjectDescriptor descriptor, int listenPort) {
         boolean gradle = JavaRunTypes.GRADLE.equals(configuration.getType());
         List<String> goals = splitArguments(property(configuration,
                 gradle ? JavaRunTypes.TASKS : JavaRunTypes.GOALS));
@@ -306,7 +307,7 @@ public class JavaRunSupport {
                     ? text("error.tasksRequired", "Informe ao menos uma task Gradle.")
                     : text("error.goalsRequired", "Informe ao menos um objetivo Maven."));
         }
-        return toolProcess(configuration, descriptor, goals, List.of());
+        return toolProcess(configuration, descriptor, goals, List.of(), listenPort);
     }
 
     // --- Testes --------------------------------------------------------------
@@ -322,7 +323,7 @@ public class JavaRunSupport {
         if (debugPort > 0) {
             extra.addAll(testDebugArguments(gradle, debugPort));
         }
-        return toolProcess(configuration, descriptor, List.of("test"), extra);
+        return toolProcess(configuration, descriptor, List.of("test"), extra, 0);
     }
 
     /**
@@ -355,7 +356,8 @@ public class JavaRunSupport {
 
     private ProcessSpec toolProcess(RunConfigurationData configuration,
                                     JavaProjectDescriptor descriptor,
-                                    List<String> goals, List<String> extraArguments) {
+                                    List<String> goals, List<String> extraArguments,
+                                    int listenPort) {
         BuildSystem build = buildSupplier.get();
         if (build == null) {
             throw new IllegalStateException(text("error.noBuildTool",
@@ -370,6 +372,19 @@ public class JavaRunSupport {
         Map<String, String> environment = new LinkedHashMap<>(
                 customEnvironment(configuration));
         environment.put("JAVA_HOME", jdk.home().toString());
+        if (listenPort > 0) {
+            Map<String, String> inherited = new LinkedHashMap<>(System.getenv());
+            inherited.putAll(environment);
+            BuildToolDebug.Plan plan = descriptor.isGradle()
+                    ? BuildToolDebug.gradle(goals, arguments, listenPort)
+                    : BuildToolDebug.maven(goals, arguments, listenPort, inherited);
+            if (!plan.debuggable()) {
+                throw new IllegalStateException(text("error.noDebuggableJvm",
+                        "Nenhuma JVM depuravel nessas tasks (use run, bootRun ou test)."));
+            }
+            arguments.addAll(plan.arguments());
+            environment.putAll(plan.environment());
+        }
 
         BuildCommand.Options options = new BuildCommand.Options(
                 splitList(property(configuration, JavaRunTypes.PROFILES)),
@@ -581,36 +596,7 @@ public class JavaRunSupport {
     }
 
     static List<String> splitArguments(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return List.of();
-        }
-        List<String> arguments = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        char quote = 0;
-
-        for (int i = 0; i < raw.length(); i++) {
-            char c = raw.charAt(i);
-            if (quote != 0) {
-                if (c == quote) {
-                    quote = 0;
-                } else {
-                    current.append(c);
-                }
-            } else if (c == '"' || c == '\'') {
-                quote = c;
-            } else if (Character.isWhitespace(c)) {
-                if (!current.isEmpty()) {
-                    arguments.add(current.toString());
-                    current.setLength(0);
-                }
-            } else {
-                current.append(c);
-            }
-        }
-        if (!current.isEmpty()) {
-            arguments.add(current.toString());
-        }
-        return arguments;
+        return new ArrayList<>(BuildCommand.parseArguments(raw));
     }
 
     static List<String> splitList(String raw) {
