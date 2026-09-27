@@ -3,7 +3,10 @@ package dtm.ide.debug;
 import com.fasterxml.jackson.databind.JsonNode;
 import dtm.ide.api.extension.runconfig.RunBreakpointData;
 import dtm.ide.api.project.editor.BreakpointIde;
+import lombok.extern.slf4j.Slf4j;
 
+import java.net.URI;
+import java.nio.file.FileSystemNotFoundException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -11,17 +14,23 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+@Slf4j
 public final class JavaDebugSession implements AutoCloseable, DebuggerCompletionSource {
 
     private static final long REQUEST_TIMEOUT_SECONDS = 10;
+    private static final long INITIALIZE_TIMEOUT_SECONDS = 30;
+    private static final long SETUP_TIMEOUT_SECONDS = 120;
     private static final long COMPLETION_TIMEOUT_MILLIS = 1_500;
+    private static final int STACK_DEPTH = 50;
 
     public record BreakpointSpec(String condition, String hitCondition, String logMessage) {
 
@@ -88,6 +97,7 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
     private volatile int selectedFrameId;
     private volatile int selectedThreadId;
     private volatile boolean completionsSupported;
+    private volatile String projectName;
 
     public JavaDebugSession(int adapterPort, int jdwpPort, Path projectRoot,
                             List<RunBreakpointData> initialBreakpoints,
@@ -117,12 +127,17 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
         seedBreakpoints(initialBreakpoints);
     }
 
+    public JavaDebugSession projectName(String name) {
+        projectName = name == null || name.isBlank() ? null : name.trim();
+        return this;
+    }
+
     public void start() throws Exception {
         publish(JavaDebugSnapshot.starting("Connecting to Java debugger..."));
         DapClient connected = connectWithRetry();
         client = connected;
         connected.setEventListener(this::onEvent);
-        JsonNode capabilities = request("initialize", Map.of(
+        JsonNode capabilities = connected.request("initialize", Map.of(
                 "adapterID", "java",
                 "clientID", "orion-java",
                 "clientName", "Orion IDE",
@@ -130,7 +145,8 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
                 "columnsStartAt1", true,
                 "pathFormat", "path",
                 "supportsVariableType", true,
-                "supportsRunInTerminalRequest", false));
+                "supportsRunInTerminalRequest", false))
+                .get(INITIALIZE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         completionsSupported = capabilities != null
                 && capabilities.path("supportsCompletionsRequest").asBoolean(false);
 
@@ -139,15 +155,37 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
         attach.put("hostName", attachTarget.host());
         attach.put("port", attachTarget.port());
         attach.put("timeout", attachTarget.timeoutMillis());
+        String project = projectName;
+        if (project != null && !project.isBlank()) {
+            attach.put("projectName", project);
+        }
+        AtomicReference<Throwable> attachFailure = new AtomicReference<>();
+        AtomicBoolean awaiting = new AtomicBoolean(true);
         connected.request("attach", attach).whenComplete((body, error) -> {
-            if (error != null && !closed.get()) {
+            if (error == null) {
+                return;
+            }
+            attachFailure.set(error);
+            initialized.countDown();
+            if (!awaiting.get() && !closed.get()) {
                 fail(error);
             }
         });
 
         long awaitSeconds = Math.max(5, attachTarget.timeoutMillis() / 1000);
-        if (!initialized.await(awaitSeconds, TimeUnit.SECONDS)) {
+        boolean ready = initialized.await(awaitSeconds, TimeUnit.SECONDS);
+        awaiting.set(false);
+        if (!ready) {
             throw new IllegalStateException("Java debugger did not initialize in time");
+        }
+        Throwable failure = attachFailure.get();
+        if (failure != null) {
+            Throwable cause = failure instanceof CompletionException && failure.getCause() != null
+                    ? failure.getCause() : failure;
+            if (cause instanceof Exception exception) {
+                throw exception;
+            }
+            throw new IllegalStateException(cause.getMessage(), cause);
         }
         configure();
     }
@@ -173,7 +211,7 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
                 threadId = threads.isEmpty() ? 0 : threads.getFirst().id();
                 selectedThreadId = threadId;
             } catch (Exception error) {
-                fail(error);
+                warn(error);
                 return;
             }
         }
@@ -223,7 +261,7 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
         CompletableFuture.runAsync(() -> {
             try {
                 List<JavaDebugSnapshot.StackFrame> frames = parseFrames(request("stackTrace", Map.of(
-                        "threadId", threadId, "startFrame", 0, "levels", 100))
+                        "threadId", threadId, "startFrame", 0, "levels", STACK_DEPTH))
                         .path("stackFrames"));
                 List<JavaDebugSnapshot.Scope> scopes = frames.isEmpty() ? List.of()
                         : loadFrameScopes(frames.getFirst().id());
@@ -234,7 +272,7 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
                 publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.PAUSED, "Paused", threadId,
                         snapshot.threads(), frames, values, scopes));
             } catch (Exception error) {
-                fail(error);
+                warn(error);
             }
         }, executor);
     }
@@ -271,10 +309,11 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
     private void configure() throws Exception {
         for (Map.Entry<Path, Map<Integer, BreakpointSpec>> entry : breakpoints.entrySet()) {
             sendBreakpoints(entry.getKey(), entry.getValue()).get(
-                    REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    SETUP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         }
-        request("setExceptionBreakpoints", Map.of("filters", List.of("uncaught")));
-        request("configurationDone", Map.of());
+        client.request("setExceptionBreakpoints", Map.of("filters", List.of("uncaught")))
+                .get(SETUP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        client.request("configurationDone", Map.of()).get(SETUP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         configured.set(true);
         publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.RUNNING, "Running", 0,
                 List.of(), List.of(), List.of()));
@@ -308,12 +347,23 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
         if (current == null || closed.get()) {
             return;
         }
+        JavaDebugSnapshot before = snapshot;
+        boolean resumes = !"pause".equals(command);
+        if (resumes) {
+            publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.RUNNING, "Running", 0,
+                    before.threads(), List.of(), List.of()));
+        }
         current.request(command, arguments).whenComplete((body, error) -> {
-            if (error != null) {
-                fail(error);
-            } else if (!"pause".equals(command)) {
-                publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.RUNNING, "Running", 0,
-                        snapshot.threads(), List.of(), List.of()));
+            if (error == null) {
+                return;
+            }
+            if (resumes && snapshot.state() == JavaDebugSnapshot.State.RUNNING) {
+                String message = messageOf(error);
+                log.warn("Comando {} do depurador Java falhou: {}", command, message);
+                publish(new JavaDebugSnapshot(before.state(), message, before.threadId(),
+                        before.threads(), before.frames(), before.variables(), before.scopes()));
+            } else {
+                warn(error);
             }
         });
     }
@@ -325,9 +375,12 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
                     "exception".equals(body.path("reason").asText()));
             case "continued" -> publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.RUNNING,
                     "Running", 0, snapshot.threads(), List.of(), List.of()));
-            case "terminated", "exited" -> publish(new JavaDebugSnapshot(
-                    JavaDebugSnapshot.State.TERMINATED, "Debug session finished", 0,
-                    List.of(), List.of(), List.of()));
+            case "terminated", "exited" -> {
+                if (snapshot.state() != JavaDebugSnapshot.State.ERROR) {
+                    publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.TERMINATED,
+                            "Debug session finished", 0, List.of(), List.of(), List.of()));
+                }
+            }
             case "output" -> listener.accept(new JavaDebugSnapshot(snapshot.state(),
                     body.path("output").asText(), snapshot.threadId(), snapshot.threads(),
                     snapshot.frames(), snapshot.variables(), snapshot.scopes()));
@@ -351,7 +404,7 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
                         : threads.isEmpty() ? 0 : threads.getFirst().id();
                 List<JavaDebugSnapshot.StackFrame> frames = threadId <= 0 ? List.of()
                         : parseFrames(request("stackTrace", Map.of(
-                                "threadId", threadId, "startFrame", 0, "levels", 100))
+                                "threadId", threadId, "startFrame", 0, "levels", STACK_DEPTH))
                                 .path("stackFrames"));
                 List<JavaDebugSnapshot.Scope> scopes = frames.isEmpty() ? List.of()
                         : loadFrameScopes(frames.getFirst().id());
@@ -373,7 +426,10 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
                 publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.PAUSED, reason, threadId,
                         threads, frames, variables, scopes));
             } catch (Exception error) {
-                fail(error);
+                log.warn("Falha ao carregar o estado pausado do depurador Java", error);
+                selectedThreadId = eventThreadId;
+                publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.PAUSED, messageOf(error),
+                        eventThreadId, List.of(), List.of(), List.of()));
             }
         }, executor);
     }
@@ -508,12 +564,31 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
     private static List<JavaDebugSnapshot.StackFrame> parseFrames(JsonNode nodes) {
         List<JavaDebugSnapshot.StackFrame> values = new ArrayList<>();
         nodes.forEach(node -> {
-            String source = node.path("source").path("path").asText("");
+            String raw = node.path("source").path("path").asText("");
+            Path source = sourcePath(raw);
             values.add(new JavaDebugSnapshot.StackFrame(node.path("id").asInt(),
-                    node.path("name").asText("Frame"), source.isBlank() ? null : Path.of(source),
+                    node.path("name").asText("Frame"), source,
+                    source == null && raw.regionMatches(true, 0, "jdt://", 0, 6) ? raw : null,
                     Math.max(1, node.path("line").asInt(1))));
         });
         return List.copyOf(values);
+    }
+
+    static Path sourcePath(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            if (value.regionMatches(true, 0, "file:", 0, 5)) {
+                return Path.of(URI.create(value));
+            }
+            if (value.matches("^[A-Za-z][A-Za-z0-9+.-]+:/.*")) {
+                return null;
+            }
+            return Path.of(value);
+        } catch (IllegalArgumentException | FileSystemNotFoundException invalid) {
+            return null;
+        }
     }
 
     private static List<JavaDebugSnapshot.Variable> parseVariables(JsonNode nodes) {
@@ -533,10 +608,25 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
     }
 
     private void fail(Throwable error) {
-        String message = error == null || error.getMessage() == null
-                ? "Java debugger failed" : error.getMessage();
+        String message = messageOf(error);
+        log.warn("Sessao de debug Java falhou: {}", message);
         publish(new JavaDebugSnapshot(JavaDebugSnapshot.State.ERROR, message, 0,
                 snapshot.threads(), snapshot.frames(), snapshot.variables()));
+    }
+
+    private void warn(Throwable error) {
+        String message = messageOf(error);
+        log.warn("Requisicao ao depurador Java falhou: {}", message);
+        JavaDebugSnapshot current = snapshot;
+        publish(new JavaDebugSnapshot(current.state(), message, current.threadId(),
+                current.threads(), current.frames(), current.variables(), current.scopes()));
+    }
+
+    private static String messageOf(Throwable error) {
+        Throwable cause = error instanceof CompletionException && error.getCause() != null
+                ? error.getCause() : error;
+        return cause == null || cause.getMessage() == null
+                ? "Java debugger failed" : cause.getMessage();
     }
 
     @Override

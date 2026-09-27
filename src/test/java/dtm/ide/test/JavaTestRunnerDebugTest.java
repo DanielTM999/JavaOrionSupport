@@ -16,6 +16,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaTestRunnerDebugTest {
@@ -33,9 +34,25 @@ class JavaTestRunnerDebugTest {
                 61234, line -> {
                 });
 
-        assertTrue(build.request.get().extraArguments().stream()
-                .anyMatch(value -> value.contains("address=*:61234")));
+        assertTrue(build.request.get().extraArguments().contains(
+                "-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,server=n,suspend=y,"
+                        + "address=127.0.0.1:61234"));
         assertTrue(build.request.get().extraArguments().contains("-DforkCount=1"));
+    }
+
+    @Test
+    void cancelledRunNeverStartsTheBuildTool() throws Exception {
+        Files.writeString(root.resolve("pom.xml"),
+                "<project><groupId>x</groupId><artifactId>x</artifactId></project>");
+        JavaProjectDescriptor descriptor = JavaProjectConventions.describe(root);
+        CapturingBuild build = new CapturingBuild();
+        JavaTestRunner runner = new JavaTestRunner(descriptor, build);
+
+        runner.cancel();
+        runner.debug(List.of(), descriptor.rootModule(), 61234, line -> {
+        });
+
+        assertNull(build.request.get());
     }
 
     private static final class CapturingBuild implements BuildSystem {

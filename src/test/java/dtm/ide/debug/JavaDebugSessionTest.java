@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -19,6 +20,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaDebugSessionTest {
@@ -54,6 +58,31 @@ class JavaDebugSessionTest {
             assertEquals("value > 3", sent.path("condition").asText());
             assertTrue(session.snapshot().state() == JavaDebugSnapshot.State.RUNNING);
             session.close();
+        }
+    }
+
+    @Test
+    void attachCarriesTheProjectNameSoTheDebuggerCanEvaluateExpressions() throws Exception {
+        assertEquals("consulta", attachArguments("consulta", 51008).path("projectName").asText());
+        assertTrue(attachArguments(null, 51009).path("projectName").isMissingNode());
+    }
+
+    private JsonNode attachArguments(String projectName, int jdwpPort) throws Exception {
+        try (ServerSocket server = new ServerSocket(0)) {
+            CompletableFuture<List<JsonNode>> captured = new CompletableFuture<>();
+            Thread adapter = new Thread(() -> serve(server, captured));
+            adapter.setDaemon(true);
+            adapter.start();
+            JavaDebugSession session = new JavaDebugSession(server.getLocalPort(), jdwpPort,
+                    root, List.of(), value -> {
+                    }).projectName(projectName);
+
+            session.start();
+            JsonNode attach = captured.get(2, TimeUnit.SECONDS).stream()
+                    .filter(request -> "attach".equals(request.path("command").asText()))
+                    .findFirst().orElseThrow().path("arguments");
+            session.close();
+            return attach;
         }
     }
 
@@ -138,6 +167,178 @@ class JavaDebugSessionTest {
             assertEquals("pause", pause.path("command").asText());
             assertEquals(77, pause.path("arguments").path("threadId").asInt());
             session.close();
+        }
+    }
+
+    @Test
+    void sourcePathIgnoresJdtUrisAndAcceptsFileUrisAndPlainPaths() {
+        Path file = root.resolve("Demo.java").toAbsolutePath();
+
+        assertNull(JavaDebugSession.sourcePath(
+                "jdt://contents/java.base/java.lang.reflect/Method.class?=jdk/java.lang.reflect.Method"));
+        assertNull(JavaDebugSession.sourcePath(""));
+        assertEquals(file, JavaDebugSession.sourcePath(file.toString()));
+        assertEquals(file, JavaDebugSession.sourcePath(file.toUri().toString()));
+    }
+
+    @Test
+    void pausesWhenTheStackContainsFramesFromJars() throws Exception {
+        try (ServerSocket server = new ServerSocket(0)) {
+            Path source = root.resolve("DemoTest.java").toAbsolutePath();
+            Thread adapter = new Thread(() -> servePausedWithJarFrame(server, source));
+            adapter.setDaemon(true);
+            adapter.start();
+            JavaDebugSession session = new JavaDebugSession(server.getLocalPort(), 51006,
+                    root, List.of(), value -> {
+                    });
+
+            session.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (session.snapshot().state() != JavaDebugSnapshot.State.PAUSED
+                    && session.snapshot().state() != JavaDebugSnapshot.State.ERROR
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+
+            JavaDebugSnapshot paused = session.snapshot();
+            assertEquals(JavaDebugSnapshot.State.PAUSED, paused.state());
+            assertEquals(2, paused.frames().size());
+            assertEquals(source, paused.frames().get(0).source());
+            assertFalse(paused.frames().get(0).hasLibrarySource());
+            assertNull(paused.frames().get(1).source());
+            assertTrue(paused.frames().get(1).hasLibrarySource());
+            assertEquals("jdt://contents/java.base/java.lang.reflect/Method.class?=jdk",
+                    paused.frames().get(1).sourceUri());
+            session.close();
+        }
+    }
+
+    @Test
+    void failedStepRestoresThePausedStateInsteadOfLeavingItRunning() throws Exception {
+        try (ServerSocket server = new ServerSocket(0)) {
+            Path source = root.resolve("DemoTest.java").toAbsolutePath();
+            Thread adapter = new Thread(() -> servePausedWithJarFrame(server, source));
+            adapter.setDaemon(true);
+            adapter.start();
+            List<JavaDebugSnapshot.State> states = new java.util.concurrent.CopyOnWriteArrayList<>();
+            JavaDebugSession session = new JavaDebugSession(server.getLocalPort(), 51007,
+                    root, List.of(), value -> states.add(value.state()));
+
+            session.start();
+            awaitState(session, JavaDebugSnapshot.State.PAUSED);
+            states.clear();
+            session.stepIn();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (!session.snapshot().message().contains("not suspended")
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+
+            assertEquals(JavaDebugSnapshot.State.RUNNING, states.getFirst());
+            assertEquals(JavaDebugSnapshot.State.PAUSED, session.snapshot().state());
+            assertEquals(2, session.snapshot().frames().size());
+            assertTrue(session.snapshot().message().contains("not suspended"));
+            session.close();
+        }
+    }
+
+    @Test
+    void variableValuesAreCappedSoTheUiNeverRendersHugeStrings() {
+        JavaDebugSnapshot.Variable huge = new JavaDebugSnapshot.Variable("config",
+                "x".repeat(50_000), "Config", 0);
+
+        assertEquals(JavaDebugSnapshot.Variable.MAX_VALUE_LENGTH + 1, huge.value().length());
+        assertTrue(huge.value().endsWith("…"));
+    }
+
+    private static void awaitState(JavaDebugSession session, JavaDebugSnapshot.State state)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (session.snapshot().state() != state && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertEquals(state, session.snapshot().state());
+    }
+
+    private static void servePausedWithJarFrame(ServerSocket server, Path source) {
+        try (Socket socket = server.accept()) {
+            BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
+            BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream());
+            int sequence = 1;
+            while (true) {
+                JsonNode request = read(input);
+                String command = request.path("command").asText();
+                String body = switch (command) {
+                    case "threads" -> "{\"threads\":[{\"id\":1,\"name\":\"main\"}]}";
+                    case "stackTrace" -> "{\"stackFrames\":[{\"id\":11,\"name\":\"test\",\"line\":113,"
+                            + "\"source\":{\"path\":" + JSON.writeValueAsString(source.toString()) + "}},"
+                            + "{\"id\":12,\"name\":\"invoke\",\"line\":580,\"source\":{\"path\":"
+                            + "\"jdt://contents/java.base/java.lang.reflect/Method.class?=jdk\"}}]}";
+                    case "scopes" -> "{\"scopes\":[]}";
+                    default -> "{}";
+                };
+                if ("stepIn".equals(command)) {
+                    write(output, """
+                            {"seq":%d,"type":"response","request_seq":%d,"command":"stepIn","success":false,"message":"Failed to step because the thread 'main' is not suspended in the target VM."}
+                            """.formatted(sequence++, request.path("seq").asInt()));
+                    continue;
+                }
+                write(output, """
+                        {"seq":%d,"type":"response","request_seq":%d,"command":"%s","success":true,"body":%s}
+                        """.formatted(sequence++, request.path("seq").asInt(), command, body));
+                if ("attach".equals(command)) {
+                    write(output, """
+                            {"seq":90,"type":"event","event":"initialized","body":{}}
+                            """);
+                }
+                if ("configurationDone".equals(command)) {
+                    write(output, """
+                            {"seq":91,"type":"event","event":"stopped","body":{"reason":"breakpoint","threadId":1}}
+                            """);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Test
+    void attachFailureSurfacesTheAdapterMessageWithoutWaitingForTheTimeout() throws Exception {
+        try (ServerSocket server = new ServerSocket(0)) {
+            Thread adapter = new Thread(() -> serveFailingAttach(server));
+            adapter.setDaemon(true);
+            adapter.start();
+            JavaDebugSession session = new JavaDebugSession(server.getLocalPort(), 51005,
+                    root, List.of(), value -> {
+                    });
+
+            long started = System.nanoTime();
+            IOException error = assertThrows(IOException.class, session::start);
+
+            assertEquals("Failed to attach: Connection refused", error.getMessage());
+            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5));
+            session.close();
+        }
+    }
+
+    private static void serveFailingAttach(ServerSocket server) {
+        try (Socket socket = server.accept()) {
+            BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
+            BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream());
+            int sequence = 1;
+            while (true) {
+                JsonNode request = read(input);
+                String command = request.path("command").asText();
+                if ("attach".equals(command)) {
+                    write(output, """
+                            {"seq":%d,"type":"response","request_seq":%d,"command":"attach","success":false,"message":"Failed to attach: Connection refused"}
+                            """.formatted(sequence++, request.path("seq").asInt()));
+                } else {
+                    write(output, """
+                            {"seq":%d,"type":"response","request_seq":%d,"command":"%s","success":true,"body":{}}
+                            """.formatted(sequence++, request.path("seq").asInt(), command));
+                }
+            }
+        } catch (Exception ignored) {
         }
     }
 

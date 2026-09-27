@@ -17,6 +17,7 @@ import java.util.function.Consumer;
 public final class ProcessRunner {
 
     private final AtomicReference<Process> current = new AtomicReference<>();
+    private volatile boolean cancelled;
 
     public int run(List<String> command, Path workingDirectory, Map<String, String> environment,
                    Consumer<String> output) {
@@ -41,6 +42,11 @@ public final class ProcessRunner {
             return -1;
         }
         current.set(process);
+        if (cancelled) {
+            current.compareAndSet(process, null);
+            terminate(process);
+            return -1;
+        }
 
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
@@ -62,6 +68,7 @@ public final class ProcessRunner {
     }
 
     public void cancel() {
+        cancelled = true;
         Process process = current.getAndSet(null);
         if (process == null || !process.isAlive()) {
             return;

@@ -557,6 +557,7 @@ public final class IncrementalJavaBuilder {
             command.add(generated.toString());
             command.add("-encoding");
             command.add("UTF-8");
+            command.add("-g");
             command.add("-proc:full");
             command.add("-implicit:none");
             command.add("-nowarn");

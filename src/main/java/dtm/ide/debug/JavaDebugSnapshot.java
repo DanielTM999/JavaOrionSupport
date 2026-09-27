@@ -19,7 +19,15 @@ public record JavaDebugSnapshot(
     public record ThreadInfo(int id, String name) {
     }
 
-    public record StackFrame(int id, String name, Path source, int line) {
+    public record StackFrame(int id, String name, Path source, String sourceUri, int line) {
+
+        public StackFrame(int id, String name, Path source, int line) {
+            this(id, name, source, null, line);
+        }
+
+        public boolean hasLibrarySource() {
+            return source == null && sourceUri != null && !sourceUri.isBlank();
+        }
     }
 
     public record Scope(String name, int variablesReference, List<Variable> variables) {
@@ -31,6 +39,15 @@ public record JavaDebugSnapshot(
 
     public record Variable(String name, String value, String type, String evaluateName,
                            int variablesReference, int namedVariables, int indexedVariables) {
+
+        public static final int MAX_VALUE_LENGTH = 2_000;
+
+        public Variable {
+            if (value != null && value.length() > MAX_VALUE_LENGTH) {
+                value = value.substring(0, MAX_VALUE_LENGTH) + "…";
+            }
+        }
+
         public Variable(String name, String value, String type, int variablesReference) {
             this(name, value, type, name, variablesReference, 0, 0);
         }

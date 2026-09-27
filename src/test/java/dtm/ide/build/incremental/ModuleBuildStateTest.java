@@ -31,6 +31,23 @@ class ModuleBuildStateTest {
     }
 
     @Test
+    void stateSavedByAnOlderFormatIsNotReusedSoClassesGetRecompiledWithDebugInfo() throws Exception {
+        Path lojista = source("Lojista.java", "package a; public class Lojista {}");
+        ModuleBuildState saved = ModuleBuildState.load(stateFile());
+        saved.reset("fp");
+        saved.record(root, lojista);
+        saved.save();
+        assertTrue(ModuleBuildState.load(stateFile()).isUsable("fp"));
+
+        String content = Files.readString(stateFile(), StandardCharsets.UTF_8);
+        Files.writeString(stateFile(), content.replaceFirst(
+                "#orion-incremental " + ModuleBuildState.FORMAT_VERSION, "#orion-incremental 4"),
+                StandardCharsets.UTF_8);
+
+        assertFalse(ModuleBuildState.load(stateFile()).isUsable("fp"));
+    }
+
+    @Test
     void recordedSourcesStopBeingReportedAsChanged() {
         Path lojista = source("Lojista.java", "package a; public class Lojista {}");
         ModuleBuildState state = ModuleBuildState.load(stateFile());

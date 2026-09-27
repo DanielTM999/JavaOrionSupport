@@ -83,6 +83,7 @@ import dtm.ide.coverage.CoverageReadResult;
 import dtm.ide.coverage.CoverageStore;
 import dtm.ide.coverage.FileCoverage;
 import dtm.ide.coverage.JacocoExecReader;
+import dtm.ide.concurrent.EdtStallWatchdog;
 import dtm.ide.concurrent.PluginTaskExecutor;
 import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.deps.DependencyService;
@@ -278,6 +279,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.HashMap;
@@ -337,6 +339,8 @@ public class JavaIdeAdapter extends IdeAdapter {
             "volatile", "while", "true", "false", "null", "_");
     private static final String BUILD_PROGRESS_ID = "javaBuild";
     private static final String RUN_BUILD_PROGRESS_ID = "javaRunBuild";
+    private static final String TEST_DEBUG_PROGRESS_ID = "javaTestDebugBuild";
+    private static final long LSP_DEBUG_POLL_MS = 250;
     private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
     private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
     private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
@@ -448,12 +452,19 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicReference<BuildProgressTracker> runBuildProgress = new AtomicReference<>();
     private final AtomicReference<IncrementalJavaBuilder> startupBuilder = new AtomicReference<>();
     private final AtomicReference<JavaTestRunner> activeTestRunner = new AtomicReference<>();
+    private final AtomicReference<Runnable> pendingTestDebug = new AtomicReference<>();
     private volatile JavaDebugSession debugSession;
     private volatile JavaDebugPanel debugPanel;
     private volatile String debugPanelId;
     private volatile JavaHotReloadService hotReloadService;
     private volatile IdeEditorContext debugLineContext;
     private volatile int debugLine = -1;
+    private final Map<String, String> debugLibrarySources = new ConcurrentHashMap<>();
+    private volatile CodeEditor debugLibraryEditor;
+    private volatile String debugLibraryUri;
+    private volatile int debugLibraryLine = -1;
+    private final EdtStallWatchdog debugEdtWatchdog = new EdtStallWatchdog("depuracao Java");
+    private final AtomicLong debugStartGeneration = new AtomicLong();
     private volatile JavaModule debugModule;
     private volatile Runnable debuggeeTerminator;
     private volatile JdwpRelay debugRelay;
@@ -2235,15 +2246,21 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onHover(IdeHoverContext context) {
-        long ticket = debugHoverTicket.incrementAndGet();
-        if (!isDebugPaused() || context == null || context.text() == null
-                || !JavaProjectConventions.isJava(context.filePath())) {
+        if (!isDebugPaused()) {
+            debugHoverTicket.incrementAndGet();
             hideDebugValuePopup();
             return;
         }
-        String expression = safeDebugExpression(context.text(), context.offset());
+        String expression = context == null || context.text() == null
+                || !JavaProjectConventions.isJava(context.filePath())
+                ? null : safeDebugExpression(context.text(), context.offset());
+        JavaDebugValuePopup popup = debugValuePopup();
+        if (expression != null && popup.isShowing(expression)) {
+            return;
+        }
+        long ticket = debugHoverTicket.incrementAndGet();
         if (expression == null) {
-            hideDebugValuePopup();
+            popup.requestHide();
             return;
         }
         Point location = pointerLocation();
@@ -2253,12 +2270,13 @@ public class JavaIdeAdapter extends IdeAdapter {
                 JavaDebugSnapshot.Variable value = session == null ? null
                         : session.evaluate(expression, 0);
                 if (ticket == debugHoverTicket.get() && isDebugPaused() && value != null) {
-                    debugValuePopup().show(value, location);
+                    popup.show(value, location, expression);
                 }
             } catch (Exception error) {
-                log.debug("Falha ao avaliar valor sob o cursor durante a depuracao", error);
+                log.debug("Valor sob o cursor indisponivel para '{}': {}", expression,
+                        rootMessage(error));
                 if (ticket == debugHoverTicket.get()) {
-                    hideDebugValuePopup();
+                    popup.requestHide();
                 }
             }
         });
@@ -2658,7 +2676,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private void runTestFromLens(JavaTest test, boolean debug) {
         SwingUtilities.invokeLater(() -> {
             ensureTestPanel();
-            if (testPanelId != null) {
+            if (testPanelId != null && !debug) {
                 requestOpenToolPanel(testPanelId);
             }
             if (testPanel != null) {
@@ -2849,7 +2867,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         });
     }
 
-    private void openClassFileEditor(String uri, String source, int line, int col) {
+    private CodeEditor openClassFileEditor(String uri, String source, int line, int col) {
         String fileName = JavaClassFileNavigation.sourceFileName(uri);
         String tabKey = JavaClassFileNavigation.tabKey(uri);
         closeCenterTab(tabKey);
@@ -2859,7 +2877,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (editor == null) {
             setStatusBarText(text("status.decompileFailed",
                     "Java: nao foi possivel abrir a fonte da dependencia"));
-            return;
+            return null;
         }
         editor.setReadOnly(true);
         editor.setSearchEnabled(true);
@@ -2876,6 +2894,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         });
         openCenterTab(tabKey, fileName + " [dependency]", editor, true);
         editor.setCaretPosition(Math.max(0, line), Math.max(0, col));
+        return editor;
     }
 
     private void applyClassFileEditorProviders(CodeEditor editor, String uri, String fileName) {
@@ -4387,15 +4406,15 @@ public class JavaIdeAdapter extends IdeAdapter {
             return false;
         });
         bindDebugShortcut(context, "F5", "java.debug.continue",
-                () -> withDebugSession(JavaDebugSession::continueExecution));
+                () -> withPausedDebugSession(JavaDebugSession::continueExecution));
         bindDebugShortcut(context, "F6", "java.debug.pause",
                 () -> withDebugSession(JavaDebugSession::pause));
         bindDebugShortcut(context, "F10", "java.debug.stepOver",
-                () -> withDebugSession(JavaDebugSession::next));
+                () -> withPausedDebugSession(JavaDebugSession::next));
         bindDebugShortcut(context, "F11", "java.debug.stepInto",
-                () -> withDebugSession(JavaDebugSession::stepIn));
+                () -> withPausedDebugSession(JavaDebugSession::stepIn));
         bindDebugShortcut(context, "shift F11", "java.debug.stepOut",
-                () -> withDebugSession(JavaDebugSession::stepOut));
+                () -> withPausedDebugSession(JavaDebugSession::stepOut));
         bindDebugShortcut(context, "shift F5", "java.debug.stop", this::closeDebugSession);
         bindDebugShortcut(context, "control F5", "java.debug.hotReload", this::runHotReload);
     }
@@ -5758,6 +5777,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (debugContext.getBreakpoints() == null || debugContext.getBreakpoints().isEmpty()) {
             debugContext.setBreakpoints(requestWorkspaceBreakpoints());
         }
+        warmUpDebugAdapter();
         int jdwpPort = DebugPorts.allocate();
         JavaModule targetModule = resolveDebugModule(resolved);
         RunProcessHandle handle = launchWithBuildProgress(resolved,
@@ -5827,6 +5847,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private RunProcessHandle launchBuildToolDebug(RunConfigurationData configuration,
                                                   RunExecutionContext context) {
+        warmUpDebugAdapter();
         JavaModule targetModule = resolveDebugModule(configuration);
         AtomicReference<RunProcessHandle> launched = new AtomicReference<>();
         BuildToolDebugListener listener;
@@ -5866,10 +5887,19 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private BuildToolDebugListener openBuildDebugListener(JavaModule targetModule,
                                                           Runnable cancelProcess) throws IOException {
-        return BuildToolDebugListener.open((target, detached) -> startDebugSession(target,
-                        debugContextOf(null),
-                        () -> detached.accept(!naturalDebugEnd.getAndSet(false)),
-                        targetModule, null),
+        return openBuildDebugListener(targetModule, cancelProcess, () -> {
+        });
+    }
+
+    private BuildToolDebugListener openBuildDebugListener(JavaModule targetModule,
+                                                          Runnable cancelProcess,
+                                                          Runnable onAttach) throws IOException {
+        return BuildToolDebugListener.open((target, detached) -> {
+                    onAttach.run();
+                    startDebugSession(target, debugContextOf(null),
+                            () -> detached.accept(!naturalDebugEnd.getAndSet(false)),
+                            targetModule, null);
+                },
                 cancelProcess, background);
     }
 
@@ -6035,6 +6065,20 @@ public class JavaIdeAdapter extends IdeAdapter {
         return MainClassScanner.inspect(file, source, module, test);
     }
 
+    static JavaModule mostSpecificModule(Collection<JavaModule> modules, Path file) {
+        if (modules == null || file == null) {
+            return null;
+        }
+        return modules.stream()
+                .filter(module -> !module.isAggregator() && module.contains(file))
+                .max(Comparator.comparingInt(module -> module.root().getNameCount()))
+                .orElse(null);
+    }
+
+    static String debugProjectName(JavaModule module) {
+        return module == null || module.isAggregator() ? null : module.artifactId();
+    }
+
     private static JavaModule moduleContaining(JavaProjectDescriptor descriptor, Path file,
                                                boolean testRoots) {
         return descriptor.modules().stream()
@@ -6059,11 +6103,41 @@ public class JavaIdeAdapter extends IdeAdapter {
                 targetModule, processHandle);
     }
 
+    private boolean awaitLanguageServerForDebug(JdtLsService lsp, long generation)
+            throws InterruptedException {
+        boolean announced = false;
+        while (!lsp.isWorkspaceSettled()) {
+            if (generation != debugStartGeneration.get()) {
+                return false;
+            }
+            if (lsp.getState() == JdtLsService.State.ERROR) {
+                throw new IllegalStateException(text("debug.lspFailed",
+                        "O IntelliSense Java falhou; reinicie-o para depurar."));
+            }
+            if (!announced) {
+                announced = true;
+                publishDebugSnapshot(JavaDebugSnapshot.starting(text("debug.waitingLsp",
+                        "Aguardando o IntelliSense Java terminar de carregar o projeto...")));
+            }
+            Thread.sleep(LSP_DEBUG_POLL_MS);
+        }
+        return generation == debugStartGeneration.get();
+    }
+
+    private void warmUpDebugAdapter() {
+        JdtLsService lsp = jdtLs;
+        if (lsp != null) {
+            background.submit(lsp::prepareDebugAdapter);
+        }
+    }
+
     private void startDebugSession(JavaAttachTarget attachTarget, RunExecutionContext context,
                                    Runnable terminateDebuggee, JavaModule targetModule,
                                    RunProcessHandle processHandle) {
         closeDebugSession();
         debugActive.set(true);
+        requestSetRunButtonRunning(true);
+        debugEdtWatchdog.start();
         debuggeeTerminator = terminateDebuggee;
         debugProcessHandle = processHandle;
         debugSteppedFiles.clear();
@@ -6076,10 +6150,14 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         requestSetHotReloadButtonVisible(true);
         requestSetHotReloadButtonEnabled(false);
+        long generation = debugStartGeneration.get();
         background.submit(() -> {
             try {
                 JdtLsService lsp = ensureLanguageServer();
-                if (!lsp.awaitReady(120_000) || !lsp.isDebugAdapterAvailable()) {
+                if (!awaitLanguageServerForDebug(lsp, generation)) {
+                    return;
+                }
+                if (!lsp.isDebugAdapterAvailable()) {
                     throw new IllegalStateException("O servidor de debug Java nao esta disponivel. Reinicie o IntelliSense Java.");
                 }
                 int adapterPort = lsp.startDebugSession();
@@ -6088,10 +6166,12 @@ public class JavaIdeAdapter extends IdeAdapter {
                 }
                 JavaDebugSession session = new JavaDebugSession(adapterPort, attachTarget,
                         projectRoot, context.getBreakpoints(), this::publishDebugSnapshot,
-                        background);
+                        background)
+                        .projectName(debugProjectName(targetModule));
                 debugSession = session;
                 session.start();
             } catch (Exception error) {
+                log.warn("Falha ao iniciar a sessao de debug Java", error);
                 terminateDebuggee();
                 publishDebugSnapshot(new JavaDebugSnapshot(JavaDebugSnapshot.State.ERROR,
                         rootMessage(error), 0, List.of(), List.of(), List.of()));
@@ -6124,6 +6204,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 && snapshot.state() != JavaDebugSnapshot.State.ERROR;
         if (!active) {
             debugActive.set(false);
+            debugEdtWatchdog.stop();
             debugSession = null;
             debugProcessHandle = null;
             closeDebugRelay();
@@ -6137,6 +6218,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         if (!active) {
             repaintDebugBreakpointLines();
+            forgetDebugLibrarySources();
         }
         // JAR externo e Remote JVM nao tem classes locais confiaveis para recarregar.
         boolean hotReloadable = active && supportsHotReloadForSelection();
@@ -6194,6 +6276,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
 
         @Override
+        public void openLibrarySource(String uri, int line) {
+            highlightDebugLibraryLine(uri, line);
+        }
+
+        @Override
         public JavaDebugSnapshot.Variable evaluate(String expression, int frameId) throws Exception {
             JavaDebugSession session = debugSession;
             return session == null ? null : session.evaluate(expression, frameId);
@@ -6235,11 +6322,19 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
+    private void withPausedDebugSession(java.util.function.Consumer<JavaDebugSession> action) {
+        if (isDebugPaused()) {
+            withDebugSession(action);
+        }
+    }
+
     private void closeDebugSession() {
+        debugStartGeneration.incrementAndGet();
         closeDebugRelay();
         JavaDebugSession session = debugSession;
         debugSession = null;
         debugActive.set(false);
+        debugEdtWatchdog.stop();
         debugModule = null;
         debugProcessHandle = null;
         debugHoverTicket.incrementAndGet();
@@ -6247,7 +6342,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (session != null) {
             background.submit(session::close);
         }
-        terminateDebuggee();
+        Runnable terminator = takeDebuggeeTerminator();
+        if (terminator != null) {
+            background.submit(() -> runDebuggeeTerminator(terminator));
+        }
         requestSetRunButtonRunning(hasRunningProcess());
         requestSetHotReloadButtonEnabled(false);
         requestSetHotReloadButtonVisible(false);
@@ -6256,15 +6354,24 @@ public class JavaIdeAdapter extends IdeAdapter {
         repaintDebugBreakpointLines();
     }
 
-    private synchronized void terminateDebuggee() {
+    private void terminateDebuggee() {
+        runDebuggeeTerminator(takeDebuggeeTerminator());
+    }
+
+    private synchronized Runnable takeDebuggeeTerminator() {
         Runnable terminator = debuggeeTerminator;
         debuggeeTerminator = null;
-        if (terminator != null) {
-            try {
-                terminator.run();
-            } catch (RuntimeException error) {
-                log.debug("Falha ao finalizar processo Java: {}", error.getMessage());
-            }
+        return terminator;
+    }
+
+    private void runDebuggeeTerminator(Runnable terminator) {
+        if (terminator == null) {
+            return;
+        }
+        try {
+            terminator.run();
+        } catch (RuntimeException error) {
+            log.debug("Falha ao finalizar processo Java: {}", error.getMessage());
         }
     }
 
@@ -6428,6 +6535,74 @@ public class JavaIdeAdapter extends IdeAdapter {
                 requestRepaintCodeEditor(editor.filePath());
             }
         }
+        CodeEditor library = debugLibraryEditor;
+        int libraryLine = debugLibraryLine;
+        debugLibraryLine = -1;
+        if (library != null && libraryLine >= 0) {
+            library.removeLineColor(libraryLine);
+            library.repaint();
+        }
+    }
+
+    private void highlightDebugLibraryLine(String uri, int line) {
+        JdtLsService lsp = jdtLs;
+        if (uri == null || lsp == null) {
+            return;
+        }
+        long ticket = debugLineTicket.incrementAndGet();
+        int editorLine = Math.max(0, line - 1);
+        String cached = debugLibrarySources.get(uri);
+        if (cached != null) {
+            SwingUtilities.invokeLater(() -> showDebugLibraryLine(uri, cached, editorLine, ticket));
+            return;
+        }
+        SwingUtilities.invokeLater(() -> showProgress(NAVIGATION_PROGRESS_ID,
+                text("progress.decompiling", "Java: abrindo fonte da dependencia...")));
+        background.submit(() -> {
+            String source = lsp.classFileContents(uri);
+            if (source != null && !source.isBlank()) {
+                debugLibrarySources.put(uri, source);
+            }
+            SwingUtilities.invokeLater(() -> {
+                hideProgress(NAVIGATION_PROGRESS_ID);
+                if (source == null || source.isBlank()) {
+                    setStatusBarText(text("status.decompileFailed",
+                            "Java: nao foi possivel obter a fonte da dependencia"));
+                    return;
+                }
+                showDebugLibraryLine(uri, source, editorLine, ticket);
+            });
+        });
+    }
+
+    private void showDebugLibraryLine(String uri, String source, int line, long ticket) {
+        if (ticket != debugLineTicket.get() || !isDebugPaused()) {
+            return;
+        }
+        clearDebugPositionNow();
+        CodeEditor editor = debugLibraryEditor;
+        int[] target = clampPosition(source, line, 0);
+        if (editor == null || !uri.equals(debugLibraryUri) || !editor.isShowing()) {
+            editor = openClassFileEditor(uri, source, target[0], 0);
+            if (editor == null) {
+                return;
+            }
+            debugLibraryEditor = editor;
+            debugLibraryUri = uri;
+        }
+        editor.setCaretPosition(target[0], 0);
+        editor.setPriorityLineColor(target[0], DEBUG_LINE_COLOR);
+        editor.repaint();
+        debugLibraryLine = target[0];
+    }
+
+    private void forgetDebugLibrarySources() {
+        debugLibrarySources.clear();
+        SwingUtilities.invokeLater(() -> {
+            clearDebugPositionNow();
+            debugLibraryEditor = null;
+            debugLibraryUri = null;
+        });
     }
 
     private void repaintDebugBreakpointLines() {
@@ -6439,6 +6614,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void stop(RunConfigurationData configuration) {
         RunProcessHandle process = runningProcess(configuration);
+        Runnable pendingTest = process == null ? pendingTestDebug.getAndSet(null) : null;
+        if (pendingTest != null) {
+            pendingTest.run();
+        }
         if (process != null && process == debugProcessHandle
                 && (debugSession != null || debugActive.get())) {
             closeDebugSession();
@@ -7333,22 +7512,55 @@ public class JavaIdeAdapter extends IdeAdapter {
                 panel.show();
             }
             requestShowRunOutput();
-            int jdwpPort = DebugPorts.allocate();
+            Runnable previous = pendingTestDebug.getAndSet(null);
+            if (previous != null) {
+                previous.run();
+            }
             JavaModule targetModule = moduleOf(tests, current);
-            RunExecutionContext context = RunExecutionContext.builder()
-                    .projectPath(projectRoot)
-                    .debug(true)
-                    .breakpoints(requestWorkspaceBreakpoints())
-                    .build();
+            JavaModule sourceModule = tests == null || tests.isEmpty() ? null
+                    : mostSpecificModule(current.modules(), tests.getFirst().file());
+            JavaTestRunner runner = newTestRunner(current, build);
+            BuildToolDebugListener listener;
+            try {
+                listener = openBuildDebugListener(
+                        sourceModule == null ? targetModule : sourceModule, runner::cancel,
+                        () -> hideProgress(TEST_DEBUG_PROGRESS_ID));
+            } catch (IOException error) {
+                String message = text("error.buildDebugListen",
+                        "Nao foi possivel abrir a porta de debug:") + " " + rootMessage(error);
+                writeOutput(panel, message);
+                setStatusBarText("Java Debug: " + message);
+                onFinished.accept(null);
+                return;
+            }
+            Runnable abort = () -> {
+                listener.close();
+                runner.cancel();
+            };
+            pendingTestDebug.set(abort);
+            showProgress(TEST_DEBUG_PROGRESS_ID, text("progress.testDebugBuild",
+                    "Compilando testes para depurar"), true, abort);
+            requestSetRunButtonLoading(true);
+            warmUpDebugAdapter();
             background.submit(() -> {
-                JavaTestRunner runner = newTestRunner(current, build);
-                JavaTestRunner.TestRun run = runner.debug(tests, targetModule, jdwpPort,
-                        line -> writeOutput(panel, line));
-                publishTestDiagnostics(JavaTestProblems.withTestFailures(run, tests));
-                setStatusBarText("Java: " + run.summary());
-                onFinished.accept(run);
+                try {
+                    JavaTestRunner.TestRun run = runner.debug(tests, targetModule,
+                            listener.listenPort(), line -> writeOutput(panel, line));
+                    if (runner.isCancelled()) {
+                        setStatusBarText(text("status.testDebugStopped",
+                                "Java: depuracao de teste interrompida"));
+                    } else {
+                        publishTestDiagnostics(JavaTestProblems.withTestFailures(run, tests));
+                        setStatusBarText("Java: " + run.summary());
+                    }
+                    onFinished.accept(run);
+                } finally {
+                    listener.close();
+                    pendingTestDebug.compareAndSet(abort, null);
+                    hideProgress(TEST_DEBUG_PROGRESS_ID);
+                    requestSetRunButtonRunning(hasRunningProcess() || debugActive.get());
+                }
             });
-            startDebugSession(jdwpPort, context, this::cancel, targetModule);
         }
 
         private JavaModule moduleOf(List<JavaTest> tests, JavaProjectDescriptor current) {

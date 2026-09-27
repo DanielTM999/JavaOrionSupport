@@ -194,6 +194,7 @@ class IncrementalJavaBuilderTest {
         assertTrue(command.contains(lojista.toString()));
         assertTrue(command.contains(service.toString()));
         assertTrue(command.contains("-proc:full"));
+        assertTrue(command.contains("-g"));
         assertTrue(command.contains("-implicit:none"));
         assertTrue(command.contains(module().outputDir().toString()));
         assertTrue(command.contains(build.classpath));

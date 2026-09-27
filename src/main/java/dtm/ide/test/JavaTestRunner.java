@@ -3,6 +3,7 @@ package dtm.ide.test;
 import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
+import dtm.ide.build.BuildToolDebug;
 import dtm.ide.build.incremental.IncrementalJavaBuilder;
 import dtm.ide.coverage.CoverageAgent;
 import dtm.ide.project.JavaModule;
@@ -95,6 +96,10 @@ public class JavaTestRunner {
         return found;
     }
 
+    public boolean isCancelled() {
+        return cancelled;
+    }
+
     public void cancel() {
         cancelled = true;
         IncrementalJavaBuilder builder = activeBuilder;
@@ -147,7 +152,7 @@ public class JavaTestRunner {
         } finally {
             activeBuilder = null;
         }
-        if (!build.successful()) {
+        if (!build.successful() || cancelled) {
             return Optional.of(new TestRun(build, List.of()));
         }
         Path reports = module.root().resolve(REPORTS_DIR);
@@ -191,6 +196,9 @@ public class JavaTestRunner {
                 }
             }
         }
+        if (cancelled) {
+            return new TestRun(null, List.of());
+        }
 
         BuildResult result = buildSystem.execute(
                 BuildRequest.of(BuildSystem.BuildAction.TEST, resolved)
@@ -210,6 +218,9 @@ public class JavaTestRunner {
         Optional<TestRun> fast = runOnPlatform(tests, target, List.of(), output);
         if (fast.isPresent()) {
             return fast.get();
+        }
+        if (cancelled) {
+            return new TestRun(null, List.of());
         }
 
         BuildRequest request = BuildRequest.of(BuildSystem.BuildAction.TEST, target)
@@ -250,6 +261,9 @@ public class JavaTestRunner {
                 List.of(CoverageAgent.agentArgument(agentJar, execFile, false)), output);
         if (fast.isPresent()) {
             return new CoverageRun(fast.get(), execFile);
+        }
+        if (cancelled) {
+            return new CoverageRun(null, null);
         }
 
         List<String> arguments = new ArrayList<>(selectorArguments(tests));
@@ -302,40 +316,29 @@ public class JavaTestRunner {
         }
     }
 
-    public TestRun debug(List<JavaTest> tests, JavaModule module, int debugPort,
+    public TestRun debug(List<JavaTest> tests, JavaModule module, int listenPort,
                          Consumer<String> output) {
-        if (buildSystem == null || descriptor == null || debugPort <= 0) {
+        if (buildSystem == null || descriptor == null || listenPort <= 0) {
             return new TestRun(null, List.of());
         }
         JavaModule target = module == null ? descriptor.rootModule() : module;
         Path reportRoot = target == null ? descriptor.root() : target.root();
         SurefireReportParser.clearReports(reportRoot);
-        Optional<TestRun> fast = runOnPlatform(tests, target, List.of(
-                "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:" + debugPort), output);
+        String agent = BuildToolDebug.listenAgent(listenPort);
+        Optional<TestRun> fast = runOnPlatform(tests, target, List.of(agent), output);
         if (fast.isPresent()) {
             return fast.get();
         }
+        if (cancelled) {
+            return new TestRun(null, List.of());
+        }
         List<String> arguments = new ArrayList<>(selectorArguments(tests));
-        Path initScript = null;
         try {
             if (descriptor.isGradle()) {
-                initScript = Files.createTempFile("orion-gradle-test-debug", ".gradle");
-                String agent = "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:%d"
-                        .formatted(debugPort);
-                Files.writeString(initScript, """
-                        allprojects {
-                            tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
-                                maxParallelForks = 1
-                                jvmArgs '%s'
-                            }
-                        }
-                        """.formatted(agent));
-                arguments.add("--init-script");
-                arguments.add(initScript.toString());
+                arguments.addAll(BuildToolDebug.gradleTestDebugArguments(agent));
             } else {
                 arguments.add("-DforkCount=1");
-                arguments.add("-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,"
-                        + "server=y,suspend=y,address=*:%d".formatted(debugPort));
+                arguments.add("-Dmaven.surefire.debug=" + agent);
             }
             BuildResult result = buildSystem.execute(
                     BuildRequest.of(BuildSystem.BuildAction.TEST, target).withArguments(arguments),
@@ -347,13 +350,6 @@ public class JavaTestRunner {
                         : error.getMessage());
             }
             return new TestRun(null, List.of());
-        } finally {
-            if (initScript != null) {
-                try {
-                    Files.deleteIfExists(initScript);
-                } catch (Exception ignored) {
-                }
-            }
         }
     }
 

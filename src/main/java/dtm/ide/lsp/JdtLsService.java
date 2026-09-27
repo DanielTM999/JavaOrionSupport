@@ -125,6 +125,8 @@ public class JdtLsService {
     }
 
     private static final long REQUEST_TIMEOUT_MS = 4_000;
+    private static final int DEBUG_MAX_STRING_LENGTH = 1_000;
+    private static final long DEBUG_ADAPTER_TIMEOUT_MS = 60_000;
     private static final long INTERACTIVE_TIMEOUT_MS = 800;
     private static final long INDEXING_INTERACTIVE_TIMEOUT_MS = 2_000;
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
@@ -236,6 +238,8 @@ public class JdtLsService {
     private volatile Path launchedLombokAgentJar;
     private volatile boolean springSupport;
     private volatile boolean debugBundleLoaded;
+    private final Object debugAdapterLock = new Object();
+    private volatile LspJsonRpcClient debugAdapterPreparedFor;
     private volatile boolean testBundleLoaded;
     private volatile Map<String, Object> effectiveSettings = Map.of();
     private volatile Consumer<Path> onCodeLensRefresh = path -> {
@@ -337,6 +341,10 @@ public class JdtLsService {
 
     public boolean isRunning() {
         return isReady();
+    }
+
+    public boolean isWorkspaceSettled() {
+        return isReady() && !isWarmingUp() && workspaceWorkTokens.isEmpty();
     }
 
     public boolean isInteractive() {
@@ -1172,10 +1180,34 @@ public class JdtLsService {
         return debugBundleLoaded && isInteractive();
     }
 
+    public boolean prepareDebugAdapter() {
+        LspJsonRpcClient rpc = client;
+        if (rpc == null || !isDebugAdapterAvailable()) {
+            return false;
+        }
+        synchronized (debugAdapterLock) {
+            if (debugAdapterPreparedFor == rpc) {
+                return true;
+            }
+            JsonNode result = requestInteractive("workspace/executeCommand", Map.of(
+                    "command", "vscode.java.updateDebugSettings",
+                    "arguments", List.of("{\"maxStringLength\":" + DEBUG_MAX_STRING_LENGTH
+                            + ",\"logLevel\":\"WARNING\",\"showStaticVariables\":true}")),
+                    DEBUG_ADAPTER_TIMEOUT_MS);
+            if (result == null) {
+                log.info("O adaptador de debug Java nao confirmou as configuracoes");
+                return false;
+            }
+            debugAdapterPreparedFor = rpc;
+            return true;
+        }
+    }
+
     public int startDebugSession() {
+        prepareDebugAdapter();
         JsonNode result = requestInteractive("workspace/executeCommand", Map.of(
                 "command", "vscode.java.startDebugSession",
-                "arguments", List.of()), 30_000);
+                "arguments", List.of()), DEBUG_ADAPTER_TIMEOUT_MS);
         if (result == null || !result.canConvertToInt()) {
             return -1;
         }

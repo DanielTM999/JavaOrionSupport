@@ -9,6 +9,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,6 +36,21 @@ class ProcessRunnerTest {
         runner.cancel();
         assertNotEquals(0, execution.get(5, TimeUnit.SECONDS));
         assertFalse(ProcessHandle.of(childPid.get()).map(ProcessHandle::isAlive).orElse(false));
+    }
+
+    @Test
+    void cancelBeforeRunKillsTheProcessRightAfterItStarts() throws Exception {
+        ProcessRunner runner = new ProcessRunner();
+        runner.cancel();
+
+        int exit = CompletableFuture.supplyAsync(() -> runner.run(
+                List.of(javaExecutable(), "-cp", System.getProperty("java.class.path"),
+                        SleepingProcess.class.getName()), Path.of("."), Map.of(), line -> {
+                        }))
+                .get(10, TimeUnit.SECONDS);
+
+        assertEquals(-1, exit);
+        assertFalse(runner.isRunning());
     }
 
     private static String javaExecutable() {

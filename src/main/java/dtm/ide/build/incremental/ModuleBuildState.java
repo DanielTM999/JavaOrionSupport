@@ -22,7 +22,7 @@ import java.util.regex.Pattern;
 @Slf4j
 public final class ModuleBuildState {
 
-    public static final String FORMAT_VERSION = "4";
+    public static final String FORMAT_VERSION = "5";
 
     private static final String HEADER = "#orion-incremental";
     private static final String FIELD_SEPARATOR = "\t";

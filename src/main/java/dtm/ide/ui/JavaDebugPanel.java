@@ -1,6 +1,7 @@
 package dtm.ide.ui;
 
 import dtm.ide.debug.JavaDebugSnapshot;
+import dtm.ide.lsp.JavaClassFileNavigation;
 import dtm.stools.component.feedback.badge.BadgeLabel;
 import dtm.stools.component.feedback.tooltip.ModernTooltip;
 import dtm.stools.component.panels.card.CardPanel;
@@ -23,6 +24,7 @@ import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
+import javax.swing.ListCellRenderer;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.table.TableCellRenderer;
@@ -30,15 +32,18 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
 import java.awt.Color;
+import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
+import java.util.function.Function;
 
 public final class JavaDebugPanel extends JPanel {
 
@@ -59,6 +64,9 @@ public final class JavaDebugPanel extends JPanel {
 
         void openFile(Path file, int line);
 
+        default void openLibrarySource(String uri, int line) {
+        }
+
         JavaDebugSnapshot.Variable evaluate(String expression, int frameId) throws Exception;
 
         List<JavaDebugSnapshot.Variable> variables(int reference) throws Exception;
@@ -74,6 +82,8 @@ public final class JavaDebugPanel extends JPanel {
 
     private final Host host;
     private final Executor executor;
+    private String navigatedFrame;
+    private boolean syncingSelection;
     private final DefaultListModel<JavaDebugSnapshot.ThreadInfo> threadModel = new DefaultListModel<>();
     private final DefaultListModel<JavaDebugSnapshot.StackFrame> frameModel = new DefaultListModel<>();
     private final JList<JavaDebugSnapshot.ThreadInfo> threads = new JList<>(threadModel);
@@ -154,47 +164,71 @@ public final class JavaDebugPanel extends JPanel {
             SwingUtilities.invokeLater(() -> update(value));
             return;
         }
+        JavaDebugSnapshot previous = snapshot;
         snapshot = value;
         if (value.state() == JavaDebugSnapshot.State.STARTING) {
             console.clear();
         }
         console.append(value.state(), value.message());
-        replace(threadModel, value.threads());
-        replace(frameModel, value.frames());
-        if (!value.threads().isEmpty()) {
-            int selected = 0;
-            for (int index = 0; index < value.threads().size(); index++) {
-                if (value.threads().get(index).id() == value.threadId()) {
-                    selected = index;
-                    break;
+        boolean threadsChanged = replace(threadModel, value.threads());
+        boolean framesChanged = replace(frameModel, value.frames());
+        syncingSelection = true;
+        try {
+            if (!value.threads().isEmpty()
+                    && (threadsChanged || previous.threadId() != value.threadId())) {
+                int selected = 0;
+                for (int index = 0; index < value.threads().size(); index++) {
+                    if (value.threads().get(index).id() == value.threadId()) {
+                        selected = index;
+                        break;
+                    }
                 }
+                threads.setSelectedIndex(selected);
             }
-            threads.setSelectedIndex(selected);
+            if (framesChanged && !value.frames().isEmpty()) {
+                frames.setSelectedIndex(0);
+            }
+        } finally {
+            syncingSelection = false;
         }
-        if (!value.frames().isEmpty()) {
-            frames.setSelectedIndex(0);
-        }
-        if (!value.scopes().isEmpty()) {
-            variables.setScopes(value.scopes());
-        } else if (!value.variables().isEmpty()) {
-            variables.setScopes(List.of(new JavaDebugSnapshot.Scope("Locals", 0, value.variables())));
-        } else {
-            variables.clear();
+        if (!previous.scopes().equals(value.scopes())
+                || !previous.variables().equals(value.variables())) {
+            if (!value.scopes().isEmpty()) {
+                variables.setScopes(value.scopes());
+            } else if (!value.variables().isEmpty()) {
+                variables.setScopes(List.of(new JavaDebugSnapshot.Scope("Locals", 0, value.variables())));
+            } else {
+                variables.clear();
+            }
         }
         if (value.state() == JavaDebugSnapshot.State.TERMINATED
                 || value.state() == JavaDebugSnapshot.State.ERROR) {
             clearWatchValues();
-        } else {
+        } else if (framesChanged) {
             refreshWatches();
         }
         status.setText(value.message().isBlank() ? value.state().name() : value.message().trim());
         status.setTone(statusTone(value.state()));
         updateControls(value.state());
-        if (value.state() == JavaDebugSnapshot.State.PAUSED && !value.frames().isEmpty()) {
-            JavaDebugSnapshot.StackFrame frame = value.frames().getFirst();
-            if (frame.source() != null) {
-                host.openFile(frame.source(), frame.line());
+        if (value.state() != JavaDebugSnapshot.State.PAUSED || value.frames().isEmpty()) {
+            if (value.state() != JavaDebugSnapshot.State.PAUSED) {
+                navigatedFrame = null;
             }
+            return;
+        }
+        JavaDebugSnapshot.StackFrame top = value.frames().getFirst();
+        String key = value.threadId() + ":" + top.id() + ":" + top.line();
+        if (!key.equals(navigatedFrame)) {
+            navigatedFrame = key;
+            openFrame(top);
+        }
+    }
+
+    private void openFrame(JavaDebugSnapshot.StackFrame frame) {
+        if (frame.source() != null) {
+            host.openFile(frame.source(), frame.line());
+        } else if (frame.hasLibrarySource()) {
+            host.openLibrarySource(frame.sourceUri(), frame.line());
         }
     }
 
@@ -315,14 +349,14 @@ public final class JavaDebugPanel extends JPanel {
             public void mouseClicked(MouseEvent event) {
                 if (event.getClickCount() == 2) {
                     JavaDebugSnapshot.StackFrame frame = frames.getSelectedValue();
-                    if (frame != null && frame.source() != null) {
-                        host.openFile(frame.source(), frame.line());
+                    if (frame != null) {
+                        openFrame(frame);
                     }
                 }
             }
         });
         frames.addListSelectionListener(event -> {
-            if (!event.getValueIsAdjusting()) {
+            if (!event.getValueIsAdjusting() && !syncingSelection) {
                 JavaDebugSnapshot.StackFrame frame = frames.getSelectedValue();
                 if (frame != null) {
                     loadFrame(frame.id());
@@ -330,40 +364,59 @@ public final class JavaDebugPanel extends JPanel {
             }
         });
         threads.addListSelectionListener(event -> {
-            if (!event.getValueIsAdjusting()) {
+            if (!event.getValueIsAdjusting() && !syncingSelection) {
                 JavaDebugSnapshot.ThreadInfo thread = threads.getSelectedValue();
                 if (thread != null && thread.id() != snapshot.threadId()) {
                     host.selectThread(thread.id());
                 }
             }
         });
-        threads.setCellRenderer((list, thread, index, selected, focus) -> {
-            String name = cleanThreadName(thread == null ? "" : thread.name());
-            String html = "<html><b style='color:" + JavaDebugTheme.hex(JavaDebugTheme.text())
-                    + ";'>" + escape(name) + "</b><span style='color:"
-                    + JavaDebugTheme.hex(JavaDebugTheme.muted()) + ";'>&nbsp;&nbsp;Thread #"
-                    + (thread == null ? "" : thread.id()) + "</span></html>";
-            return listLabel(html, index, selected);
-        });
-        frames.setCellRenderer((list, frame, index, selected, focus) -> {
-            String location = frame == null || frame.source() == null ? ""
-                    : frame.source().getFileName() + ":" + frame.line();
-            String html = "<html><span style='color:" + JavaDebugTheme.hex(JavaDebugTheme.text())
-                    + ";'>" + escape(frame == null ? "" : frame.name())
-                    + "</span><span style='color:" + JavaDebugTheme.hex(JavaDebugTheme.muted())
-                    + ";'>&nbsp;&nbsp;" + escape(location) + "</span></html>";
-            return listLabel(html, index, selected);
-        });
+        threads.setCellRenderer(new StackRowRenderer<>(true,
+                thread -> cleanThreadName(thread.name()), thread -> "Thread #" + thread.id()));
+        frames.setCellRenderer(new StackRowRenderer<>(false,
+                JavaDebugSnapshot.StackFrame::name, JavaDebugPanel::frameLocation));
     }
 
-    private JLabel listLabel(String html, int index, boolean selected) {
-        JLabel label = new JLabel(html);
-        label.setOpaque(true);
-        label.setFont(JavaDebugTheme.mono().deriveFont(12f));
-        label.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
-        label.setBackground(selected ? JavaDebugTheme.selection()
-                : index % 2 == 0 ? JavaDebugTheme.content() : JavaDebugTheme.stripe());
-        return label;
+    static String frameLocation(JavaDebugSnapshot.StackFrame frame) {
+        if (frame.source() != null) {
+            return frame.source().getFileName() + ":" + frame.line();
+        }
+        return frame.hasLibrarySource()
+                ? JavaClassFileNavigation.sourceFileName(frame.sourceUri()) + ":" + frame.line()
+                : "";
+    }
+
+    static final class StackRowRenderer<T> extends JPanel implements ListCellRenderer<T> {
+        private final JLabel primary = new JLabel();
+        private final JLabel secondary = new JLabel();
+        private final Function<T, String> primaryText;
+        private final Function<T, String> secondaryText;
+
+        StackRowRenderer(boolean boldPrimary, Function<T, String> primaryText,
+                         Function<T, String> secondaryText) {
+            super(new BorderLayout(UiTokens.space(3), 0));
+            this.primaryText = primaryText;
+            this.secondaryText = secondaryText;
+            setOpaque(true);
+            setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
+            Font mono = JavaDebugTheme.mono().deriveFont(12f);
+            primary.setFont(boldPrimary ? mono.deriveFont(Font.BOLD) : mono);
+            primary.setForeground(JavaDebugTheme.text());
+            secondary.setFont(mono);
+            secondary.setForeground(JavaDebugTheme.muted());
+            add(primary, BorderLayout.WEST);
+            add(secondary, BorderLayout.CENTER);
+        }
+
+        @Override
+        public Component getListCellRendererComponent(JList<? extends T> list, T value, int index,
+                                                      boolean selected, boolean focus) {
+            primary.setText(value == null ? "" : primaryText.apply(value));
+            secondary.setText(value == null ? "" : secondaryText.apply(value));
+            setBackground(selected ? JavaDebugTheme.selection()
+                    : index % 2 == 0 ? JavaDebugTheme.content() : JavaDebugTheme.stripe());
+            return this;
+        }
     }
 
     private void loadFrame(int frameId) {
@@ -511,20 +564,18 @@ public final class JavaDebugPanel extends JPanel {
         return value.isBlank() ? "Thread" : value;
     }
 
-    private static String escape(String value) {
-        return value == null ? "" : value.replace("&", "&amp;")
-                .replace("<", "&lt;").replace(">", "&gt;");
-    }
-
     private static String safeMessage(Throwable error) {
         return error == null || error.getMessage() == null
                 ? "evaluation failed" : error.getMessage();
     }
 
-    private static <T> void replace(DefaultListModel<T> model, List<T> values) {
-        model.clear();
-        if (values != null) {
-            values.forEach(model::addElement);
+    static <T> boolean replace(DefaultListModel<T> model, List<T> values) {
+        List<T> next = values == null ? List.of() : values;
+        if (model.size() == next.size() && Collections.list(model.elements()).equals(next)) {
+            return false;
         }
+        model.clear();
+        model.addAll(next);
+        return true;
     }
 }
