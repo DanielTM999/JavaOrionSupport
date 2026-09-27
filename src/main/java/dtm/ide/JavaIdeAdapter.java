@@ -348,9 +348,12 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long BUILD_SLOT_POLL_MS = 100;
     private static final long PASTE_IMPORT_WINDOW_MS = 20_000;
     private static final long PASTE_IMPORT_RETRY_MS = 1_000;
+    private static final long PASTE_IMPORT_FOLLOW_UP_MS = 5_000;
+    private static final int PASTE_IMPORT_MAX_ROUNDS = 3;
     private static final Pattern TYPE_LIKE_NAME = Pattern.compile("\\b\\p{Lu}");
 
-    private record PendingPasteImport(Path file, int offset, String pasted, Range range, long deadline) {
+    private record PendingPasteImport(Path file, int offset, String pasted, Range range, long deadline,
+                                      int round, Set<String> handled) {
     }
 
     private static String text(String key, String fallback) {
@@ -4479,7 +4482,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         pendingPasteImports.put(JavaProjectConventions.normalize(file), new PendingPasteImport(
                 file, offset, pasted, rangeOf(text, offset, offset + pasted.length()),
-                System.currentTimeMillis() + PASTE_IMPORT_WINDOW_MS));
+                System.currentTimeMillis() + PASTE_IMPORT_WINDOW_MS, 1, Set.of()));
     }
 
     private static String clipboardText() {
@@ -4529,13 +4532,19 @@ public class JavaIdeAdapter extends IdeAdapter {
                 if (text == null || !text.startsWith(pending.pasted(), pending.offset())) {
                     return;
                 }
-                ImportCandidates.Lookup lookup = lsp.importCandidates(pending.file(), text, pending.range());
+                ImportCandidates.Lookup lookup = lsp.importCandidates(pending.file(), text, pending.range(),
+                        pending.handled());
                 if (!lookup.diagnosed()) {
                     retry = true;
                     return;
                 }
                 if (pendingPasteImports.remove(key, pending)) {
-                    SwingUtilities.invokeLater(() -> chooseImports(pending.file(), lookup.candidates()));
+                    Set<String> handled = new HashSet<>(pending.handled());
+                    handled.addAll(lookup.queried());
+                    PendingPasteImport resolved = new PendingPasteImport(pending.file(), pending.offset(),
+                            pending.pasted(), pending.range(), pending.deadline(), pending.round(),
+                            Set.copyOf(handled));
+                    SwingUtilities.invokeLater(() -> chooseImports(resolved, lookup.candidates()));
                 }
             } finally {
                 pasteImportsResolving.remove(key);
@@ -4547,7 +4556,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         });
     }
 
-    private void chooseImports(Path file, Map<String, List<String>> candidates) {
+    private void chooseImports(PendingPasteImport pending, Map<String, List<String>> candidates) {
         List<String> chosen = new ArrayList<>();
         Deque<Map.Entry<String, List<String>>> ambiguous = new ArrayDeque<>();
         candidates.forEach((name, options) -> {
@@ -4557,21 +4566,21 @@ public class JavaIdeAdapter extends IdeAdapter {
                 ambiguous.add(Map.entry(name, options));
             }
         });
-        askNextImport(file, chosen, ambiguous);
+        askNextImport(pending, chosen, ambiguous);
     }
 
-    private void askNextImport(Path file, List<String> chosen,
+    private void askNextImport(PendingPasteImport pending, List<String> chosen,
                                Deque<Map.Entry<String, List<String>>> ambiguous) {
         Map.Entry<String, List<String>> next = ambiguous.poll();
         if (next == null) {
-            applyPastedImports(file, chosen);
+            applyPastedImports(pending, chosen);
             return;
         }
         ImportChoicePanel panel = new ImportChoicePanel(next.getKey(), next.getValue(), choice -> {
             if (choice != null) {
                 chosen.add(choice);
             }
-            SwingUtilities.invokeLater(() -> askNextImport(file, chosen, ambiguous));
+            SwingUtilities.invokeLater(() -> askNextImport(pending, chosen, ambiguous));
         });
         showPopup(PlatformPopupBuilder.builder()
                 .component(panel)
@@ -4583,12 +4592,14 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .build());
     }
 
-    private void applyPastedImports(Path file, List<String> imports) {
+    private void applyPastedImports(PendingPasteImport pending, List<String> imports) {
+        Path file = pending.file();
         IdeEditorContext editor = getEditor(file);
         if (imports.isEmpty() || editor == null || editor.isReadOnly()) {
             return;
         }
-        JavaImportInserter.Result result = JavaImportInserter.insert(editor.getText(), imports);
+        String before = editor.getText();
+        JavaImportInserter.Result result = JavaImportInserter.insert(before, imports);
         if (result.insertedLines() == 0) {
             return;
         }
@@ -4598,14 +4609,31 @@ public class JavaIdeAdapter extends IdeAdapter {
             editor.setText(result.text());
         }
         editor.setCaretPosition(line >= result.firstLine() ? line + result.insertedLines() : line, col);
+        String after = editor.getText();
+        followUpPastedImports(pending, before, after);
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
-            lsp.changeDocument(file, editor.getText());
+            lsp.changeDocument(file, after);
         }
         editor.refreshDiagnostics();
         setStatusBarText(text("status.pasteImports", "Java: imports adicionados") + " - "
                 + imports.stream().map(name -> name.substring(name.lastIndexOf('.') + 1))
                 .collect(Collectors.joining(", ")));
+    }
+
+    private void followUpPastedImports(PendingPasteImport pending, String before, String after) {
+        if (pending.round() >= PASTE_IMPORT_MAX_ROUNDS || before == null || after == null
+                || !before.startsWith(pending.pasted(), pending.offset())) {
+            return;
+        }
+        int offset = pending.offset() + after.length() - before.length();
+        if (offset < 0 || !after.startsWith(pending.pasted(), offset)) {
+            return;
+        }
+        pendingPasteImports.putIfAbsent(JavaProjectConventions.normalize(pending.file()), new PendingPasteImport(
+                pending.file(), offset, pending.pasted(),
+                rangeOf(after, offset, offset + pending.pasted().length()),
+                System.currentTimeMillis() + PASTE_IMPORT_FOLLOW_UP_MS, pending.round() + 1, pending.handled()));
     }
 
     private void bindDebugShortcut(IdeEditorContext context, String stroke,

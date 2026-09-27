@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dtm.stools.component.panels.editor.code.api.Range;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,11 +15,12 @@ import java.util.regex.Pattern;
 
 public final class ImportCandidates {
 
-    public record Lookup(boolean diagnosed, Map<String, List<String>> candidates) {
-        public static final Lookup PENDING = new Lookup(false, Map.of());
+    public record Lookup(boolean diagnosed, Map<String, List<String>> candidates, Set<String> queried) {
+        public static final Lookup PENDING = new Lookup(false, Map.of(), Set.of());
 
         public Lookup {
-            candidates = candidates == null ? Map.of() : Map.copyOf(candidates);
+            candidates = candidates == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(candidates));
+            queried = queried == null ? Set.of() : Set.copyOf(queried);
         }
     }
 
@@ -29,16 +32,42 @@ public final class ImportCandidates {
     }
 
     static List<JsonNode> unresolvedIn(List<JsonNode> diagnostics, String text, Range pasted) {
+        return List.copyOf(collect(diagnostics, text, pasted).keySet());
+    }
+
+    static Map<String, JsonNode> unresolvedByName(List<JsonNode> diagnostics, String text, Range pasted,
+                                                  Collection<String> skipped) {
+        Map<String, JsonNode> byName = new LinkedHashMap<>();
+        collect(diagnostics, text, pasted).forEach((diagnostic, name) -> {
+            if (!skipped.contains(name)) {
+                byName.putIfAbsent(name, diagnostic);
+            }
+        });
+        return byName;
+    }
+
+    static void merge(Map<String, List<String>> into, Map<String, List<String>> from) {
+        from.forEach((name, qualified) -> {
+            List<String> names = into.computeIfAbsent(name, ignored -> new ArrayList<>());
+            for (String candidate : qualified) {
+                if (!names.contains(candidate)) {
+                    names.add(candidate);
+                }
+            }
+        });
+    }
+
+    private static Map<JsonNode, String> collect(List<JsonNode> diagnostics, String text, Range pasted) {
+        Map<JsonNode, String> ordered = new LinkedHashMap<>();
         if (diagnostics == null || diagnostics.isEmpty() || text == null || pasted == null) {
-            return List.of();
+            return ordered;
         }
         int[] lineOffsets = lineOffsets(text);
         int from = offsetOf(pasted.start().line(), pasted.start().col(), lineOffsets, text.length());
         int to = offsetOf(pasted.end().line(), pasted.end().col(), lineOffsets, text.length());
         if (from < 0 || to < from) {
-            return List.of();
+            return ordered;
         }
-        List<JsonNode> unresolved = new ArrayList<>();
         for (JsonNode diagnostic : diagnostics) {
             if (!UNRESOLVED_CODES.contains(diagnostic.path("code").asText(""))) {
                 continue;
@@ -56,10 +85,10 @@ public final class ImportCandidates {
                 name = name.substring(1).strip();
             }
             if (isIdentifier(name) && diagnostic.path("message").asText("").startsWith(name + " ")) {
-                unresolved.add(diagnostic);
+                ordered.putIfAbsent(diagnostic, name);
             }
         }
-        return unresolved;
+        return ordered;
     }
 
     static Map<String, List<String>> fromActions(JsonNode actions) {

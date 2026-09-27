@@ -2845,25 +2845,30 @@ public class JdtLsService {
                 action.hasNonNull("command") ? action.toString() : null);
     }
 
-    public ImportCandidates.Lookup importCandidates(Path filePath, String text, Range pasted) {
+    public ImportCandidates.Lookup importCandidates(Path filePath, String text, Range pasted,
+                                                   Set<String> handled) {
         if (!capabilities.codeAction() || !isCurrentText(filePath, text)) {
             return ImportCandidates.Lookup.PENDING;
         }
-        List<JsonNode> unresolved = ImportCandidates.unresolvedIn(
-                rawDiagnosticsByPath.getOrDefault(normalizePath(filePath), List.of()), text, pasted);
+        Map<String, JsonNode> unresolved = ImportCandidates.unresolvedByName(
+                rawDiagnosticsByPath.getOrDefault(normalizePath(filePath), List.of()), text, pasted, handled);
         if (unresolved.isEmpty()) {
             return ImportCandidates.Lookup.PENDING;
         }
-        Map<String, Object> params = new LinkedHashMap<>();
-        params.put("textDocument", documentId(filePath));
-        params.put("range", rangeParam(pasted));
-        params.put("context", Map.of("diagnostics", unresolved, "only", List.of("quickfix")));
-        JsonNode result = requestInteractive("textDocument/codeAction", params,
-                IMPORT_CANDIDATES_TIMEOUT_MS);
-        if (result == null) {
-            return ImportCandidates.Lookup.PENDING;
+        Map<String, List<String>> candidates = new LinkedHashMap<>();
+        for (JsonNode diagnostic : unresolved.values()) {
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("textDocument", documentId(filePath));
+            params.put("range", diagnostic.get("range"));
+            params.put("context", Map.of("diagnostics", List.of(diagnostic), "only", List.of("quickfix")));
+            JsonNode result = requestInteractive("textDocument/codeAction", params,
+                    IMPORT_CANDIDATES_TIMEOUT_MS);
+            if (result == null) {
+                return ImportCandidates.Lookup.PENDING;
+            }
+            ImportCandidates.merge(candidates, ImportCandidates.fromActions(result));
         }
-        return new ImportCandidates.Lookup(true, ImportCandidates.fromActions(result));
+        return new ImportCandidates.Lookup(true, candidates, unresolved.keySet());
     }
 
     public List<SourceAction> sourceActions(Path filePath, String text, int line, int col) {

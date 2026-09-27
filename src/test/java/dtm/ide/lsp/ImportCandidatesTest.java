@@ -5,8 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.stools.component.panels.editor.code.api.Range;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -66,6 +68,55 @@ class ImportCandidatesTest {
                 Range.of(3, 4, 4, 35));
 
         assertEquals(2, unresolved.size());
+    }
+
+    @Test
+    void keepsOneDiagnosticPerNameSoEachGetsItsOwnCodeActionRequest() throws Exception {
+        String source = """
+                package demo;
+
+                class Demo {
+                    @Id
+                    @EqualsAndHashCode.Include
+                    @GeneratedValue(strategy = GenerationType.IDENTITY)
+                    private Long id;
+                    @Id
+                    private Long other;
+                }
+                """;
+        List<JsonNode> diagnostics = List.of(
+                diagnostic("16777218", "Id cannot be resolved to a type", 3, 5, 3, 7),
+                diagnostic("16777218", "EqualsAndHashCode cannot be resolved to a type", 4, 5, 4, 22),
+                diagnostic("16777218", "GeneratedValue cannot be resolved to a type", 5, 5, 5, 19),
+                diagnostic("570425394", "GenerationType cannot be resolved to a variable", 5, 31, 5, 45),
+                diagnostic("16777218", "Id cannot be resolved to a type", 7, 5, 7, 7));
+
+        Map<String, JsonNode> byName = ImportCandidates.unresolvedByName(diagnostics, source,
+                Range.of(3, 0, 8, 23), Set.of());
+
+        assertEquals(List.of("Id", "EqualsAndHashCode", "GeneratedValue", "GenerationType"),
+                List.copyOf(byName.keySet()));
+        assertEquals(3, byName.get("Id").path("range").path("start").path("line").asInt());
+        assertEquals(List.of("EqualsAndHashCode", "GenerationType"), List.copyOf(
+                ImportCandidates.unresolvedByName(diagnostics, source, Range.of(3, 0, 8, 23),
+                        Set.of("Id", "GeneratedValue")).keySet()));
+    }
+
+    @Test
+    void mergesCandidatesFromSeparateRequestsWithoutDuplicates() throws Exception {
+        Map<String, List<String>> merged = new LinkedHashMap<>();
+        ImportCandidates.merge(merged, ImportCandidates.fromActions(JSON.readTree("""
+                [{"title": "Import 'Id' (jakarta.persistence)"},
+                 {"title": "Import 'Id' (org.springframework.data.annotation)"}]
+                """)));
+        ImportCandidates.merge(merged, ImportCandidates.fromActions(JSON.readTree("""
+                [{"title": "Import 'GeneratedValue' (jakarta.persistence)"},
+                 {"title": "Import 'Id' (jakarta.persistence)"}]
+                """)));
+
+        assertEquals(List.of("Id", "GeneratedValue"), List.copyOf(merged.keySet()));
+        assertEquals(List.of("jakarta.persistence.Id", "org.springframework.data.annotation.Id"),
+                merged.get("Id"));
     }
 
     @Test
