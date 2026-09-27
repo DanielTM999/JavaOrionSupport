@@ -12,10 +12,13 @@ import lombok.extern.slf4j.Slf4j;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -61,7 +64,16 @@ public final class JavaLexicalIndex {
     }
 
     private record IndexedFile(List<Declaration> declarations, FileSignature signature,
-                               Map<String, ProjectSymbol> symbols) {
+                               Map<String, ProjectSymbol> symbols,
+                               Map<String, Integer> selfReferences) {
+    }
+
+    private record BufferUsage(Path file, String text, Set<String> methods,
+                               Map<String, Integer> references) {
+
+        int references(String name) {
+            return references.getOrDefault(name, 0);
+        }
     }
 
     private static final class State {
@@ -81,6 +93,7 @@ public final class JavaLexicalIndex {
     private final AtomicLong generation = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
     private State state = new State();
+    private volatile BufferUsage lastBuffer;
 
     public Snapshot snapshot() {
         lock.readLock().lock();
@@ -224,6 +237,111 @@ public final class JavaLexicalIndex {
         return List.copyOf(found);
     }
 
+    public List<Path> filesMayContain(String name) {
+        if (name == null || name.isBlank()) {
+            return List.of();
+        }
+        lock.readLock().lock();
+        try {
+            return state.files.values().stream()
+                    .map(IndexedFile::signature)
+                    .filter(signature -> signature.mayContain(name))
+                    .map(FileSignature::file)
+                    .toList();
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    public Set<String> unusedMethods(Collection<String> names, Path currentFile, String currentText) {
+        if (names == null || names.isEmpty()) {
+            return Set.of();
+        }
+        Path current = currentFile == null ? null : currentFile.toAbsolutePath().normalize();
+        BufferUsage buffer = bufferUsage(current, currentText);
+        Set<String> unused = new LinkedHashSet<>();
+        lock.readLock().lock();
+        try {
+            if (state.files.isEmpty()) {
+                return Set.of();
+            }
+            for (String name : names) {
+                if (name != null && name.length() > 1 && !JavaLexicalSource.isKeyword(name)
+                        && isUnusedMethod(name, current, buffer)) {
+                    unused.add(name);
+                }
+            }
+        } finally {
+            lock.readLock().unlock();
+        }
+        return Set.copyOf(unused);
+    }
+
+    private boolean isUnusedMethod(String name, Path current, BufferUsage buffer) {
+        boolean method = buffer != null && buffer.methods().contains(name);
+        int references = buffer == null ? 0 : buffer.references(name);
+        if (references > 0) {
+            return false;
+        }
+        LinkedHashMap<Path, ProjectSymbol> containing = state.symbols.get(name);
+        if (containing != null) {
+            for (Path file : containing.keySet()) {
+                if (buffer != null && file.equals(current)) {
+                    continue;
+                }
+                IndexedFile indexed = state.files.get(file);
+                Integer self = indexed == null ? null : indexed.selfReferences().get(name);
+                if (self == null || self > 0) {
+                    return false;
+                }
+                method |= indexed.declarations().stream().anyMatch(declaration ->
+                        name.equals(declaration.name()) && declaration.kind() == SymbolKind.METHOD);
+            }
+        }
+        return method;
+    }
+
+    private BufferUsage bufferUsage(Path file, String text) {
+        if (text == null) {
+            return null;
+        }
+        BufferUsage cached = lastBuffer;
+        if (cached != null && Objects.equals(cached.file(), file) && cached.text().equals(text)) {
+            return cached;
+        }
+        List<JavaLexicalSource.Declared> declared = JavaLexicalSource.declarations(text);
+        Map<String, Integer> references = selfReferences(declared, JavaLexicalSource.mask(text), true);
+        Set<String> methods = new LinkedHashSet<>();
+        declared.stream().filter(entry -> entry.kind() == SymbolKind.METHOD)
+                .forEach(entry -> methods.add(entry.name()));
+        BufferUsage usage = new BufferUsage(file, text, Set.copyOf(methods), references);
+        lastBuffer = usage;
+        return usage;
+    }
+
+    private static Map<String, Integer> selfReferences(List<JavaLexicalSource.Declared> declared,
+                                                       String masked, boolean everyIdentifier) {
+        Map<String, Integer> references = new HashMap<>();
+        if (everyIdentifier) {
+            JavaLexicalSource.identifiers(masked, name -> references.merge(name, 1, Integer::sum));
+        } else {
+            Set<String> names = new HashSet<>();
+            declared.forEach(entry -> names.add(entry.name()));
+            for (int[] span : JavaLexicalSource.occurrences(masked, names)) {
+                references.merge(masked.substring(span[0], span[1]), 1, Integer::sum);
+            }
+        }
+        for (JavaLexicalSource.Declared entry : declared) {
+            int adjustment = isEntryPoint(entry) ? 0 : -1;
+            references.merge(entry.name(), adjustment, Integer::sum);
+        }
+        return references;
+    }
+
+    private static boolean isEntryPoint(JavaLexicalSource.Declared entry) {
+        return entry.kind() == SymbolKind.METHOD && (entry.annotated() || "main".equals(entry.name()));
+    }
+
     public boolean awaitIdle(long timeoutMs) {
         if (closed.get()) {
             return executor.isTerminated() || executor.isShutdown();
@@ -283,7 +401,8 @@ public final class JavaLexicalIndex {
         List<Declaration> declarations = new ArrayList<>();
         Map<String, ProjectSymbol> symbols = new LinkedHashMap<>();
         String detail = file.getFileName() == null ? "" : file.getFileName().toString();
-        for (JavaLexicalSource.Declared declared : JavaLexicalSource.declarations(source)) {
+        List<JavaLexicalSource.Declared> declaredInFile = JavaLexicalSource.declarations(source);
+        for (JavaLexicalSource.Declared declared : declaredInFile) {
             declarations.add(new Declaration(declared.name(), declared.kind(), file,
                     declared.range()));
             symbols.put(declared.name(),
@@ -296,7 +415,8 @@ public final class JavaLexicalIndex {
                                 ? SymbolKind.CLASS : SymbolKind.VARIABLE,
                         detail)));
         return new IndexedFile(List.copyOf(declarations),
-                new FileSignature(file, signatureOf(masked)), Map.copyOf(symbols));
+                new FileSignature(file, signatureOf(masked)), Map.copyOf(symbols),
+                Map.copyOf(selfReferences(declaredInFile, masked, false)));
     }
 
     private static void add(State target, Path file, IndexedFile indexed) {

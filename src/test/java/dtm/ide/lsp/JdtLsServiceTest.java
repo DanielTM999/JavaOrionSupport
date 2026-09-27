@@ -355,8 +355,8 @@ class JdtLsServiceTest {
         java.util.concurrent.atomic.AtomicReference<String> latestText =
                 new java.util.concurrent.atomic.AtomicReference<>();
         service.setCodeLensRefreshListener(path -> {
-            refreshed.incrementAndGet();
             latestText.set(service.documentContent(path));
+            refreshed.incrementAndGet();
         });
         try {
             service.changeDocument(source, "class Debounced {");
@@ -428,5 +428,36 @@ class JdtLsServiceTest {
         assertEquals(List.of("a"), onLineTwo);
         assertEquals(List.of("b"), insideTheSpan);
         assertTrue(elsewhere.isEmpty());
+    }
+
+    @Test
+    void completionItemsFollowTheServerSortTextBeforeTruncating() throws Exception {
+        StringBuilder json = new StringBuilder("{\"isIncomplete\":false,\"items\":[");
+        for (int i = 0; i < 100; i++) {
+            if (i > 0) json.append(',');
+            json.append("{\"label\":\"noise").append(i)
+                    .append("\",\"kind\":6,\"sortText\":\"999999").append(100 + i).append("\"}");
+        }
+        json.append(",{\"label\":\"second\",\"kind\":6,\"sortText\":\"000000002\"}");
+        json.append(",{\"label\":\"first\",\"kind\":6,\"sortText\":\"000000001\"}");
+        json.append("]}");
+
+        JdtLsService.CompletionAnswer answer = JdtLsService.completionItems(
+                new ObjectMapper().readTree(json.toString()));
+
+        assertEquals("first", answer.items().get(0).label());
+        assertEquals("second", answer.items().get(1).label());
+        assertEquals("noise0", answer.items().get(2).label());
+        assertEquals(80, answer.items().size());
+        assertTrue(answer.incomplete());
+    }
+
+    @Test
+    void completionItemsFallBackToLabelWhenSortTextIsMissing() throws Exception {
+        JdtLsService.CompletionAnswer answer = JdtLsService.completionItems(new ObjectMapper().readTree(
+                "[{\"label\":\"beta\",\"kind\":6},{\"label\":\"alpha\",\"kind\":6}]"));
+
+        assertEquals(List.of("alpha", "beta"), answer.items().stream().map(item -> item.label()).toList());
+        assertFalse(answer.incomplete());
     }
 }

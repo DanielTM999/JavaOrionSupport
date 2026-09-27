@@ -116,4 +116,33 @@ class JavaIdeAdapterCompletionTest {
 
         assertEquals(List.of("strip"), filtered.stream().map(AutoCompleteItem::label).toList());
     }
+
+    @Test
+    void marksOnlyMethodItemsReportedAsUnused() {
+        AutoCompleteItem unusedMethod = new AutoCompleteItem("orphan()", "orphan() : void", null, null, null,
+                AutoCompleteItem.Kind.METHOD);
+        AutoCompleteItem usedMethod = new AutoCompleteItem("total()", "total() : int", null, null, null,
+                AutoCompleteItem.Kind.METHOD);
+        AutoCompleteItem sameNameVariable = new AutoCompleteItem("orphan", "orphan", null, null, null,
+                AutoCompleteItem.Kind.VARIABLE);
+        List<Set<String>> asked = new java.util.ArrayList<>();
+
+        List<AutoCompleteItem> marked = JavaIdeAdapter.markUnusedMethods(
+                List.of(unusedMethod, usedMethod, sameNameVariable), names -> {
+                    asked.add(names);
+                    return Set.of("orphan");
+                });
+
+        assertEquals(List.of(Set.of("orphan", "total")), asked);
+        assertEquals(List.of(true, false, false), marked.stream().map(AutoCompleteItem::unused).toList());
+    }
+
+    @Test
+    void skipsTheLookupWhenThereAreNoMethods() {
+        List<AutoCompleteItem> items = List.of(AutoCompleteItem.snippet("sout", "System.out.println($0);"));
+
+        assertEquals(items, JavaIdeAdapter.markUnusedMethods(items, names -> {
+            throw new AssertionError("lookup nao deveria rodar");
+        }));
+    }
 }

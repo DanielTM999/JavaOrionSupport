@@ -21,7 +21,7 @@ public final class JavaLexicalSource {
     private static final Pattern METHOD = Pattern.compile(
             "(?m)^[ \\t]*(?:(?:public|protected|private|static|final|abstract|default|"
                     + "synchronized|native|strictfp)\\s+)*(?:<[^>]+>\\s*)?"
-                    + "[A-Za-z_$][\\w$.,<>? \\[\\]]*\\s+([A-Za-z_$][\\w$]*)\\s*\\(");
+                    + "([A-Za-z_$][\\w$.,<>? \\[\\]]*)\\s+([A-Za-z_$][\\w$]*)\\s*\\(");
     private static final Pattern FIELD = Pattern.compile(
             "(?m)^[ \\t]*(?:(?:public|protected|private)\\s+)"
                     + "(?:(?:static|final|transient|volatile)\\s+)*"
@@ -39,7 +39,16 @@ public final class JavaLexicalSource {
             "yield", "permits", "requires", "exports", "module", "open", "opens", "provides",
             "to", "uses", "with", "transitive");
 
-    public record Declared(String name, SymbolKind kind, Range range, int depth) {
+    private static final Set<String> RETURN_TYPE_KEYWORDS = Set.of(
+            "void", "boolean", "byte", "char", "short", "int", "long", "float", "double",
+            "public", "protected", "private", "static", "final", "abstract", "default",
+            "synchronized", "native", "strictfp");
+
+    public record Declared(String name, SymbolKind kind, Range range, int depth, boolean annotated) {
+
+        public Declared(String name, SymbolKind kind, Range range, int depth) {
+            this(name, kind, range, depth, false);
+        }
     }
 
     private JavaLexicalSource() {
@@ -118,13 +127,14 @@ public final class JavaLexicalSource {
 
         Matcher methods = METHOD.matcher(code);
         while (methods.find()) {
-            String name = methods.group(1);
-            if (KEYWORDS.contains(name)) {
+            String name = methods.group(2);
+            if (KEYWORDS.contains(name) || !isReturnType(methods.group(1))) {
                 continue;
             }
             found.add(new Declared(name, SymbolKind.METHOD,
-                    rangeOf(lineStarts, methods.start(1), methods.end(1)),
-                    depthAt(depths, methods.start(1))));
+                    rangeOf(lineStarts, methods.start(2), methods.end(2)),
+                    depthAt(depths, methods.start(2)),
+                    annotatedBefore(code, methods.start())));
         }
 
         Matcher fields = FIELD.matcher(code);
@@ -144,6 +154,28 @@ public final class JavaLexicalSource {
                     : Integer.compare(left.range().start().col(), right.range().start().col());
         });
         return List.copyOf(found);
+    }
+
+    private static boolean isReturnType(String type) {
+        Matcher first = IDENTIFIER.matcher(type);
+        if (!first.lookingAt()) {
+            return false;
+        }
+        String token = first.group();
+        return !KEYWORDS.contains(token) || RETURN_TYPE_KEYWORDS.contains(token);
+    }
+
+    private static boolean annotatedBefore(String code, int declarationStart) {
+        for (int i = declarationStart - 1; i >= 0; i--) {
+            char c = code.charAt(i);
+            if (c == '@') {
+                return true;
+            }
+            if (c == ';' || c == '{' || c == '}') {
+                return false;
+            }
+        }
+        return false;
     }
 
     public static List<DocumentSymbol> outline(String source) {

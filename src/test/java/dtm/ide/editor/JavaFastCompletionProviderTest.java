@@ -88,6 +88,23 @@ class JavaFastCompletionProviderTest {
     }
 
     @Test
+    void emptyPrefixListsNearestLocalsBeforeDeclarationsTypesAndKeywords() {
+        String source = String.join("\n",
+                "class Demo {",
+                "    void helper() {}",
+                "    void run(String customerName) {",
+                "        int totalAmount = 10;",
+                "        ");
+
+        List<String> labels = labels(completion.suggestions(context(source, "")));
+
+        assertTrue(labels.indexOf("totalAmount") < labels.indexOf("customerName"), labels.toString());
+        assertTrue(labels.indexOf("customerName") < labels.indexOf("helper"), labels.toString());
+        assertTrue(labels.indexOf("helper") < labels.indexOf("String"), labels.toString());
+        assertTrue(labels.indexOf("String") < labels.indexOf("abstract"), labels.toString());
+    }
+
+    @Test
     void ignoresVariablesDeclaredAfterTheCaret() {
         String source = String.join("\n",
                 "class Demo {",

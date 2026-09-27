@@ -96,6 +96,7 @@ import dtm.ide.deps.MavenLocalRepositoryResolver;
 import dtm.ide.editor.AutoCompleteIdleTrigger;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
+import dtm.ide.editor.CompletionRanking;
 import dtm.ide.editor.JavaSnippetCompletionProvider;
 import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.editor.JavaFastCompletionProvider;
@@ -114,6 +115,8 @@ import dtm.ide.lsp.JdtLsExtensionBundles;
 import dtm.ide.lsp.JdtLsProvisioner;
 import dtm.ide.lsp.JdtLsService;
 import dtm.ide.lsp.JavaClassFileNavigation;
+import dtm.ide.lsp.LombokAccessorRename;
+import dtm.ide.lsp.LombokAccessors;
 import dtm.ide.lsp.LombokAgentResolver;
 import dtm.ide.lsp.LombokSupport;
 import dtm.ide.lsp.LombokSupportStatus;
@@ -299,6 +302,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -363,6 +367,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String LSP_PROGRESS_ID = "javaLanguageServer";
+    private static final String RENAME_COMPUTE_PROGRESS_ID = "javaRename";
     private static final String LSP_WORK_PROGRESS_ID = "javaLanguageServerWork";
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
     private static final String SYNC_PROGRESS_ID = "javaProjectSync";
@@ -1433,7 +1438,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (semantic.isEmpty()) {
                 semantic = fastCompletion.suggestions(context);
             }
-            return mergeCompletionSuggestions(semantic, snippetsLocal);
+            return javaCompletion(mergeCompletionSuggestions(semantic, snippetsLocal), context);
         }
 
         List<AutoCompleteItem> lexical = fastCompletion.suggestions(context);
@@ -1445,7 +1450,51 @@ public class JavaIdeAdapter extends IdeAdapter {
             lsp.warmCompletion(context.filePath(), context.text(),
                     context.caretLine(), context.caretCol());
         }
-        return mergeCompletionSuggestions(contextual, local);
+        return javaCompletion(mergeCompletionSuggestions(contextual, local), context);
+    }
+
+    private List<AutoCompleteItem> javaCompletion(List<AutoCompleteItem> items,
+                                                  IdeCompletionContext context) {
+        List<AutoCompleteItem> ranked = CompletionRanking.rank(items, context.prefix());
+        return markUnusedMethods(ranked, names -> lexicalIndex.unusedMethods(names,
+                context.filePath(), context.text()));
+    }
+
+    static List<AutoCompleteItem> markUnusedMethods(List<AutoCompleteItem> items,
+                                                    Function<Set<String>, Set<String>> unusedLookup) {
+        if (items == null || items.isEmpty()) {
+            return items;
+        }
+        Set<String> methods = new LinkedHashSet<>();
+        for (AutoCompleteItem item : items) {
+            if (isMethodCompletion(item)) {
+                methods.add(CompletionRanking.name(item));
+            }
+        }
+        if (methods.isEmpty()) {
+            return items;
+        }
+        try {
+            Set<String> unused = unusedLookup.apply(methods);
+            if (unused == null || unused.isEmpty()) {
+                return items;
+            }
+            List<AutoCompleteItem> marked = new ArrayList<>(items.size());
+            for (AutoCompleteItem item : items) {
+                marked.add(isMethodCompletion(item) && unused.contains(CompletionRanking.name(item))
+                        ? item.withUnused(true)
+                        : item);
+            }
+            return List.copyOf(marked);
+        } catch (LinkageError | RuntimeException e) {
+            log.debug("Marcacao de metodos sem uso indisponivel: {}", e.toString());
+            return items;
+        }
+    }
+
+    private static boolean isMethodCompletion(AutoCompleteItem item) {
+        return item != null && (item.kind() == AutoCompleteItem.Kind.METHOD
+                || item.kind() == AutoCompleteItem.Kind.FUNCTION);
     }
 
     static Character completionTriggerCharacter(String line, int col, Set<Character> triggers) {
@@ -3158,21 +3207,63 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!JavaProjectConventions.isJava(filePath)) {
             return null;
         }
-        JdtLsService lsp = runningServerFor(filePath);
-        if (lsp == null) {
-            lsp = awaitServerForRename(filePath);
+        showProgress(RENAME_COMPUTE_PROGRESS_ID, text("rename.progress", "Java: renomeando para '{name}'...")
+                .replace("{name}", context.newName() == null ? "" : context.newName().trim()));
+        try {
+            JdtLsService lsp = runningServerFor(filePath);
+            if (lsp == null) {
+                lsp = awaitServerForRename(filePath);
+            }
+            if (lsp == null) {
+                return null;
+            }
+            IdeWorkspaceEdit edit = lsp.renameWorkspace(filePath, context.text(),
+                    context.line(), context.col(), context.newName());
+            String problem = lsp.lastRenameProblem();
+            if (problem != null) {
+                setStatusBarText(text("rename.unsafeEdit",
+                        "Rename cancelado para proteger o código: {reason}").replace("{reason}", problem));
+                return edit;
+            }
+            return edit == null || edit.isEmpty() ? edit : withLombokAccessors(lsp, context, edit);
+        } finally {
+            hideProgress(RENAME_COMPUTE_PROGRESS_ID);
         }
-        if (lsp == null) {
-            return null;
+    }
+
+    private IdeWorkspaceEdit withLombokAccessors(JdtLsService lsp, IdeRenameContext context, IdeWorkspaceEdit edit) {
+        try {
+            Path current = JavaProjectConventions.normalize(context.filePath());
+            LombokAccessorRename.Result result = LombokAccessorRename.apply(lsp, current, context.text(),
+                    context.line(), context.col(), context.newName(), edit, lexicalIndex::filesMayContain,
+                    file -> renameContentOf(lsp, file, current, context.text()));
+            if (result.accessors().isEmpty()) {
+                return edit;
+            }
+            log.info("Rename com Lombok: {} chamada(s) de {} atualizada(s)", result.calls(),
+                    result.accessors().stream().map(LombokAccessors.Accessor::oldName).toList());
+            if (result.calls() > 0) {
+                setStatusBarText(text("rename.lombokAccessors", "Java: {count} chamada(s) de métodos do Lombok renomeada(s)")
+                        .replace("{count}", Integer.toString(result.calls())));
+            }
+            return result.edit();
+        } catch (Exception e) {
+            log.warn("Nao foi possivel renomear os metodos gerados pelo Lombok: {}", e.toString());
+            return edit;
         }
-        IdeWorkspaceEdit edit = lsp.renameWorkspace(filePath, context.text(),
-                context.line(), context.col(), context.newName());
-        String problem = lsp.lastRenameProblem();
-        if (problem != null) {
-            setStatusBarText(text("rename.unsafeEdit",
-                    "Rename cancelado para proteger o código: {reason}").replace("{reason}", problem));
+    }
+
+    private static String renameContentOf(JdtLsService lsp, Path file, Path current, String currentText) {
+        Path normalized = JavaProjectConventions.normalize(file);
+        if (normalized.equals(current)) {
+            return currentText;
         }
-        return edit;
+        String open = lsp.documentContent(normalized);
+        if (open != null) {
+            return open;
+        }
+        String disk = JavaProjectConventions.readOrEmpty(normalized);
+        return disk.startsWith("﻿") ? disk.substring(1) : disk;
     }
 
     @Override

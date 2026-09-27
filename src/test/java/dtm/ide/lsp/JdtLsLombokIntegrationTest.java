@@ -1,6 +1,7 @@
 package dtm.ide.lsp;
 
 import dtm.ide.api.extension.Resource;
+import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.sdk.DownloadProgressListener;
@@ -31,6 +32,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -123,6 +125,127 @@ class JdtLsLombokIntegrationTest {
                 "o JDT LS nao reiniciou depois do ciclo de parada");
         service.openDocument(source, text);
         assertTrue(service.documentVersion(source) > JdtLsService.ANY_VERSION);
+    }
+
+    @Test
+    void renamingALombokFieldRenamesGeneratedMethodCallsAcrossTheProject() throws Exception {
+        Path project = copyFixture("lombok-maven");
+        JavaProjectDescriptor descriptor = JavaProjectConventions.describe(project);
+        JdkService jdks = new JdkService(resourceAt(workspace.resolve("plugin")), null);
+        Optional<JdkInstallation> jdk = jdks.languageServerJdk();
+        assumeTrue(jdk.isPresent(), "o teste de integracao precisa de uma JDK 21 ou mais nova");
+        JdtLsProvisioner provisioner = new JdtLsProvisioner(new SdkDownloader(null), integrationSdk(jdks));
+        assumeTrue(provisioner.find().isPresent(), "o teste de integracao precisa do Eclipse JDT LS ja provisionado");
+        LombokAgentResolver.Agent agent = new LombokAgentResolver(integrationSdk(jdks))
+                .resolveAgent(descriptor, List.of());
+        assumeTrue(agent.isUsable(), "o agente do Lombok nao esta disponivel neste ambiente");
+        Path sources = project.resolve("src/main/java/demo");
+        Path funcionario = sources.resolve("Funcionario.java");
+        Files.writeString(funcionario, """
+                package demo;
+
+                import lombok.*;
+
+                @Data
+                @Builder(toBuilder = true)
+                @With
+                @NoArgsConstructor
+                @AllArgsConstructor
+                public class Funcionario {
+                    private Long idFuncionario;
+                    private boolean ativo;
+                    private Boolean gerente;
+                }
+                """);
+        Path uso = sources.resolve("UsoFuncionario.java");
+        Files.writeString(uso, """
+                package demo;
+
+                public class UsoFuncionario {
+                    String rodar() {
+                        Funcionario f = Funcionario.builder().idFuncionario(1L).ativo(true).gerente(false).build();
+                        f.setIdFuncionario(2L);
+                        f.setAtivo(false);
+                        Funcionario g = f.withIdFuncionario(3L).withAtivo(true).toBuilder().build();
+                        String idFuncionario = "idFuncionario(1L)";
+                        return f.getIdFuncionario() + " " + f.isAtivo() + g.getGerente() + idFuncionario;
+                    }
+                }
+                """);
+        service = new JdtLsService(jdks, provisioner,
+                new JdtLsExtensionBundles(new SdkDownloader(null), integrationSdk(jdks)), path -> { });
+        service.setLombokAgentJar(agent.jar());
+        service.start(project, jdk.get(), DownloadProgressListener.NOOP).join();
+        assumeTrue(service.awaitReady(READY_TIMEOUT_MS), "o JDT LS nao ficou pronto a tempo");
+        await(() -> !service.isWarmingUp(), 60_000);
+
+        renameLombokField(funcionario, "private Long idFuncionario;", "idFuncionario", "codigo", sources);
+        renameLombokField(funcionario, "private boolean ativo;", "ativo", "habilitado", sources);
+
+        String usoText = Files.readString(uso);
+        assertTrue(usoText.contains("Funcionario.builder().codigo(1L).habilitado(true).gerente(false).build();"), usoText);
+        assertTrue(usoText.contains("f.setCodigo(2L);"), usoText);
+        assertTrue(usoText.contains("f.setHabilitado(false);"), usoText);
+        assertTrue(usoText.contains("f.withCodigo(3L).withHabilitado(true).toBuilder().build();"), usoText);
+        assertTrue(usoText.contains("String idFuncionario = \"idFuncionario(1L)\";"), usoText);
+        assertTrue(usoText.contains("f.getCodigo() + \" \" + f.isHabilitado() + g.getGerente() + idFuncionario;"), usoText);
+        String serviceText = Files.readString(sources.resolve("CustomerService.java"));
+        assertTrue(serviceText.contains(".name(\"Ana\")"), "builder de outra classe nao pode mudar: " + serviceText);
+        assertCompilesWithLombok(List.of(funcionario, uso), agent.jar());
+    }
+
+    private void renameLombokField(Path file, String context, String name, String newName, Path sources)
+            throws Exception {
+        String text = Files.readString(file);
+        int line = lineOf(text, context);
+        int col = text.lines().toList().get(line).indexOf(name);
+        service.openDocument(file, text);
+        IdeWorkspaceEdit edit = service.renameWorkspace(file, text, line, col, newName);
+        assertNull(service.lastRenameProblem(), service.lastRenameProblem());
+        List<Path> javaFiles;
+        try (Stream<Path> tree = Files.list(sources)) {
+            javaFiles = tree.filter(path -> path.toString().endsWith(".java")).toList();
+        }
+        Path current = file.toAbsolutePath().normalize();
+        LombokAccessorRename.Result result = LombokAccessorRename.apply(service, current, text, line, col, newName,
+                edit, ignored -> javaFiles, path -> path.equals(current) ? text : readQuietly(path));
+        System.out.println("[lombok-rename] " + name + " -> " + newName + " acessores=" + result.accessors()
+                + " chamadas=" + result.calls());
+        for (IdeWorkspaceEdit.Operation operation : result.edit().operations()) {
+            if (operation instanceof IdeWorkspaceEdit.TextEdits textEdits) {
+                Path target = textEdits.file().toAbsolutePath().normalize();
+                String before = target.equals(current) ? text : Files.readString(target);
+                Files.writeString(target, TextEditApplier.apply(before, textEdits.edits()));
+                if (!target.equals(current)) {
+                    service.pathChanged(target);
+                }
+            }
+        }
+        String updated = Files.readString(file);
+        service.changeDocument(file, updated);
+        service.saveDocument(file, updated);
+        service.closeDocument(file);
+        Thread.sleep(2_000);
+    }
+
+    private static String readQuietly(Path path) {
+        try {
+            return Files.readString(path);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private void assertCompilesWithLombok(List<Path> sources, Path lombok) throws IOException {
+        javax.tools.JavaCompiler compiler = javax.tools.ToolProvider.getSystemJavaCompiler();
+        assumeTrue(compiler != null, "a suite precisa rodar sobre uma JDK");
+        Path output = Files.createTempDirectory(workspace, "classes");
+        List<String> arguments = new java.util.ArrayList<>(List.of("-encoding", "UTF-8", "-d", output.toString(),
+                "-cp", lombok.toString(), "-processorpath", lombok.toString()));
+        sources.forEach(source -> arguments.add(source.toString()));
+        java.io.ByteArrayOutputStream errors = new java.io.ByteArrayOutputStream();
+        int status = compiler.run(null, null, errors, arguments.toArray(String[]::new));
+        assertEquals(0, status, errors.toString(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private static Path integrationSdk(JdkService jdks) {

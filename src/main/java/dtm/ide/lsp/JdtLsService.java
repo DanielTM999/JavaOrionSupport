@@ -37,6 +37,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -336,7 +337,7 @@ public class JdtLsService {
                                    boolean incomplete, List<AutoCompleteItem> items) {
     }
 
-    private record CompletionAnswer(List<AutoCompleteItem> items, boolean incomplete) {
+    record CompletionAnswer(List<AutoCompleteItem> items, boolean incomplete) {
     }
 
     public State getState() {
@@ -1628,6 +1629,20 @@ public class JdtLsService {
         return filePath == null ? null : documents.content(LspConversions.toUri(filePath));
     }
 
+    public <T> T withDocument(Path filePath, String diskText, java.util.function.Function<String, T> query) {
+        String open = documentContent(filePath);
+        if (open != null) {
+            return query.apply(open);
+        }
+        try {
+            return query.apply(diskText);
+        } finally {
+            if (documentContent(filePath) != null) {
+                closeDocument(filePath);
+            }
+        }
+    }
+
     private void queueWatchedFile(Path path, int changeType) {
         if (path == null) {
             return;
@@ -2155,7 +2170,7 @@ public class JdtLsService {
         }
     }
 
-    private static CompletionAnswer completionItems(JsonNode result) {
+    static CompletionAnswer completionItems(JsonNode result) {
         if (result == null) {
             return new CompletionAnswer(List.of(), false);
         }
@@ -2164,20 +2179,36 @@ public class JdtLsService {
         if (items == null || !items.isArray()) {
             return new CompletionAnswer(List.of(), incomplete);
         }
-        List<AutoCompleteItem> completions = new ArrayList<>(
-                Math.min(items.size(), MAX_COMPLETION_ITEMS));
+        List<SortableCompletion> sortable = new ArrayList<>(items.size());
         for (JsonNode node : items) {
-            if (completions.size() >= MAX_COMPLETION_ITEMS) {
-                incomplete = true;
-                break;
-            }
             if (node == null || node.path("label").asText("").isBlank()) {
                 continue;
             }
             AutoCompleteItem item = LspConversions.completionItem(node);
-            if (item != null) completions.add(item);
+            if (item != null) sortable.add(new SortableCompletion(completionSortKey(node), item));
         }
-        return new CompletionAnswer(List.copyOf(completions), incomplete);
+        sortable.sort(Comparator.comparing(SortableCompletion::key));
+        if (sortable.size() > MAX_COMPLETION_ITEMS) {
+            incomplete = true;
+        }
+        List<AutoCompleteItem> completions = sortable.stream()
+                .limit(MAX_COMPLETION_ITEMS)
+                .map(SortableCompletion::item)
+                .toList();
+        return new CompletionAnswer(completions, incomplete);
+    }
+
+    private record SortableCompletion(String key, AutoCompleteItem item) {
+    }
+
+    static String completionSortKey(JsonNode node) {
+        for (String field : List.of("sortText", "filterText", "label")) {
+            String value = node.path(field).asText("");
+            if (!value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     static String linePrefixAtWordStart(String text, int line, int col) {

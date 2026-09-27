@@ -112,18 +112,19 @@ public final class JavaFastCompletionProvider {
                         .forEach(symbol -> candidates.putIfAbsent(key(symbol), symbol));
             }
         } else {
-            KEYWORDS.forEach(value -> put(candidates,
-                    new Symbol(value, AutoCompleteItem.Kind.KEYWORD, "palavra-chave Java")));
-            COMMON_TYPES.forEach(value -> put(candidates,
-                    new Symbol(value, AutoCompleteItem.Kind.CLASS, "Java")));
-            declarationsOf(context.text(), "arquivo atual")
-                    .forEach(symbol -> put(candidates, symbol));
             visibleVariables(context.text(), context.prefixOffset(), "visivel no escopo")
+                    .reversed()
+                    .forEach(symbol -> put(candidates, symbol));
+            declarationsOf(context.text(), "arquivo atual")
                     .forEach(symbol -> put(candidates, symbol));
             if (projectIndex != null) {
                 projectIndex.projectSymbols().forEach(symbol -> put(candidates,
                         new Symbol(symbol.name(), kindOf(symbol.kind()), symbol.detail())));
             }
+            COMMON_TYPES.forEach(value -> put(candidates,
+                    new Symbol(value, AutoCompleteItem.Kind.CLASS, "Java")));
+            KEYWORDS.stream().sorted().forEach(value -> put(candidates,
+                    new Symbol(value, AutoCompleteItem.Kind.KEYWORD, "palavra-chave Java")));
         }
 
         String needle = prefix.toLowerCase(Locale.ROOT);
