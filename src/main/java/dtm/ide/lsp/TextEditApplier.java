@@ -29,7 +29,7 @@ final class TextEditApplier {
 
     private static List<Span> resolve(String text, List<TextEdit> edits, int[] lineOffsets) {
         List<Span> spans = new ArrayList<>(edits.size());
-        boolean lineFeedOnly = text.indexOf('\r') < 0;
+        boolean crlf = text.contains("\r\n");
         for (TextEdit edit : edits) {
             if (edit == null || edit.range() == null) {
                 continue;
@@ -37,9 +37,9 @@ final class TextEditApplier {
             int start = offsetOf(edit.range().start(), lineOffsets, text.length());
             int end = offsetOf(edit.range().end(), lineOffsets, text.length());
             if (start <= end) {
-                String newText = edit.newText() == null ? "" : edit.newText();
-                if (lineFeedOnly) {
-                    newText = newText.replace("\r\n", "\n").replace('\r', '\n');
+                String newText = LspConversions.normalizeLineBreaks(edit.newText() == null ? "" : edit.newText());
+                if (crlf) {
+                    newText = newText.replace("\n", "\r\n");
                 }
                 spans.add(new Span(start, end, newText));
             }

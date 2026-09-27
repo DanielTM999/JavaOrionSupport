@@ -2007,7 +2007,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp == null || rawDiskContent == null) {
             return;
         }
-        String diskContent = rawDiskContent.replace("\r\n", "\n").replace('\r', '\n');
+        String diskContent = normalizeDiskText(rawDiskContent);
         String mirrored = lsp.documentContent(file);
         if (mirrored == null) {
             lexicalIndex.refreshFile(file, diskContent);
@@ -2027,6 +2027,17 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         diskBaseline.put(normalized, diskContent);
         SwingUtilities.invokeLater(() -> editor.setText(diskContent));
+    }
+
+    static String normalizeDiskText(String raw) {
+        return raw == null ? null : raw.replace("\r\n", "\n").replace('\r', '\n');
+    }
+
+    static String diskBaselineFor(Path file, String editorText) {
+        if (file == null || !Files.isRegularFile(file)) {
+            return editorText;
+        }
+        return normalizeDiskText(JavaProjectConventions.readOrEmpty(file));
     }
 
     private boolean insideKnownSourceRoot(Path file) {
@@ -2112,6 +2123,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onPathRenamed(Path oldPath, Path newPath) {
+        Path movedFrom = JavaProjectConventions.normalize(oldPath);
+        Path movedTo = JavaProjectConventions.normalize(newPath);
+        Set<Path> editorsBeforeMove = movedFrom == null ? Set.of() : javaEditors.keySet().stream()
+                .filter(path -> path.startsWith(movedFrom))
+                .map(path -> movedTo == null ? path : movedTo.resolve(movedFrom.relativize(path)))
+                .collect(Collectors.toUnmodifiableSet());
         if (oldPath != null) {
             onPathDeleted(oldPath);
         }
@@ -2123,16 +2140,29 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         if (!Files.isDirectory(newPath)) {
-            router.acceptCreated(newPath);
+            announceMovedFile(router, newPath, editorsBeforeMove);
             return;
         }
         background.submit(() -> {
             try (Stream<Path> files = Files.walk(newPath)) {
-                files.filter(Files::isRegularFile).forEach(router::acceptCreated);
+                files.filter(Files::isRegularFile)
+                        .forEach(file -> announceMovedFile(router, file, editorsBeforeMove));
             } catch (IOException | java.io.UncheckedIOException e) {
                 log.debug("Falha ao anunciar arquivos da pasta renomeada {}: {}", newPath, e.getMessage());
             }
         });
+    }
+
+    private void announceMovedFile(JavaFileChangeRouter router, Path file, Set<Path> editorManagedTargets) {
+        Path normalized = JavaProjectConventions.normalize(file);
+        if (!editorManagedTargets.contains(normalized) && !javaEditors.containsKey(normalized)) {
+            router.acceptCreated(file);
+            return;
+        }
+        JdtLsService lsp = jdtLs;
+        if (lsp != null) {
+            lsp.pathCreated(normalized);
+        }
     }
 
     @Override
@@ -3111,6 +3141,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public List<TextEdit> computeRenameEdits(IdeRenameContext context) {
         Path filePath = context == null ? null : context.filePath();
+        if (JavaProjectConventions.isJava(filePath)) {
+            return null;
+        }
         JdtLsService lsp = runningServerFor(filePath);
         return lsp == null ? null : lsp.rename(context.filePath(), context.text(),
                 context.line(), context.col(), context.newName());
@@ -3126,8 +3159,17 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp == null) {
             lsp = awaitServerForRename(filePath);
         }
-        return lsp == null ? null : lsp.renameWorkspace(filePath, context.text(),
+        if (lsp == null) {
+            return null;
+        }
+        IdeWorkspaceEdit edit = lsp.renameWorkspace(filePath, context.text(),
                 context.line(), context.col(), context.newName());
+        String problem = lsp.lastRenameProblem();
+        if (problem != null) {
+            setStatusBarText(text("rename.unsafeEdit",
+                    "Rename cancelado para proteger o código: {reason}").replace("{reason}", problem));
+        }
+        return edit;
     }
 
     @Override
@@ -4350,9 +4392,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (editorContext == null || !JavaProjectConventions.isJava(editorContext.filePath())) {
             return;
         }
-        javaEditors.put(JavaProjectConventions.normalize(editorContext.filePath()), editorContext);
+        Path openedPath = JavaProjectConventions.normalize(editorContext.filePath());
+        javaEditors.put(openedPath, editorContext);
         String openedText = editorContext.getText();
-        diskBaseline.put(JavaProjectConventions.normalize(editorContext.filePath()), openedText);
+        diskBaseline.put(openedPath, diskBaselineFor(openedPath, openedText));
         if (activeJavaEditor == null) {
             activeJavaEditor = editorContext;
         }

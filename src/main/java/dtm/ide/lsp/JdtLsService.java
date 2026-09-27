@@ -20,6 +20,7 @@ import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
+import dtm.stools.component.panels.editor.code.api.Position;
 import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.api.TextEdit;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
@@ -29,6 +30,7 @@ import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
 import lombok.extern.slf4j.Slf4j;
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -131,6 +133,8 @@ public class JdtLsService {
     private static final long INDEXING_INTERACTIVE_TIMEOUT_MS = 2_000;
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
     private static final long RENAME_TIMEOUT_MS = 60_000;
+
+    private volatile String lastRenameProblem;
     private static final long INDEXING_COMPLETION_TIMEOUT_MS = 750;
     private static final long READY_COMPLETION_TIMEOUT_MS = 1_500;
     private static final long INITIALIZE_TIMEOUT_MS = 120_000;
@@ -2592,6 +2596,7 @@ public class JdtLsService {
     }
 
     public IdeWorkspaceEdit renameWorkspace(Path filePath, String text, int line, int col, String newName) {
+        lastRenameProblem = null;
         if (!capabilities.rename()) {
             return IdeWorkspaceEdit.empty();
         }
@@ -2600,8 +2605,129 @@ public class JdtLsService {
         if (!syncBeforeRequest(filePath, text)) {
             return IdeWorkspaceEdit.empty();
         }
-        JsonNode result = request("textDocument/rename", params, RENAME_TIMEOUT_MS);
-        return LspConversions.workspaceEdit(result);
+        drainPendingWatchedFiles();
+        String oldName = renamedName(filePath, text, line, col);
+        LspJsonRpcClient rpc = client;
+        if (rpc == null || !isReady()) {
+            lastRenameProblem = "o servidor Java nao esta pronto";
+            return IdeWorkspaceEdit.empty();
+        }
+        CompletableFuture<JsonNode> future = rpc.request("textDocument/rename", params);
+        JsonNode result;
+        try {
+            result = future.get(RENAME_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            future.cancel(false);
+            Thread.currentThread().interrupt();
+            return IdeWorkspaceEdit.empty();
+        } catch (Exception e) {
+            future.cancel(false);
+            logRequestFailure("textDocument/rename", e);
+            String message = LspConversions.errorMessage(e);
+            lastRenameProblem = message == null ? "o servidor Java nao conseguiu renomear" : message;
+            return IdeWorkspaceEdit.empty();
+        }
+        IdeWorkspaceEdit edit = LspConversions.workspaceEdit(result);
+        if (oldName == null) {
+            log.debug("Rename sem nome original conhecido em {}:{}:{}; edicoes nao verificadas", filePath, line, col);
+            return edit;
+        }
+        Path current = normalizePath(filePath);
+        RenameEditVerifier.Result verified = RenameEditVerifier.verify(edit, oldName, newName,
+                file -> renameSourceOf(file, current, text));
+        if (verified.rejected()) {
+            lastRenameProblem = verified.problem() + (verified.rejectedFile() == null ? ""
+                    : " (" + verified.rejectedFile().getFileName() + ")");
+            log.warn("Rename '{}' -> '{}' cancelado: {} file={}", oldName, newName, verified.problem(),
+                    verified.rejectedFile());
+            return IdeWorkspaceEdit.empty();
+        }
+        return verified.edit();
+    }
+
+    public String lastRenameProblem() {
+        return lastRenameProblem;
+    }
+
+    private String renamedName(Path filePath, String text, int line, int col) {
+        PrepareRenameResult prepared = prepareRename(filePath, text, line, col);
+        if (prepared != null && prepared.renameable() && prepared.range() != null) {
+            String name = textIn(text, prepared.range());
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        }
+        if (prepared != null && prepared.placeholder() != null && !prepared.placeholder().isBlank()) {
+            return prepared.placeholder();
+        }
+        return identifierAt(text, line, col);
+    }
+
+    private String renameSourceOf(Path file, Path current, String currentText) {
+        if (file == null) {
+            return null;
+        }
+        Path target = normalizePath(file);
+        if (target.equals(current)) {
+            return currentText;
+        }
+        String open = documents.content(LspConversions.toUri(target));
+        if (open != null) {
+            return open;
+        }
+        try {
+            String disk = Files.readString(target, StandardCharsets.UTF_8);
+            return disk.startsWith("﻿") ? disk.substring(1) : disk;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    static String textIn(String text, Range range) {
+        if (text == null || range == null || range.start() == null || range.end() == null) {
+            return null;
+        }
+        String normalized = LspConversions.normalizeLineBreaks(text);
+        int start = offsetIn(normalized, range.start());
+        int end = offsetIn(normalized, range.end());
+        return start < 0 || end < start ? null : normalized.substring(start, end);
+    }
+
+    static String identifierAt(String text, int line, int col) {
+        if (text == null) {
+            return null;
+        }
+        String normalized = LspConversions.normalizeLineBreaks(text);
+        int offset = offsetIn(normalized, new Position(line, col));
+        if (offset < 0) {
+            return null;
+        }
+        int start = offset;
+        int end = offset;
+        while (start > 0 && Character.isJavaIdentifierPart(normalized.charAt(start - 1))) {
+            start--;
+        }
+        while (end < normalized.length() && Character.isJavaIdentifierPart(normalized.charAt(end))) {
+            end++;
+        }
+        return end > start ? normalized.substring(start, end) : null;
+    }
+
+    private static int offsetIn(String text, Position position) {
+        int line = 0;
+        int index = 0;
+        while (line < position.line()) {
+            int next = text.indexOf('\n', index);
+            if (next < 0) {
+                return -1;
+            }
+            index = next + 1;
+            line++;
+        }
+        int lineEnd = text.indexOf('\n', index);
+        int limit = lineEnd < 0 ? text.length() : lineEnd;
+        long offset = (long) index + position.col();
+        return position.col() < 0 || offset > limit ? -1 : (int) offset;
     }
 
     public PrepareRenameResult prepareRename(Path filePath, String text, int line, int col) {

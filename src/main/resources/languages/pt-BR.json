@@ -383,6 +383,7 @@
   "JavaIdeAdapter.rename.serverLoading": "Aguarde o servidor Java terminar de carregar para renomear",
   "JavaIdeAdapter.rename.invalidIdentifier": "'{name}' não é um identificador Java válido",
   "JavaIdeAdapter.rename.reservedWord": "'{name}' é uma palavra reservada do Java",
+  "JavaIdeAdapter.rename.unsafeEdit": "Rename cancelado para proteger o código: {reason}",
   "JavaIdeAdapter.status.startingLsp": "Java: carregando IntelliSense...",
   "JavaIdeAdapter.status.reanalyzingDiagnostics": "Java: limpando diagnósticos e reiniciando a análise...",
   "JavaIdeAdapter.status.syncPending": "Java: o arquivo de build mudou - sincronize o projeto",

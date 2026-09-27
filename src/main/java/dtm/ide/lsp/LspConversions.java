@@ -1,6 +1,7 @@
 package dtm.ide.lsp;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
@@ -29,6 +30,8 @@ import java.util.List;
 import java.util.Map;
 
 final class LspConversions {
+
+    private static final ObjectMapper ERROR_JSON = new ObjectMapper();
 
     private LspConversions() {
     }
@@ -92,7 +95,14 @@ final class LspConversions {
         if (node == null || node.isNull()) {
             return null;
         }
-        return new TextEdit(range(node.get("range")), node.path("newText").asText(""));
+        return new TextEdit(range(node.get("range")), normalizeLineBreaks(node.path("newText").asText("")));
+    }
+
+    static String normalizeLineBreaks(String text) {
+        if (text == null || text.indexOf('\r') < 0) {
+            return text;
+        }
+        return text.replace("\r\n", "\n").replace('\r', '\n');
     }
 
     static List<TextEdit> textEdits(JsonNode node) {
@@ -618,7 +628,20 @@ final class LspConversions {
             current = current.getCause();
         }
         String message = current == null ? null : current.getMessage();
-        return message == null || message.isBlank() ? null : message;
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+        String trimmed = message.strip();
+        if (trimmed.startsWith("{")) {
+            try {
+                String inner = ERROR_JSON.readTree(trimmed).path("message").asText("");
+                if (!inner.isBlank()) {
+                    return inner;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return message;
     }
 
     static List<TextEdit> singleDocumentEdits(JsonNode workspaceEdit) {

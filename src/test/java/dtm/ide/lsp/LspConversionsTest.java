@@ -2,6 +2,7 @@ package dtm.ide.lsp;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
@@ -38,6 +39,30 @@ class LspConversionsTest {
         assertEquals(3, range.start().line());
         assertEquals(8, range.start().col());
         assertEquals(14, range.end().col());
+    }
+
+    @Test
+    void workspaceEditTextNeverCarriesCarriageReturns() {
+        var edit = LspConversions.workspaceEdit(json("""
+                {"documentChanges":[{"textDocument":{"uri":"file:///p/A.java","version":null},
+                 "edits":[{"range":{"start":{"line":39,"character":17},"end":{"line":63,"character":16}},
+                           "newText":"Colaborador> x;\\r\\n\\r\\n    int y;\\r    public Colaborador"}]}]}
+                """));
+
+        TextEdit only = ((IdeWorkspaceEdit.TextEdits) edit.operations().get(0))
+                .edits().get(0);
+
+        assertEquals("Colaborador> x;\n\n    int y;\n    public Colaborador", only.newText());
+    }
+
+    @Test
+    void errorsFromTheServerShowOnlyTheirMessage() {
+        RuntimeException error = new RuntimeException(new IllegalStateException(
+                "{\"code\":-32600,\"message\":\"Resource 'x/Company.java' is out of sync with file system.\"}"));
+
+        assertEquals("Resource 'x/Company.java' is out of sync with file system.", LspConversions.errorMessage(error));
+        assertEquals("falha simples", LspConversions.errorMessage(new RuntimeException("falha simples")));
+        assertNull(LspConversions.errorMessage(new RuntimeException()));
     }
 
     @Test

@@ -32,6 +32,16 @@ class TextEditApplierTest {
     }
 
     @Test
+    void aCarriageReturnLineFeedDocumentKeepsItsLineBreaksWithoutDoublingThem() {
+        String text = "a;\r\nb;\r\nc;";
+
+        String result = TextEditApplier.apply(text,
+                new TextEdit(Range.of(0, 0, 2, 0), "x;\r\ny;\r\n"));
+
+        assertEquals("x;\r\ny;\r\nc;", result);
+    }
+
+    @Test
     void aColumnPastTheEndOfTheLineStopsAtThatLine() {
         String text = "ab;\ncd;";
 
