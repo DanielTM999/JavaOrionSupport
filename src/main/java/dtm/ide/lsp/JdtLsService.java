@@ -53,7 +53,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.LongConsumer;
 
 @Slf4j
 public class JdtLsService {
@@ -139,7 +141,8 @@ public class JdtLsService {
     private volatile String lastRenameProblem;
     private static final long INDEXING_COMPLETION_TIMEOUT_MS = 750;
     private static final long READY_COMPLETION_TIMEOUT_MS = 1_500;
-    private static final long INITIALIZE_TIMEOUT_MS = 120_000;
+    private static final long INITIALIZE_CEILING_MS = 900_000;
+    private static final long INITIALIZE_WAIT_SLICE_MS = 5_000;
     private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
     private static final long SERVICE_READY_POLL_MS = 250;
     private static final int MIN_AUTO_SHARED_ARCHIVE_MAJOR = 19;
@@ -297,6 +300,7 @@ public class JdtLsService {
             boolean semanticTokens,
             boolean callHierarchy,
             boolean executeCommand,
+            boolean workspaceSymbol,
             boolean completionResolve,
             boolean incrementalSync,
             Set<Character> completionTriggers,
@@ -305,7 +309,7 @@ public class JdtLsService {
         static ServerCapabilities none() {
             return new ServerCapabilities(false, false, false, false, false, false, false, false,
                     false, false, false, false, false, false, false, false, false, false, false,
-                    Set.of(), Set.of());
+                    false, Set.of(), Set.of());
         }
     }
 
@@ -566,7 +570,7 @@ public class JdtLsService {
             pumpStderr(owned);
             registerHandlers(rpc);
 
-            initialize(rpc, root, runtime, jdk, bundlePaths.join());
+            initialize(rpc, owned, launchGeneration, root, runtime, jdk, bundlePaths.join());
             long initialized = System.nanoTime();
             if (!advanceState(launchGeneration, State.INDEXING)) {
                 return;
@@ -616,7 +620,10 @@ public class JdtLsService {
             finishRetired(retire(), 0, 0);
             state = State.ERROR;
             lastError = message;
-            statusListener.onStatus("Java: IntelliSense indisponivel - " + message, -1);
+            if (!(rootCause(e) instanceof TimeoutException)
+                    || !scheduleRestart("Java: o JDT LS nao respondeu; tentando de novo...")) {
+                statusListener.onStatus("Java: IntelliSense indisponivel - " + message, -1);
+            }
         } finally {
             if (started != null) {
                 terminateProcessTree(started.toHandle());
@@ -665,21 +672,50 @@ public class JdtLsService {
         finishRetired(retire(), 0, 0);
         state = State.ERROR;
         lastError = "o processo do JDT LS encerrou com codigo " + code;
+        boolean restartable = before == State.READY || before == State.STARTING || before == State.INDEXING;
+        if (!restartable || !scheduleRestart(
+                "Java: o IntelliSense encerrou (codigo " + code + "); reiniciando...")) {
+            statusListener.onStatus("Java: IntelliSense indisponivel - " + lastError, -1);
+        }
+    }
+
+    private boolean scheduleRestart(String status) {
         LaunchRequest again = lastLaunch;
         long now = System.currentTimeMillis();
         long previous = lastCrashRestart.get();
-        boolean restart = before == State.READY && again != null && !terminated
-                && now - previous > CRASH_RESTART_WINDOW_MS
-                && lastCrashRestart.compareAndSet(previous, now);
-        if (!restart) {
-            statusListener.onStatus("Java: IntelliSense indisponivel - " + lastError, -1);
-            return;
+        if (again == null || terminated || now - previous <= CRASH_RESTART_WINDOW_MS
+                || !lastCrashRestart.compareAndSet(previous, now)) {
+            return false;
         }
-        statusListener.onStatus("Java: o IntelliSense encerrou (codigo " + code + "); reiniciando...", -1);
+        statusListener.onStatus(status, -1);
         try {
             CompletableFuture.runAsync(() -> launch(again.root(), again.jdk(), again.progress()),
                     CompletableFuture.delayedExecutor(CRASH_RESTART_DELAY_MS, TimeUnit.MILLISECONDS, executor));
+            return true;
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            return false;
+        }
+    }
+
+    static JsonNode awaitWhileAlive(CompletableFuture<JsonNode> response, BooleanSupplier keepWaiting,
+                                    long sliceMs, long ceilingMs, LongConsumer onWaiting) throws Exception {
+        long started = System.nanoTime();
+        while (true) {
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            long remaining = ceilingMs - elapsed;
+            if (remaining <= 0) {
+                response.cancel(false);
+                throw new TimeoutException("o JDT LS nao respondeu em " + ceilingMs + " ms");
+            }
+            try {
+                return response.get(Math.min(sliceMs, remaining), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException slice) {
+                if (!keepWaiting.getAsBoolean()) {
+                    response.cancel(false);
+                    throw new IllegalStateException("o processo do JDT LS encerrou durante a inicializacao");
+                }
+                onWaiting.accept(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+            }
         }
     }
 
@@ -717,7 +753,7 @@ public class JdtLsService {
                 }
             }
             projects.cancel(false);
-            throw new TimeoutException("A indexacao do projeto excedeu o tempo limite");
+            log.info("JDT LS ainda indexando apos {} ms; liberando o IntelliSense", SERVICE_READY_TIMEOUT_MS);
         } catch (Exception commandFailure) {
             if (ready.getCount() > 0) {
                 throw commandFailure;
@@ -1162,8 +1198,8 @@ public class JdtLsService {
         return TimeUnit.NANOSECONDS.toMillis(toNanos - fromNanos);
     }
 
-    private void initialize(LspJsonRpcClient rpc, Path root, JdkInstallation runtime,
-                            JdkInstallation preferredProjectJdk,
+    private void initialize(LspJsonRpcClient rpc, Process server, long launchGeneration, Path root,
+                            JdkInstallation runtime, JdkInstallation preferredProjectJdk,
                             List<String> bundlePaths) throws Exception {
         if (rpc == null) {
             throw new IllegalStateException("Cliente LSP indisponivel");
@@ -1179,8 +1215,11 @@ public class JdtLsService {
         effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode);
         params.put("initializationOptions", initializationOptions(effectiveSettings, bundlePaths));
 
-        JsonNode result = rpc.request("initialize", params)
-                .get(INITIALIZE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        JsonNode result = awaitWhileAlive(rpc.request("initialize", params),
+                () -> server.isAlive() && isCurrent(launchGeneration),
+                INITIALIZE_WAIT_SLICE_MS, INITIALIZE_CEILING_MS,
+                elapsed -> statusListener.onStatus("Java: iniciando o JDT LS... "
+                        + TimeUnit.MILLISECONDS.toSeconds(elapsed) + " s", -1));
         capabilities = LspClientCapabilities.readServerCapabilities(result);
         rpc.notify("initialized", Map.of());
         rpc.notify("workspace/didChangeConfiguration",
@@ -2361,6 +2400,10 @@ public class JdtLsService {
     }
 
     public Result navigation(Kind kind, Path file, String text, int line, int col) {
+        return navigation(kind, file, text, line, col, REQUEST_TIMEOUT_MS * 3);
+    }
+
+    public Result navigation(Kind kind, Path file, String text, int line, int col, long timeoutMs) {
         boolean supported = switch (kind) {
             case DEFINITION -> capabilities.definition();
             case IMPLEMENTATION -> capabilities.implementation();
@@ -2369,7 +2412,7 @@ public class JdtLsService {
         if (!supported || !isInteractive()) return Result.of(Status.UNAVAILABLE);
         return navigateResult(kind.method(), file, text, line, col, true,
                 kind == Kind.REFERENCES ? Map.of("context", Map.of("includeDeclaration", false)) : null,
-                REQUEST_TIMEOUT_MS * 3, true);
+                timeoutMs, true);
     }
 
     private Result navigateResult(String method, Path filePath, String text, int line, int col,
@@ -2975,6 +3018,38 @@ public class JdtLsService {
             unique.putIfAbsent(id, new SourceAction(title, id));
         }
         return List.copyOf(unique.values());
+    }
+
+    public record TypeSymbol(String qualifiedName, boolean isInterface) {
+    }
+
+    public List<TypeSymbol> workspaceTypes(String query) {
+        if (!capabilities.workspaceSymbol() || query == null || query.isBlank()) {
+            return List.of();
+        }
+        return parseWorkspaceTypes(requestInteractive("workspace/symbol",
+                Map.of("query", query.trim()), REQUEST_TIMEOUT_MS));
+    }
+
+    static List<TypeSymbol> parseWorkspaceTypes(JsonNode result) {
+        if (result == null || !result.isArray()) {
+            return List.of();
+        }
+        Map<String, TypeSymbol> types = new LinkedHashMap<>();
+        for (JsonNode symbol : result) {
+            int kind = symbol.path("kind").asInt(0);
+            if (kind != 5 && kind != 11) {
+                continue;
+            }
+            String name = symbol.path("name").asText("");
+            if (name.isBlank()) {
+                continue;
+            }
+            String container = symbol.path("containerName").asText("");
+            String qualified = container.isBlank() ? name : container + "." + name;
+            types.putIfAbsent(qualified, new TypeSymbol(qualified, kind == 11));
+        }
+        return List.copyOf(types.values());
     }
 
     public OverrideStatus overridableMethods(Path filePath, String text, int line, int col) {
@@ -3690,11 +3765,16 @@ public class JdtLsService {
     }
 
     static String rootMessage(Throwable error) {
+        Throwable cause = rootCause(error);
+        String message = cause.getMessage();
+        return message == null || message.isBlank() ? cause.getClass().getSimpleName() : message;
+    }
+
+    static Throwable rootCause(Throwable error) {
         Throwable cause = error;
         while (cause.getCause() != null && cause.getCause() != cause) {
             cause = cause.getCause();
         }
-        String message = cause.getMessage();
-        return message == null || message.isBlank() ? cause.getClass().getSimpleName() : message;
+        return cause;
     }
 }

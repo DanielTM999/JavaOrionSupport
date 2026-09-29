@@ -96,7 +96,9 @@ import dtm.ide.deps.MavenLocalRepositoryResolver;
 import dtm.ide.editor.AutoCompleteIdleTrigger;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
+import dtm.ide.editor.CallParentheses;
 import dtm.ide.editor.CompletionRanking;
+import dtm.ide.editor.JavaTypingContext;
 import dtm.ide.editor.JavaSnippetCompletionProvider;
 import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.editor.JavaFastCompletionProvider;
@@ -154,6 +156,7 @@ import dtm.ide.spring.config.SpringConfigDocument;
 import dtm.ide.spring.config.SpringConfigIndex;
 import dtm.ide.spring.config.SpringConfigProperty;
 import dtm.ide.spring.jpa.JpaRepositoryInfo;
+import dtm.ide.spring.JavaType;
 import dtm.ide.spring.jpa.JpaEntity;
 import dtm.ide.spring.jpa.JpaQueryCompletionProvider;
 import dtm.ide.spring.infra.SpringInfraDiagnostics;
@@ -216,6 +219,7 @@ import dtm.ide.ui.JavaProjectStructurePanel;
 import dtm.ide.ui.JavaTodoPanel;
 import dtm.ide.ui.JavaIcons;
 import dtm.ide.ui.JavaProjectTreeIcons;
+import dtm.ide.ui.JavaTypeCreationPanel;
 import dtm.ide.ui.RepositoryCreationPanel;
 import dtm.ide.ui.JavaDebugValuePopup;
 import dtm.ide.ui.JavaEvaluateDialog;
@@ -303,6 +307,10 @@ import java.util.Set;
 import java.net.URI;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -326,6 +334,9 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 800;
+    private static final long DELETE_REFERENCES_TIMEOUT_MS = 30_000;
+    private static final int DELETE_SEARCH_PARALLELISM = 4;
+    private static final Set<Character> COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$');
     private static final long COVERAGE_POLL_INTERVAL_MS = 400L;
     private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
@@ -1355,12 +1366,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public Set<Character> getCompletionTriggerCharacters() {
-        Set<Character> triggers = new HashSet<>(Set.of('.', '@', '(', ':', '$'));
-        JdtLsService lsp = jdtLs;
-        if (lsp != null && lsp.isInteractive()) {
-            triggers.addAll(lsp.completionTriggers());
-        }
-        return Set.copyOf(triggers);
+        return COMPLETION_TRIGGER_CHARACTERS;
     }
 
     @Override
@@ -1386,7 +1392,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (previous == '"') {
             return isJpaQueryLiteral(context) || isSpringAnnotationLiteral(line, col);
         }
-        return getCompletionTriggerCharacters().contains(previous);
+        return JavaTypingContext.allowsTriggerCharacter(context.text(), context.caretOffset(), previous);
     }
 
     private boolean isIdleCompletionEligible(Path filePath) {
@@ -1439,8 +1445,15 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void fireIdleCompletion() {
-        log.debug("Autocomplete: disparo automatico apos {} ms de pausa", AUTO_COMPLETE_IDLE_DELAY_MS);
-        requestCodeEditorAutocomplete();
+        SwingUtilities.invokeLater(() -> {
+            IdeEditorContext editor = activeJavaEditor;
+            if (editor == null || editor.isAutoCompleteVisible()
+                    || !JavaTypingContext.allowsIdleCompletion(editor.getText(), editor.getCaretOffset())) {
+                return;
+            }
+            log.debug("Autocomplete: disparo automatico apos {} ms de pausa", AUTO_COMPLETE_IDLE_DELAY_MS);
+            requestCodeEditorAutocomplete();
+        });
     }
 
     @Override
@@ -1518,7 +1531,8 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private List<AutoCompleteItem> javaCompletion(List<AutoCompleteItem> items,
                                                   IdeCompletionContext context) {
-        List<AutoCompleteItem> ranked = CompletionRanking.rank(items, context.prefix());
+        List<AutoCompleteItem> ranked = CallParentheses.apply(CompletionRanking.rank(items, context.prefix()),
+                context.text(), context.prefixOffset(), context.caretOffset());
         return markUnusedMethods(ranked, names -> lexicalIndex.unusedMethods(names,
                 context.filePath(), context.text()));
     }
@@ -2049,43 +2063,13 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private JavaSafeDeleteScanner.ScanResult findExternalUsages(List<Path> targets) {
-        boolean complete = true;
         JdtLsService lsp = jdtLs;
         Set<Path> deleted = new LinkedHashSet<>(targets);
         Map<String, Location> unique = new LinkedHashMap<>();
-        List<Path> temporarilyOpened = new ArrayList<>();
-
-        if (lsp != null && lsp.isReady()) {
-            try {
-                for (Path source : collectJavaSources(targets)) {
-                    IdeEditorContext openEditor = editorContextFor(source);
-                    String content = openEditor == null ? readSource(source) : onUi(openEditor::getText);
-                    if (content == null) {
-                        complete = false;
-                        continue;
-                    }
-                    if (getEditor(source) == null) {
-                        temporarilyOpened.add(source);
-                    }
-                    lsp.openDocument(source, content);
-                    List<Range> declarations = declarationRanges(lsp, source, content);
-                    if (declarations.isEmpty()) complete = false;
-                    for (Range declaration : declarations) {
-                        Result references = lsp.navigation(Kind.REFERENCES, source, content,
-                                declaration.start().line(), declaration.start().col());
-                        complete &= references.status() == Status.COMPLETE;
-                        for (Location location : references.locations()) {
-                            Path referenced = JavaNavigation.path(location);
-                            if (referenced == null || isInside(referenced, deleted)) {
-                                continue;
-                            }
-                            unique.putIfAbsent(locationKey(location), location);
-                        }
-                    }
-                }
-            } finally {
-                temporarilyOpened.forEach(lsp::closeDocument);
-            }
+        boolean semanticComplete = lsp != null && lsp.isReady() && !lsp.isWarmingUp()
+                && semanticUsages(lsp, targets, deleted, unique);
+        if (semanticComplete) {
+            return new JavaSafeDeleteScanner.ScanResult(List.copyOf(unique.values()), true);
         }
 
         Map<Path, String> buffers = onUi(() -> {
@@ -2093,17 +2077,77 @@ public class JavaIdeAdapter extends IdeAdapter {
             javaEditors.forEach((file, editor) -> snapshots.put(file, editor.getText()));
             return snapshots;
         });
-        JavaSafeDeleteScanner.ScanResult scan = JavaSafeDeleteScanner.scan(projectRoot, targets, buffers);
-        complete &= scan.complete() && lsp != null && lsp.isReady() && !lsp.isWarmingUp();
+        JavaSafeDeleteScanner.ScanResult scan = JavaSafeDeleteScanner.scan(projectRoot, targets,
+                buffers == null ? Map.of() : buffers);
         for (Location location : scan.locations()) {
             Path referenced = JavaNavigation.path(location);
-            if (referenced == null || isInside(referenced, deleted)) {
-                continue;
+            if (referenced != null && !isInside(referenced, deleted)) {
+                unique.putIfAbsent(locationKey(location), location);
             }
-            unique.putIfAbsent(locationKey(location), location);
         }
+        return new JavaSafeDeleteScanner.ScanResult(List.copyOf(unique.values()), false);
+    }
 
-        return new JavaSafeDeleteScanner.ScanResult(List.copyOf(unique.values()), complete);
+    private boolean semanticUsages(JdtLsService lsp, List<Path> targets, Set<Path> deleted,
+                                   Map<String, Location> unique) {
+        record Search(Path source, String content, Range declaration) {
+        }
+        boolean complete = true;
+        List<Path> temporarilyOpened = new ArrayList<>();
+        List<Search> searches = new ArrayList<>();
+        try {
+            for (Path source : collectJavaSources(targets)) {
+                IdeEditorContext openEditor = editorContextFor(source);
+                String content = openEditor == null ? readSource(source) : onUi(openEditor::getText);
+                if (content == null) {
+                    complete = false;
+                    continue;
+                }
+                if (getEditor(source) == null) {
+                    temporarilyOpened.add(source);
+                }
+                lsp.openDocument(source, content);
+                List<Range> declarations = typeDeclarationRanges(lsp.documentSymbols(source, content));
+                if (declarations.isEmpty()) {
+                    complete = false;
+                }
+                declarations.forEach(range -> searches.add(new Search(source, content, range)));
+            }
+            if (searches.isEmpty()) {
+                return false;
+            }
+            ExecutorService pool = Executors.newFixedThreadPool(
+                    Math.min(DELETE_SEARCH_PARALLELISM, searches.size()));
+            try {
+                List<Future<Result>> results = new ArrayList<>();
+                for (Search search : searches) {
+                    results.add(pool.submit(() -> lsp.navigation(Kind.REFERENCES, search.source(),
+                            search.content(), search.declaration().start().line(),
+                            search.declaration().start().col(), DELETE_REFERENCES_TIMEOUT_MS)));
+                }
+                for (Future<Result> pending : results) {
+                    Result references = pending.get();
+                    complete &= references.status() == Status.COMPLETE;
+                    for (Location location : references.locations()) {
+                        Path referenced = JavaNavigation.path(location);
+                        if (referenced != null && !isInside(referenced, deleted)) {
+                            unique.putIfAbsent(locationKey(location), location);
+                        }
+                    }
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            } catch (ExecutionException failure) {
+                log.debug("Busca de usos para a exclusao falhou: {}", rootMessage(failure));
+                return false;
+            } finally {
+                pool.shutdownNow();
+            }
+        } finally {
+            temporarilyOpened.forEach(lsp::closeDocument);
+        }
+        return complete;
     }
 
     private void registerFileWatcher() {
@@ -2375,24 +2419,29 @@ public class JavaIdeAdapter extends IdeAdapter {
         refreshProblemsPanel();
     }
 
-    private static List<Range> declarationRanges(JdtLsService lsp, Path source, String content) {
-        List<DocumentSymbol> symbols = lsp.documentSymbols(source, content);
-
+    static List<Range> typeDeclarationRanges(List<DocumentSymbol> symbols) {
         if (symbols == null || symbols.isEmpty()) {
             return List.of();
         }
-
         List<Range> ranges = new ArrayList<>();
         List<DocumentSymbol> pendingSymbols = new ArrayList<>(symbols);
         for (int index = 0; index < pendingSymbols.size(); index++) {
             DocumentSymbol symbol = pendingSymbols.get(index);
-            if (symbol.children() != null) pendingSymbols.addAll(symbol.children());
+            if (!isTypeSymbol(symbol.kind())) {
+                continue;
+            }
+            pendingSymbols.addAll(symbol.children());
             Range range = symbol.selectionRange() == null ? symbol.range() : symbol.selectionRange();
             if (range != null && range.start() != null) {
                 ranges.add(range);
             }
         }
         return ranges;
+    }
+
+    private static boolean isTypeSymbol(SymbolKind kind) {
+        return kind == SymbolKind.CLASS || kind == SymbolKind.INTERFACE
+                || kind == SymbolKind.ENUM || kind == SymbolKind.STRUCT;
     }
 
     private static List<Path> collectJavaSources(List<Path> targets) {
@@ -5697,6 +5746,10 @@ public class JavaIdeAdapter extends IdeAdapter {
             createRepository(directory, current);
             return;
         }
+        if (JavaFileTemplates.acceptsInterfaces(kind)) {
+            createTypeWithHeritage(kind, directory, current);
+            return;
+        }
         ModernInputDialog.ModernInputDialogBuilder dialog = createModernInputDialogBuilder();
         if (dialog == null) {
             return;
@@ -5708,66 +5761,172 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (typed == null || typed.isBlank()) {
             return;
         }
-
+        JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
         Path file = directory.resolve(JavaFileTemplates.fileNameOf(typed));
-        if (Files.exists(file)) {
-            setStatusBarText(text("status.fileExists", "Java: o arquivo ja existe") + " - "
-                    + file.getFileName());
-            requestOpenFile(file);
-            return;
-        }
+        writeCreatedFile(file, JavaFileTemplates.render(kind,
+                JavaFileTemplates.packageOf(directory, module), typed));
+    }
+
+    private void createTypeWithHeritage(JavaFileTemplates.Kind kind, Path directory,
+                                        JavaProjectDescriptor current) {
         JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
         String packageName = JavaFileTemplates.packageOf(directory, module);
+        JavaTypeCreationPanel panel = new JavaTypeCreationPanel(
+                JavaFileTemplates.acceptsSuperclass(kind),
+                kind == JavaFileTemplates.Kind.INTERFACE
+                        ? text("dialog.newType.extends", "Estende")
+                        : text("dialog.newType.implements", "Implementa"),
+                this::searchTypeCandidates, background, choice -> {
+            Path file = directory.resolve(JavaFileTemplates.fileNameOf(choice.name()));
+            if (openIfExists(file)) {
+                return;
+            }
+            String skeleton = JavaFileTemplates.render(kind, packageName, choice.name(),
+                    choice.superclass(), choice.interfaces());
+            boolean hasSuperclass = JavaFileTemplates.acceptsSuperclass(kind)
+                    && !choice.superclass().isBlank();
+            if (!hasSuperclass && choice.interfaces().isEmpty()) {
+                writeCreatedFile(file, skeleton);
+                return;
+            }
+            setStatusBarText(text("status.newType.generating", "Java: gerando os metodos herdados..."));
+            background.submit(() -> {
+                String generated = withInheritedMembers(file, skeleton, hasSuperclass);
+                SwingUtilities.invokeLater(() -> {
+                    writeCreatedFile(file, generated == null ? skeleton : generated);
+                    if (generated == null) {
+                        setStatusBarText(text("status.newType.notGenerated",
+                                "Java: tipo criado sem os metodos herdados (JDT LS indisponivel)"));
+                    }
+                });
+            });
+        });
+        showPopup(PlatformPopupBuilder.builder()
+                .component(panel)
+                .title(text("dialog.newType.title", "Novo") + " " + kind.displayName())
+                .size(540, 250)
+                .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
+                .onLoad(component -> panel.focusName())
+                .build());
+    }
 
+    private List<JavaTypeCreationPanel.TypeCandidate> searchTypeCandidates(String query) {
+        String term = query == null ? "" : query.trim();
+        if (term.isEmpty()) {
+            return List.of();
+        }
+        String lower = term.toLowerCase(Locale.ROOT);
+        Map<String, JavaTypeCreationPanel.TypeCandidate> found = new LinkedHashMap<>();
+        springIndex.snapshot().types().stream()
+                .filter(type -> type.kind() == JavaType.Kind.CLASS
+                        || type.kind() == JavaType.Kind.INTERFACE)
+                .filter(type -> type.simpleName().toLowerCase(Locale.ROOT).contains(lower))
+                .sorted(Comparator.comparing((JavaType type) ->
+                                !type.simpleName().toLowerCase(Locale.ROOT).startsWith(lower))
+                        .thenComparing(JavaType::simpleName))
+                .forEach(type -> found.putIfAbsent(type.qualifiedName(),
+                        new JavaTypeCreationPanel.TypeCandidate(type.qualifiedName(),
+                                type.kind() == JavaType.Kind.INTERFACE)));
+        JdtLsService lsp = jdtLs;
+        if (lsp != null && lsp.isInteractive()) {
+            for (JdtLsService.TypeSymbol symbol : lsp.workspaceTypes(term)) {
+                found.putIfAbsent(symbol.qualifiedName(), new JavaTypeCreationPanel.TypeCandidate(
+                        symbol.qualifiedName(), symbol.isInterface()));
+            }
+        }
+        return found.values().stream().limit(80).toList();
+    }
+
+    private String withInheritedMembers(Path file, String skeleton, boolean hasSuperclass) {
+        JdtLsService lsp = interactiveServerFor(file);
+        if (lsp == null) {
+            return null;
+        }
         try {
-            Files.createDirectories(directory);
-            Files.writeString(file, JavaFileTemplates.render(kind, packageName, typed));
+            String source = skeleton;
+            if (hasSuperclass) {
+                int line = JavaFileTemplates.closingBraceLine(source);
+                JdtLsService.ConstructorsStatus constructors =
+                        lsp.constructorsStatus(file, source, line, 0);
+                boolean needsConstructor = !constructors.constructors().isEmpty()
+                        && constructors.constructors().stream()
+                        .noneMatch(item -> item.label().endsWith("()"));
+                if (needsConstructor) {
+                    var edits = lsp.generateConstructors(file, source, line, 0,
+                            constructors.constructors(), List.of());
+                    if (edits != null && !edits.isEmpty()) {
+                        source = lsp.applyTextEdits(source, edits);
+                    }
+                }
+            }
+            int line = JavaFileTemplates.closingBraceLine(source);
+            JdtLsService.OverrideStatus status = lsp.overridableMethods(file, source, line, 0);
+            if (status.type().isBlank()) {
+                return null;
+            }
+            List<JdtLsService.SourceItem> abstracts = status.methods().stream()
+                    .filter(JdtLsService.SourceItem::selected).toList();
+            if (!abstracts.isEmpty()) {
+                var edits = lsp.generateOverridableMethods(file, source, line, 0, abstracts);
+                if (edits != null && !edits.isEmpty()) {
+                    source = lsp.applyTextEdits(source, edits);
+                }
+            }
+            return source;
+        } catch (RuntimeException error) {
+            log.warn("Falha ao gerar os metodos herdados de {}", file, error);
+            return null;
+        } finally {
+            lsp.closeDocument(file);
+        }
+    }
+
+    private boolean openIfExists(Path file) {
+        if (!Files.exists(file)) {
+            return false;
+        }
+        setStatusBarText(text("status.fileExists", "Java: o arquivo ja existe") + " - "
+                + file.getFileName());
+        requestOpenFile(file);
+        return true;
+    }
+
+    private void writeCreatedFile(Path file, String source) {
+        if (openIfExists(file)) {
+            return;
+        }
+        try {
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, source);
             JavaFileChangeRouter router = fileChangeRouter;
             if (router != null) {
                 router.acceptCreated(file);
             }
             requestProjectTreeRevealCreated(file);
             requestOpenFile(file);
-        } catch (Exception e) {
-            log.warn("Falha ao criar {}", file, e);
+        } catch (Exception error) {
+            log.warn("Falha ao criar {}", file, error);
             setStatusBarText(text("status.createFailed", "Java: falha ao criar o arquivo") + " - "
-                    + rootMessage(e));
+                    + rootMessage(error));
         }
     }
 
     private void createRepository(Path directory, JavaProjectDescriptor current) {
         JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
+        java.util.function.Function<JpaEntity, JavaModule> moduleOf = entity -> entity.file() == null
+                ? null : current.moduleOf(entity.file()).orElse(null);
         List<JpaEntity> entities = springIndex.snapshot().entities().stream()
                 .filter(JpaEntity::persistent)
-                .filter(entity -> module == null || entity.file() == null
-                        || current.moduleOf(entity.file()).map(module::equals).orElse(false))
-                .sorted(java.util.Comparator.comparing(JpaEntity::type))
+                .sorted(Comparator.comparing((JpaEntity entity) -> module != null
+                                && !Objects.equals(module, moduleOf.apply(entity)))
+                        .thenComparing(JpaEntity::type))
                 .toList();
-        RepositoryCreationPanel panel = new RepositoryCreationPanel(entities, choice -> {
-            Path file = directory.resolve(JavaFileTemplates.fileNameOf(choice.name()));
-            if (Files.exists(file)) {
-                setStatusBarText(text("status.fileExists", "Java: o arquivo ja existe")
-                        + " - " + file.getFileName());
-                requestOpenFile(file);
-                return;
-            }
-            try {
-                Files.createDirectories(directory);
-                Files.writeString(file, JavaFileTemplates.renderRepository(
-                        JavaFileTemplates.packageOf(directory, module), choice.name(),
-                        choice.entity().type(), choice.idType()));
-                JavaFileChangeRouter router = fileChangeRouter;
-                if (router != null) {
-                    router.acceptCreated(file);
-                }
-                requestProjectTreeRevealCreated(file);
-                requestOpenFile(file);
-            } catch (Exception error) {
-                log.warn("Falha ao criar {}", file, error);
-                setStatusBarText(text("status.createFailed", "Java: falha ao criar o arquivo")
-                        + " - " + rootMessage(error));
-            }
-        });
+        RepositoryCreationPanel panel = new RepositoryCreationPanel(entities, entity -> {
+            JavaModule owner = moduleOf.apply(entity);
+            return owner == null || owner.equals(module) ? "" : owner.name();
+        }, choice -> writeCreatedFile(directory.resolve(JavaFileTemplates.fileNameOf(choice.name())),
+                JavaFileTemplates.renderRepository(JavaFileTemplates.packageOf(directory, module),
+                        choice.name(), choice.entity().type(), choice.idType())));
         showPopup(PlatformPopupBuilder.builder()
                 .component(panel)
                 .title(text("dialog.repository.title", "Novo repository"))

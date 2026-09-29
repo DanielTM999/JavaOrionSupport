@@ -55,6 +55,33 @@ class JavaSafeDeleteScannerTest {
     }
 
     @Test
+    void onlyFilesThatCanSeeTheDeletedTypeCount() throws IOException {
+        Path sources = Files.createDirectories(root.resolve("src/main/java"));
+        Path deleted = write(sources, "a/Status.java", "package a; public class Status {}");
+        Path samePackage = write(sources, "a/Uso.java", "package a; class Uso { Status s; }");
+        Path explicit = write(sources, "b/Explicito.java", "package b; import a.Status; class Explicito { Status s; }");
+        Path wildcard = write(sources, "c/Curinga.java", "package c; import a.*; class Curinga { Status s; }");
+        Path qualified = write(sources, "d/Qualificado.java", "package d; class Qualificado { a.Status s; }");
+        Path staticImport = write(sources, "e/Estatico.java",
+                "package e; import static a . Status.valueOf; class Estatico { Object v = valueOf(); }");
+        write(sources, "x/Homonimo.java", "package x; import y.Status; class Homonimo { Status s; }");
+        write(sources, "x/Local.java", "package x; class Local { Status s; }");
+        write(sources, "a2/Sombra.java", "package a; import z.Status; class Sombra { Status s; }");
+
+        List<String> files = JavaSafeDeleteScanner.findExternalUsages(root, List.of(deleted)).stream()
+                .map(Location::uri).distinct().sorted().toList();
+
+        assertEquals(java.util.stream.Stream.of(samePackage, explicit, wildcard, qualified, staticImport)
+                .map(path -> path.toUri().toString()).sorted().toList(), files);
+    }
+
+    private static Path write(Path base, String relative, String content) throws IOException {
+        Path file = base.resolve(relative);
+        Files.createDirectories(file.getParent());
+        return Files.writeString(file, content);
+    }
+
+    @Test
     void ignoresNamesInCommentsStringsBuildOutputAndTheDeletedSelection() throws IOException {
         Path sourceRoot = Files.createDirectories(root.resolve("src/main/java/example"));
         Path deleted = sourceRoot.resolve("TesteDelete.java");

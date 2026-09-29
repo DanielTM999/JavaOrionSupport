@@ -19,6 +19,7 @@ import java.awt.Window;
 import java.awt.event.WindowEvent;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 public final class RepositoryCreationPanel extends JPanel {
 
@@ -30,7 +31,8 @@ public final class RepositoryCreationPanel extends JPanel {
     private final JTextField idType = new JTextField();
     private final JLabel error = new JLabel(" ");
 
-    public RepositoryCreationPanel(List<JpaEntity> entities, Consumer<Choice> onCreate) {
+    public RepositoryCreationPanel(List<JpaEntity> entities, Function<JpaEntity, String> moduleOf,
+                                   Consumer<Choice> onCreate) {
         super(new BorderLayout());
         setBackground(UiTokens.background());
         setBorder(BorderFactory.createEmptyBorder(20, 24, 18, 24));
@@ -52,7 +54,9 @@ public final class RepositoryCreationPanel extends JPanel {
             entity.addItem(candidate);
         }
         entity.setRenderer((list, value, index, selected, focus) -> {
-            JLabel label = new JLabel(value == null ? "" : value.type());
+            String module = value == null ? "" : moduleOf.apply(value);
+            JLabel label = new JLabel(value == null ? ""
+                    : module == null || module.isBlank() ? value.type() : value.type() + "  -  " + module);
             label.setOpaque(true);
             label.setBackground(selected ? list.getSelectionBackground() : list.getBackground());
             label.setForeground(selected ? list.getSelectionForeground() : list.getForeground());
@@ -70,7 +74,7 @@ public final class RepositoryCreationPanel extends JPanel {
             String id = idType.getText().trim();
             JpaEntity chosen = (JpaEntity) entity.getSelectedItem();
             if (chosen == null) {
-                error.setText("Nenhuma entidade @Entity encontrada neste modulo.");
+                error.setText("Nenhuma entidade @Entity encontrada no projeto.");
             } else if (!typeName.matches("[A-Za-z_$][A-Za-z0-9_$]*")) {
                 error.setText("Informe um nome de interface Java valido.");
             } else if (!id.matches("[A-Za-z_$][A-Za-z0-9_$.]*")) {
@@ -86,7 +90,7 @@ public final class RepositoryCreationPanel extends JPanel {
         buttons.add(create);
         add(buttons, BorderLayout.SOUTH);
         if (entities.isEmpty()) {
-            error.setText("Nenhuma entidade @Entity encontrada neste modulo.");
+            error.setText("Nenhuma entidade @Entity encontrada no projeto.");
         }
     }
 

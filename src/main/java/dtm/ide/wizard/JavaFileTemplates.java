@@ -4,6 +4,7 @@ import dtm.ide.project.JavaModule;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -41,15 +42,75 @@ public final class JavaFileTemplates {
     }
 
     public static String render(Kind kind, String packageName, String typeName) {
+        return render(kind, packageName, typeName, null, List.of());
+    }
+
+    public static String render(Kind kind, String packageName, String typeName,
+                                String superclass, List<String> interfaces) {
         String name = sanitizeTypeName(typeName);
+        String sourcePackage = packageName == null ? "" : packageName.trim();
         StringBuilder source = new StringBuilder();
 
-        if (packageName != null && !packageName.isBlank()) {
-            source.append("package ").append(packageName).append(";\n\n");
+        if (!sourcePackage.isEmpty()) {
+            source.append("package ").append(sourcePackage).append(";\n\n");
         }
-        source.append(importsFor(kind));
-        source.append(bodyFor(kind, name));
+        StringBuilder typeImports = new StringBuilder();
+        String superName = acceptsSuperclass(kind) && superclass != null && !superclass.isBlank()
+                ? importType(typeImports, sourcePackage, superclass.trim()) : "";
+        List<String> interfaceNames = new ArrayList<>();
+        if (acceptsInterfaces(kind) && interfaces != null) {
+            for (String type : new LinkedHashSet<>(interfaces)) {
+                if (type != null && !type.isBlank()) {
+                    interfaceNames.add(importType(typeImports, sourcePackage, type.trim()));
+                }
+            }
+        }
+        String kindImports = importsFor(kind);
+        if (typeImports.isEmpty()) {
+            source.append(kindImports);
+        } else {
+            if (!kindImports.isEmpty()) {
+                source.append(kindImports, 0, kindImports.length() - 1);
+            }
+            source.append(typeImports).append('\n');
+        }
+        source.append(bodyFor(kind, name, clauseFor(kind, superName, interfaceNames)));
         return source.toString();
+    }
+
+    public static boolean acceptsSuperclass(Kind kind) {
+        return kind == Kind.CLASS || kind == Kind.SERVICE
+                || kind == Kind.REST_CONTROLLER || kind == Kind.CONFIGURATION;
+    }
+
+    public static boolean acceptsInterfaces(Kind kind) {
+        return acceptsSuperclass(kind) || kind == Kind.INTERFACE
+                || kind == Kind.ENUM || kind == Kind.RECORD;
+    }
+
+    public static int closingBraceLine(String source) {
+        String[] lines = source.split("\n", -1);
+        for (int i = lines.length - 1; i >= 0; i--) {
+            if (lines[i].startsWith("}")) {
+                return i;
+            }
+        }
+        return Math.max(0, lines.length - 1);
+    }
+
+    private static String clauseFor(Kind kind, String superName, List<String> interfaceNames) {
+        String interfaces = String.join(", ", interfaceNames);
+        if (kind == Kind.INTERFACE) {
+            return interfaces.isEmpty() ? "" : " extends " + interfaces;
+        }
+        StringBuilder clause = new StringBuilder();
+        if (!superName.isEmpty()) {
+            clause.append(" extends ").append(superName);
+        }
+        if (!interfaces.isEmpty()) {
+            clause.append(" implements ").append(interfaces);
+        }
+        return clause.toString();
     }
 
     public static String renderRepository(String packageName, String typeName,
@@ -118,18 +179,18 @@ public final class JavaFileTemplates {
         };
     }
 
-    private static String bodyFor(Kind kind, String name) {
+    private static String bodyFor(Kind kind, String name, String clause) {
         return switch (kind) {
-            case CLASS -> "public class " + name + " {\n}\n";
-            case INTERFACE -> "public interface " + name + " {\n}\n";
-            case ENUM -> "public enum " + name + " {\n}\n";
-            case RECORD -> "public record " + name + "() {\n}\n";
+            case CLASS -> "public class " + name + clause + " {\n}\n";
+            case INTERFACE -> "public interface " + name + clause + " {\n}\n";
+            case ENUM -> "public enum " + name + clause + " {\n}\n";
+            case RECORD -> "public record " + name + "()" + clause + " {\n}\n";
             case ANNOTATION -> "public @interface " + name + " {\n}\n";
-            case SERVICE -> "@Service\npublic class " + name + " {\n}\n";
+            case SERVICE -> "@Service\npublic class " + name + clause + " {\n}\n";
             case REPOSITORY -> "@Repository\npublic interface " + name + " {\n}\n";
-            case CONFIGURATION -> "@Configuration\npublic class " + name + " {\n}\n";
+            case CONFIGURATION -> "@Configuration\npublic class " + name + clause + " {\n}\n";
             case REST_CONTROLLER -> "@RestController\n@RequestMapping(\"/" + endpointPath(name) + "\")\n"
-                    + "public class " + name + " {\n\n"
+                    + "public class " + name + clause + " {\n\n"
                     + "    @GetMapping\n"
                     + "    public String listar() {\n"
                     + "        return \"\";\n"

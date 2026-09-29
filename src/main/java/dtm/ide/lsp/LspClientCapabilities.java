@@ -127,6 +127,7 @@ final class LspClientCapabilities {
                 provided(caps, "semanticTokensProvider"),
                 provided(caps, "callHierarchyProvider"),
                 provided(caps, "executeCommandProvider"),
+                provided(caps, "workspaceSymbolProvider"),
                 caps.path("completionProvider").path("resolveProvider").asBoolean(false),
                 syncKind(caps) == 2,
                 triggerCharacters(caps.get("completionProvider")),

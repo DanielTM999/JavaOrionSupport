@@ -160,6 +160,62 @@ class JavaFileTemplatesTest {
         assertFalse(JavaFileTemplates.Kind.TEST.isSpring());
     }
 
+    @Test
+    void serviceWithHeritageImportsOnlyWhatIsNeeded() {
+        String source = JavaFileTemplates.render(JavaFileTemplates.Kind.SERVICE, "com.example.service",
+                "ClienteService", "com.example.base.BaseService",
+                List.of("org.springframework.boot.CommandLineRunner",
+                        "com.example.service.Auditavel", "java.lang.Runnable"));
+
+        assertTrue(source.contains("import org.springframework.stereotype.Service;\n"
+                + "import com.example.base.BaseService;\n"
+                + "import org.springframework.boot.CommandLineRunner;\n\n@Service"));
+        assertFalse(source.contains("import com.example.service.Auditavel;"));
+        assertFalse(source.contains("import java.lang.Runnable;"));
+        assertTrue(source.contains("public class ClienteService extends BaseService"
+                + " implements CommandLineRunner, Auditavel, Runnable {"));
+    }
+
+    @Test
+    void classWithoutPreviousImportsGetsASingleBlankLineBeforeTheType() {
+        String source = JavaFileTemplates.render(JavaFileTemplates.Kind.CLASS, "com.example",
+                "Tarefa", null, List.of("java.io.Serializable"));
+
+        assertEquals("package com.example;\n\nimport java.io.Serializable;\n\n"
+                + "public class Tarefa implements Serializable {\n}\n", source);
+    }
+
+    @Test
+    void interfaceEnumAndRecordUseTheRightKeyword() {
+        assertTrue(JavaFileTemplates.render(JavaFileTemplates.Kind.INTERFACE, "com.example", "Repo",
+                "com.example.Ignorada", List.of("com.example.A", "com.example.B"))
+                .contains("public interface Repo extends A, B {"));
+        assertTrue(JavaFileTemplates.render(JavaFileTemplates.Kind.ENUM, "com.example", "Status",
+                null, List.of("com.example.Rotulado"))
+                .contains("public enum Status implements Rotulado {"));
+        assertTrue(JavaFileTemplates.render(JavaFileTemplates.Kind.RECORD, "com.example", "Ponto",
+                null, List.of("java.io.Serializable"))
+                .contains("public record Ponto() implements Serializable {"));
+    }
+
+    @Test
+    void heritageIsIgnoredWhereTheKindDoesNotSupportIt() {
+        String annotation = JavaFileTemplates.render(JavaFileTemplates.Kind.ANNOTATION, "com.example",
+                "Marca", "com.example.Base", List.of("com.example.A"));
+
+        assertEquals(render(JavaFileTemplates.Kind.ANNOTATION).replace("Exemplo", "Marca"), annotation);
+    }
+
+    @Test
+    void closingBraceLinePointsInsideTheTypeBody() {
+        String source = JavaFileTemplates.render(JavaFileTemplates.Kind.REST_CONTROLLER,
+                "com.example", "ClienteController", null, List.of("com.example.Api"));
+        String[] lines = source.split("\n");
+
+        assertEquals("}", lines[JavaFileTemplates.closingBraceLine(source)]);
+        assertEquals(lines.length - 1, JavaFileTemplates.closingBraceLine(source));
+    }
+
     private static String render(JavaFileTemplates.Kind kind) {
         return JavaFileTemplates.render(kind, "com.example", "Exemplo");
     }

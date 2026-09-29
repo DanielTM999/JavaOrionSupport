@@ -11,8 +11,10 @@ import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -23,6 +25,9 @@ public final class JavaSafeDeleteScanner {
     private static final Pattern TYPE_DECLARATION = Pattern.compile(
             "\\b(?:class|interface|enum|record)\\s+([A-Za-z_$][A-Za-z0-9_$]*)"
                     + "|@interface\\s+([A-Za-z_$][A-Za-z0-9_$]*)");
+    private static final Pattern PACKAGE = Pattern.compile("\\bpackage\\s+([\\w$.\\s]+?)\\s*;");
+    private static final Pattern IMPORT = Pattern.compile(
+            "\\bimport\\s+(?:static\\s+)?([\\w$][\\w$.\\s]*(?:\\.\\s*\\*)?)\\s*;");
     private static final int MAX_FILES = 50_000;
 
     private JavaSafeDeleteScanner() {
@@ -44,16 +49,20 @@ public final class JavaSafeDeleteScanner {
         if (projectRoot == null || targets == null || targets.isEmpty()) return new ScanResult(List.of(), false);
         Path root = projectRoot.toAbsolutePath().normalize();
         Set<Path> deleted = normalizedTargets(targets);
-        Set<String> symbols = new LinkedHashSet<>();
+        Map<String, Set<String>> symbols = new LinkedHashMap<>();
         boolean[] complete = {true};
         for (Path target : deleted) {
             try (var walk = Files.walk(target)) {
                 for (Path source : walk.filter(JavaProjectConventions::isJava).filter(Files::isRegularFile).toList()) {
-                    String name = source.getFileName().toString();
-                    symbols.add(name.substring(0, name.length() - 5));
                     String content = buffers.containsKey(source) ? buffers.get(source) : Files.readString(source);
-                    Matcher matcher = TYPE_DECLARATION.matcher(maskNonCode(content));
-                    while (matcher.find()) symbols.add(matcher.group(1) == null ? matcher.group(2) : matcher.group(1));
+                    String code = maskNonCode(content);
+                    String packageName = packageOf(code);
+                    String name = source.getFileName().toString();
+                    declare(symbols, name.substring(0, name.length() - 5), packageName);
+                    Matcher matcher = TYPE_DECLARATION.matcher(code);
+                    while (matcher.find()) {
+                        declare(symbols, matcher.group(1) == null ? matcher.group(2) : matcher.group(1), packageName);
+                    }
                 }
             } catch (IOException | java.io.UncheckedIOException | SecurityException failure) { complete[0] = false; }
         }
@@ -113,11 +122,65 @@ public final class JavaSafeDeleteScanner {
         return names;
     }
 
-    private static void scanText(Path file, String text, Set<String> symbols, List<Location> usages) {
+    private static void declare(Map<String, Set<String>> symbols, String name, String packageName) {
+        symbols.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(packageName);
+    }
+
+    static String packageOf(String code) {
+        Matcher matcher = PACKAGE.matcher(code);
+        return matcher.find() ? matcher.group(1).replaceAll("\\s+", "") : "";
+    }
+
+    static Set<String> visibleSymbols(String code, Map<String, Set<String>> symbols) {
+        String packageName = packageOf(code);
+        List<String> imports = new ArrayList<>();
+        Matcher matcher = IMPORT.matcher(code);
+        while (matcher.find()) {
+            imports.add(matcher.group(1).replaceAll("\\s+", ""));
+        }
+        String compact = code.replaceAll("\\s*\\.\\s*", ".");
+        Set<String> visible = new LinkedHashSet<>();
+        for (Map.Entry<String, Set<String>> symbol : symbols.entrySet()) {
+            String name = symbol.getKey();
+            Set<String> packages = symbol.getValue();
+            List<String> explicit = imports.stream()
+                    .filter(imported -> !imported.endsWith(".*") && imported.endsWith("." + name))
+                    .toList();
+            if (!explicit.isEmpty()) {
+                if (explicit.stream().anyMatch(imported -> declaredIn(imported, packages))) {
+                    visible.add(name);
+                }
+                continue;
+            }
+            boolean samePackage = packages.contains(packageName);
+            boolean wildcard = packages.stream().anyMatch(declared -> !declared.isEmpty()
+                    && imports.contains(declared + ".*"));
+            boolean qualified = packages.stream().anyMatch(declared -> !declared.isEmpty()
+                    && Pattern.compile("(?<![\\w$.])" + Pattern.quote(declared + "." + name) + "(?![\\w$])")
+                    .matcher(compact).find());
+            if (samePackage || wildcard || qualified) {
+                visible.add(name);
+            }
+        }
+        return visible;
+    }
+
+    private static boolean declaredIn(String imported, Set<String> packages) {
+        return packages.stream().anyMatch(declared -> declared.isEmpty()
+                ? !imported.contains(".")
+                : imported.startsWith(declared + "."));
+    }
+
+    private static void scanText(Path file, String text, Map<String, Set<String>> declared,
+                                 List<Location> usages) {
         if (text.isEmpty()) {
             return;
         }
         String code = maskNonCode(text);
+        Set<String> symbols = visibleSymbols(code, declared);
+        if (symbols.isEmpty()) {
+            return;
+        }
         int line = 0;
         int column = 0;
         for (int index = 0; index < code.length();) {

@@ -26,6 +26,10 @@ public final class SpringSourceParser {
     private static final Pattern VALUE_ANNOTATION = Pattern.compile(
             "@Value\\s*\\(\\s*\"([^\"]*)\"\\s*\\)");
 
+    private static final Pattern MODIFIER_STATIC = Pattern.compile("\\bstatic\\b");
+
+    private static final Pattern MODIFIER_FINAL = Pattern.compile("\\bfinal\\b");
+
     private static final Pattern PLACEHOLDER = Pattern.compile(
             "\\$\\{\\s*([^:}\\s]+)\\s*(?::([^}]*))?}");
 
@@ -133,8 +137,11 @@ public final class SpringSourceParser {
                     isConditional(annotations),
                     traitsOf(annotations)));
 
-            injections.addAll(constructorInjections(body, simpleName, qualifiedName, file,
-                    lineStarts, bodyOffset));
+            List<SpringInjection> constructorInjections = constructorInjections(body, simpleName,
+                    qualifiedName, file, lineStarts, bodyOffset);
+            injections.addAll(constructorInjections);
+            injections.addAll(lombokConstructorInjections(body, annotations, simpleName,
+                    qualifiedName, file, lineStarts, bodyOffset, constructorInjections));
             injections.addAll(fieldInjections(body, qualifiedName, file, lineStarts, bodyOffset));
             injections.addAll(setterInjections(body, qualifiedName, file, lineStarts, bodyOffset));
 
@@ -308,6 +315,76 @@ public final class SpringSourceParser {
             }
         }
         return injections;
+    }
+
+    private static List<SpringInjection> lombokConstructorInjections(Source body,
+                                                                     List<Annotation> typeAnnotations,
+                                                                     String simpleName, String ownerType,
+                                                                     Path file, int[] lineStarts, int offset,
+                                                                     List<SpringInjection> explicit) {
+        boolean allArgs = JavaSourceLexer.hasAnnotation(typeAnnotations, "allargsconstructor");
+        boolean requiredArgs = JavaSourceLexer.hasAnnotation(typeAnnotations, "requiredargsconstructor")
+                || (JavaSourceLexer.hasAnnotation(typeAnnotations, "data")
+                && !hasExplicitConstructor(body, simpleName));
+        if (!allArgs && !requiredArgs) {
+            return List.of();
+        }
+        Set<String> covered = new java.util.HashSet<>();
+        explicit.forEach(injection -> covered.add(injection.memberName()));
+        String code = body.structural();
+        int[] depth = braceDepths(code);
+        List<SpringInjection> injections = new ArrayList<>();
+        Matcher fields = JavaSourceLexer.FIELD.matcher(code);
+        while (fields.find()) {
+            if (depth[fields.start(1)] != 0) {
+                continue;
+            }
+            String modifiers = code.substring(fields.start(), fields.start(1));
+            if (MODIFIER_STATIC.matcher(modifiers).find() || fields.group().endsWith("=")) {
+                continue;
+            }
+            List<Annotation> annotations = JavaSourceLexer.annotationsBefore(body, fields.start());
+            boolean required = MODIFIER_FINAL.matcher(modifiers).find()
+                    || JavaSourceLexer.hasAnnotation(annotations, "nonnull");
+            if ((!allArgs && !required) || JavaSourceLexer.hasAnnotation(annotations, "value")
+                    || JavaSourceLexer.hasAnyAnnotation(annotations, INJECTION_ANNOTATIONS)
+                    || !covered.add(fields.group(2))) {
+                continue;
+            }
+            injections.add(new SpringInjection(ownerType, fields.group(1), fields.group(2),
+                    SpringInjection.Kind.CONSTRUCTOR, file,
+                    JavaSourceLexer.lineOf(lineStarts, offset + fields.start(1)),
+                    qualifierOf(annotations),
+                    annotations.stream().map(Annotation::simpleName).distinct().toList()));
+        }
+        return injections;
+    }
+
+    private static boolean hasExplicitConstructor(Source body, String simpleName) {
+        Matcher methods = JavaSourceLexer.METHOD.matcher(body.structural());
+        while (methods.find()) {
+            if (simpleName.equals(methods.group(2)) && methods.group(1) == null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static int[] braceDepths(String code) {
+        int[] depths = new int[code.length() + 1];
+        int depth = 0;
+        for (int i = 0; i < code.length(); i++) {
+            char c = code.charAt(i);
+            if (c == '}') {
+                depth = Math.max(0, depth - 1);
+            }
+            depths[i] = depth;
+            if (c == '{') {
+                depth++;
+            }
+        }
+        depths[code.length()] = depth;
+        return depths;
     }
 
     private static List<SpringInjection> beanMethodInjections(Source body, String ownerType, Path file,

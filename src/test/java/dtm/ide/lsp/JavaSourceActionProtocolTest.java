@@ -35,6 +35,28 @@ class JavaSourceActionProtocolTest {
     }
 
     @Test
+    void workspaceSymbolsKeepOnlyClassesAndInterfaces() throws Exception {
+        JsonNode response = JSON.readTree("""
+                [
+                  {"name":"CommandLineRunner","kind":11,"containerName":"org.springframework.boot"},
+                  {"name":"BaseService","kind":5,"containerName":"demo.base"},
+                  {"name":"Status","kind":10,"containerName":"demo"},
+                  {"name":"run","kind":6,"containerName":"demo.Main"},
+                  {"name":"BaseService","kind":5,"containerName":"demo.base"},
+                  {"name":"SemPacote","kind":5}
+                ]
+                """);
+
+        List<JdtLsService.TypeSymbol> types = JdtLsService.parseWorkspaceTypes(response);
+
+        assertEquals(List.of(
+                new JdtLsService.TypeSymbol("org.springframework.boot.CommandLineRunner", true),
+                new JdtLsService.TypeSymbol("demo.base.BaseService", false),
+                new JdtLsService.TypeSymbol("SemPacote", false)), types);
+        assertTrue(JdtLsService.parseWorkspaceTypes(null).isEmpty());
+    }
+
+    @Test
     void preservesRawBindingsForGenerationPayloads() throws Exception {
         JsonNode fields = JSON.readTree("""
                 [{"bindingKey":"x","name":"id","type":"String","isSelected":false}]

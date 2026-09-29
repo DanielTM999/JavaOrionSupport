@@ -407,6 +407,145 @@ class SpringSourceParserTest {
         return parse(annotation + "\npublic class Exemplo { }").beans().getFirst().stereotype();
     }
 
+    @Test
+    void requiredArgsConstructorInjectsFinalAndNonNullFieldsOnly() {
+        List<SpringInjection> injections = parse("""
+                package com.example;
+
+                @Service
+                @RequiredArgsConstructor
+                public class PedidoService {
+                    private static final Logger LOG = Logger.getLogger("x");
+                    private final ClienteService clienteService;
+                    @Qualifier("rapido")
+                    private final Frete frete;
+                    @NonNull
+                    private Auditoria auditoria;
+                    private final List<String> nomes = new ArrayList<>();
+                    @Value("${pedido.limite}")
+                    private final int limite;
+                    private Cache cache;
+
+                    public void executar() {
+                        final Pedido pedido = novo();
+                        Cache local;
+                    }
+
+                    static class Interna {
+                        private final Ignorado ignorado;
+                    }
+                }
+                """).injections();
+
+        assertEquals(List.of("clienteService", "frete", "auditoria"),
+                injections.stream().map(SpringInjection::memberName).toList());
+        assertEquals(SpringInjection.Kind.CONSTRUCTOR, injections.getFirst().kind());
+        assertEquals("ClienteService", injections.getFirst().targetType());
+        assertEquals(7, injections.getFirst().line());
+        assertEquals("rapido", injections.get(1).qualifier());
+    }
+
+    @Test
+    void allArgsConstructorInjectsEveryInstanceFieldWithoutInitializer() {
+        List<SpringInjection> injections = parse("""
+                @Component
+                @AllArgsConstructor
+                public class Relatorio {
+                    private static Relatorio instancia;
+                    private Gerador gerador;
+                    private final Formato formato;
+                    private int paginas = 1;
+                }
+                """).injections();
+
+        assertEquals(List.of("gerador", "formato"),
+                injections.stream().map(SpringInjection::memberName).toList());
+    }
+
+    @Test
+    void dataOnlyInjectsWhenThereIsNoExplicitConstructor() {
+        assertEquals(1, parse("""
+                @Component
+                @Data
+                public class Config {
+                    private final Fonte fonte;
+                }
+                """).injections().size());
+
+        List<SpringInjection> explicit = parse("""
+                @Component
+                @Data
+                public class Config {
+                    private final Fonte fonte;
+                    public Config(Fonte fonte) {
+                        this.fonte = fonte;
+                    }
+                }
+                """).injections();
+        assertEquals(1, explicit.size());
+        assertEquals(5, explicit.getFirst().line(), "vem do construtor explicito, nao do Lombok");
+    }
+
+    @Test
+    void autowiredFinalFieldIsNotCountedTwice() {
+        assertEquals(1, parse("""
+                @Service
+                @RequiredArgsConstructor
+                public class Servico {
+                    @Autowired
+                    private final Dependencia dependencia;
+                }
+                """).injections().size());
+    }
+
+    @Test
+    void lombokInjectionThroughAnInterfaceResolvesToTheImplementation() {
+        SpringSourceParser.ParseResult contract = SpringSourceParser.parse(
+                Path.of("/p/consulta/src/main/java/cautcar/laudos/service/ConsultaVeicularService.java"), """
+                package cautcar.laudos.service;
+                public interface ConsultaVeicularService {
+                }
+                """);
+        SpringSourceParser.ParseResult implementation = SpringSourceParser.parse(
+                Path.of("/p/consulta/src/main/java/cautcar/laudos/service/implementations/ConsultaVeicularServiceimpl.java"), """
+                package cautcar.laudos.service.implementations;
+                import cautcar.laudos.service.ConsultaVeicularService;
+                import cautcar.laudos.services.common.ContextBaseService;
+                @Service
+                @RequiredArgsConstructor
+                public class ConsultaVeicularServiceimpl extends ContextBaseService implements ConsultaVeicularService{
+                    private final ApplicationContext context;
+                }
+                """);
+        SpringSourceParser.ParseResult consumer = SpringSourceParser.parse(
+                Path.of("/p/LaudoCautelar/src/main/java/cautcar/laudos/services/consulta/ConsultaCautelarServiceData.java"), """
+                package cautcar.laudos.services.consulta;
+                import cautcar.laudos.service.ConsultaVeicularService;
+                @Service
+                @RequiredArgsConstructor
+                public class ConsultaCautelarServiceData {
+                    private final ConsultaVeicularService consultaVeicularService;
+                }
+                """);
+        List<SpringBean> beans = new java.util.ArrayList<>(implementation.beans());
+        beans.addAll(consumer.beans());
+        List<SpringInjection> injections = new java.util.ArrayList<>(implementation.injections());
+        injections.addAll(consumer.injections());
+        List<JavaType> types = new java.util.ArrayList<>(contract.types());
+        types.addAll(implementation.types());
+        types.addAll(consumer.types());
+        SpringIndexSnapshot snapshot = new SpringIndexSnapshot(Path.of("/p"), beans, injections,
+                List.of(), List.of(), List.of(), List.of(), types);
+
+        SpringBean impl = snapshot.beans().stream()
+                .filter(bean -> bean.simpleName().equals("ConsultaVeicularServiceimpl"))
+                .findFirst().orElseThrow();
+        List<SpringInjection> usages = snapshot.injectionsOf(impl);
+
+        assertEquals(1, usages.size());
+        assertEquals("consultaVeicularService", usages.getFirst().memberName());
+    }
+
     private static SpringSourceParser.ParseResult parse(String source) {
         return SpringSourceParser.parse(FILE, source);
     }
