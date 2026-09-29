@@ -28,6 +28,17 @@ class LspClientCapabilitiesTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void advertisesDiagnosticTagsSoUnusedCodeCanBeFaded() {
+        Map<String, Object> capabilities = LspClientCapabilities.build(List.of(), List.of());
+        Map<String, Object> textDocument =
+                (Map<String, Object>) capabilities.get("textDocument");
+        Map<String, Object> publish = (Map<String, Object>) textDocument.get("publishDiagnostics");
+
+        assertEquals(Map.of("valueSet", List.of(1, 2)), publish.get("tagSupport"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void advertisesLabelDetailsSoTypesDoNotArriveWithThePackageInTheLabel() {
         Map<String, Object> capabilities = LspClientCapabilities.build(List.of(), List.of());
         Map<String, Object> textDocument =

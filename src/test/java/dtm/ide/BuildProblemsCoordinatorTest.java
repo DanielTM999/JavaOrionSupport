@@ -93,6 +93,23 @@ class BuildProblemsCoordinatorTest {
         assertEquals(1, coordinator.diagnostics(other).size());
     }
 
+    @Test
+    void formattingMovesBuildAndLiveProblemsWithoutClearingThem() {
+        BuildProblemsCoordinator coordinator = new BuildProblemsCoordinator();
+        Path file = root.resolve("App.java");
+        BuildDiagnostic issue = new BuildDiagnostic(file, 2, 9, DiagnosticSeverity.ERROR,
+                "issue", "javac");
+        coordinator.replaceBuild(List.of(issue));
+        coordinator.publishLive(file, List.of(issue));
+
+        assertTrue(coordinator.move(file, "class App {\n    int field;\n}",
+                "class App {\n\n    int field;\n}"));
+
+        assertEquals(3, coordinator.buildProblems().getFirst().line());
+        assertEquals(3, coordinator.liveProblems().getFirst().line());
+        assertEquals(2, coordinator.diagnostics(file).getFirst().startLine());
+    }
+
     private static BuildDiagnostic problem(Path file, String message) {
         return new BuildDiagnostic(file, 1, 1, DiagnosticSeverity.ERROR, message, "test");
     }

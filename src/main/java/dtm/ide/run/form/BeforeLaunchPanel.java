@@ -8,6 +8,8 @@ import dtm.ide.ui.PillButtons;
 import dtm.ide.ui.UiSupport;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.i18n.I18n;
+import dtm.stools.component.popup.ModernComponentDialog;
+import dtm.stools.component.popup.ModernDialog;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -15,7 +17,6 @@ import javax.swing.JComboBox;
 import javax.swing.JCheckBox;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
-import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
@@ -45,6 +46,8 @@ public final class BeforeLaunchPanel extends JPanel {
     private final Supplier<List<RunConfigurationData>> configurationsSupplier;
     private final Supplier<String> currentIdSupplier;
     private final Runnable onChanged;
+    private final Supplier<ModernDialog.ModernDialogBuilder> dialogBuilder;
+    private final Supplier<ModernComponentDialog.ModernComponentDialogBuilder<Boolean>> componentDialogBuilder;
 
     private final JButton addButton;
     private final JButton removeButton;
@@ -53,12 +56,16 @@ public final class BeforeLaunchPanel extends JPanel {
 
     public BeforeLaunchPanel(Supplier<List<RunConfigurationData>> configurationsSupplier,
                              Supplier<String> currentIdSupplier,
-                             Runnable onChanged) {
+                             Runnable onChanged,
+                             Supplier<ModernDialog.ModernDialogBuilder> dialogBuilder,
+                             Supplier<ModernComponentDialog.ModernComponentDialogBuilder<Boolean>> componentDialogBuilder) {
         super(new BorderLayout(0, UiTokens.space(1)));
         this.configurationsSupplier = configurationsSupplier;
         this.currentIdSupplier = currentIdSupplier;
         this.onChanged = onChanged == null ? () -> {
         } : onChanged;
+        this.dialogBuilder = dialogBuilder;
+        this.componentDialogBuilder = componentDialogBuilder;
 
         setOpaque(false);
         addButton = PillButtons.secondary(text("action.add", "Adicionar"), JavaIcons.create(14));
@@ -148,15 +155,17 @@ public final class BeforeLaunchPanel extends JPanel {
             candidates.add(configuration);
         }
         if (candidates.isEmpty()) {
-            JOptionPane.showMessageDialog(this,
-                    text("empty.message",
+            dialogBuilder.get()
+                    .type(ModernDialog.Type.INFO)
+                    .title(text("empty.title", "Antes de executar"))
+                    .message(text("empty.message",
                             "Nenhuma outra configuracao salva para adicionar. Crie a configuracao "
-                                    + "primeiro e volte aqui."),
-                    text("empty.title", "Antes de executar"), JOptionPane.INFORMATION_MESSAGE);
+                                    + "primeiro e volte aqui."))
+                    .show();
             return;
         }
         StepDialog dialog = new StepDialog(candidates);
-        if (dialog.show(this)) {
+        if (dialog.show()) {
             model.rows.add(dialog.toStep());
             model.fireTableDataChanged();
             table.setRowSelectionInterval(model.rows.size() - 1, model.rows.size() - 1);
@@ -285,7 +294,7 @@ public final class BeforeLaunchPanel extends JPanel {
             RunFormUi.fill(mode, modes, modes.getFirst());
         }
 
-        private boolean show(JComponent parent) {
+        private boolean show() {
             JPanel form = new JPanel(new java.awt.GridLayout(0, 1, 0, UiTokens.space(1)));
             form.setOpaque(false);
             form.add(label(text("field.configuration", "Configuracao")));
@@ -294,10 +303,13 @@ public final class BeforeLaunchPanel extends JPanel {
             form.add(mode);
             form.add(waitForExit);
 
-            int result = JOptionPane.showConfirmDialog(parent, form,
-                    text("dialog.title", "Adicionar passo"),
-                    JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-            return result == JOptionPane.OK_OPTION && selected() != null;
+            Boolean confirmed = componentDialogBuilder.get()
+                    .type(ModernDialog.Type.QUESTION)
+                    .title(text("dialog.title", "Adicionar passo"))
+                    .component(form)
+                    .result(context -> Boolean.TRUE)
+                    .show();
+            return Boolean.TRUE.equals(confirmed) && selected() != null;
         }
 
         private JLabel label(String value) {

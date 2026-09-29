@@ -62,5 +62,15 @@ class LspProgressAggregatorTest {
                 LspProgressAggregator.phaseOf("Building workspace"));
         assertEquals(LspProgressAggregator.Phase.OTHER,
                 LspProgressAggregator.phaseOf("Computing hover"));
+        assertEquals(LspProgressAggregator.Phase.OTHER,
+                LspProgressAggregator.phaseOf("Publishing diagnostics"));
+    }
+
+    @Test
+    void routineDiagnosticsDoNotShowWorkProgressButBuildDoes() {
+        LspProgressAggregator progress = new LspProgressAggregator();
+        assertTrue(!progress.begin("1", "Publishing diagnostics", "", -1).visibleWork());
+        assertTrue(progress.begin("2", "Building workspace", "", 10).visibleWork());
+        assertTrue(!progress.end("2").visibleWork());
     }
 }

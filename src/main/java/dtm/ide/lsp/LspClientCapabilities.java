@@ -53,7 +53,9 @@ final class LspClientCapabilities {
         textDocument.put("formatting", Map.of("dynamicRegistration", false));
         textDocument.put("rangeFormatting", Map.of("dynamicRegistration", false));
         textDocument.put("rename", Map.of("dynamicRegistration", false, "prepareSupport", true));
-        textDocument.put("publishDiagnostics", Map.of("relatedInformation", true));
+        textDocument.put("publishDiagnostics", Map.of(
+                "relatedInformation", true,
+                "tagSupport", Map.of("valueSet", List.of(1, 2))));
         textDocument.put("inlayHint", Map.of("dynamicRegistration", false));
         textDocument.put("callHierarchy", Map.of("dynamicRegistration", false));
         textDocument.put("selectionRange", Map.of("dynamicRegistration", false));

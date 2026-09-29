@@ -2,6 +2,7 @@ package dtm.ide;
 
 import dtm.ide.build.BuildDiagnostic;
 import dtm.ide.build.BuildDiagnosticParser;
+import dtm.ide.inspection.JavaDiagnosticEdits;
 import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
 
 import java.nio.file.Path;
@@ -79,6 +80,35 @@ final class BuildProblemsCoordinator {
 
     synchronized boolean supersedeAll(Path file) {
         return removeMatching(problem -> file.equals(problem.file()));
+    }
+
+    synchronized boolean move(Path file, String before, String after) {
+        boolean changed = false;
+        for (Map.Entry<Channel, List<BuildDiagnostic>> entry : channels.entrySet()) {
+            List<BuildDiagnostic> shifted = entry.getValue().stream()
+                    .map(problem -> file.equals(problem.file()) ? moved(problem, before, after) : problem)
+                    .toList();
+            changed |= !shifted.equals(entry.getValue());
+            entry.setValue(shifted);
+        }
+        List<BuildDiagnostic> live = liveProblems.get(file);
+        if (live != null) {
+            List<BuildDiagnostic> shifted = live.stream().map(problem -> moved(problem, before, after)).toList();
+            changed |= !shifted.equals(live);
+            liveProblems.put(file, shifted);
+        }
+        if (changed) reindex();
+        return changed;
+    }
+
+    private static BuildDiagnostic moved(BuildDiagnostic problem, String before, String after) {
+        if (!problem.hasLocation()) return problem;
+        Diagnostic shifted = JavaDiagnosticEdits.move(List.of(problem.toEditorDiagnostic()),
+                before, after).getFirst();
+        if (shifted.startLine() == problem.line() - 1
+                && shifted.startCol() == Math.max(0, problem.column() - 1)) return problem;
+        return new BuildDiagnostic(problem.file(), shifted.startLine() + 1,
+                shifted.startCol() + 1, problem.severity(), problem.message(), problem.source());
     }
 
     static boolean isCompilerProblem(BuildDiagnostic problem) {

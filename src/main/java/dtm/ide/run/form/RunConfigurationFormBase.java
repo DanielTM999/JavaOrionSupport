@@ -253,7 +253,8 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
                 common("section.beforeLaunch.hint",
                         "Configuracoes ja salvas executadas em ordem antes desta."));
         beforeLaunchPanel = new BeforeLaunchPanel(
-                () -> context.configurations(), () -> configurationId, this::revalidateFields);
+                () -> context.configurations(), () -> configurationId, this::revalidateFields,
+                context::dialogBuilder, context::componentDialogBuilder);
         section.addComponent(beforeLaunchPanel);
         return section;
     }

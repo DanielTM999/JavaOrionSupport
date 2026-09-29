@@ -125,6 +125,24 @@ class LspConversionsTest {
     }
 
     @Test
+    void unnecessaryTagMarksTheDiagnosticForFading() {
+        Diagnostic tagged = LspConversions.diagnostic(json("""
+                {"range":{"start":{"line":3,"character":12},"end":{"line":3,"character":20}},
+                 "severity":2,"message":"never used locally","tags":[1]}
+                """));
+        Diagnostic deprecated = LspConversions.diagnostic(json("""
+                {"range":{"start":{"line":3,"character":12},"end":{"line":3,"character":20}},
+                 "severity":2,"message":"deprecated","tags":[2]}
+                """));
+
+        assertTrue(tagged.unnecessary());
+        assertFalse(deprecated.unnecessary());
+        assertFalse(LspConversions.diagnostic(json("""
+                {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"message":"x"}
+                """)).unnecessary());
+    }
+
+    @Test
     void diagnosticWithoutMessageIsDropped() {
         assertNull(LspConversions.diagnostic(json("""
                 {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}}

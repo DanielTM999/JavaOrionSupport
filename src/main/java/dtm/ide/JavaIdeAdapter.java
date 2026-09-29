@@ -141,6 +141,8 @@ import dtm.ide.spring.SpringEndpoint;
 import dtm.ide.inspection.DiagnosticRanges;
 import dtm.ide.inspection.InspectionSuppressionStore;
 import dtm.ide.inspection.InspectionSuppressions;
+import dtm.ide.inspection.DiagnosticTags;
+import dtm.ide.inspection.JavaDiagnosticEdits;
 import dtm.ide.inspection.JavaInspection;
 import dtm.ide.spring.SpringNavigation;
 import dtm.ide.spring.live.SpringActuatorClient;
@@ -152,6 +154,7 @@ import dtm.ide.spring.config.SpringConfigDocument;
 import dtm.ide.spring.config.SpringConfigIndex;
 import dtm.ide.spring.config.SpringConfigProperty;
 import dtm.ide.spring.jpa.JpaRepositoryInfo;
+import dtm.ide.spring.jpa.JpaEntity;
 import dtm.ide.spring.jpa.JpaQueryCompletionProvider;
 import dtm.ide.spring.infra.SpringInfraDiagnostics;
 import dtm.ide.spring.jpa.JpaDiagnostics;
@@ -165,6 +168,7 @@ import dtm.ide.run.JavaRunSupport;
 import dtm.ide.run.chain.RunChainHost;
 import dtm.ide.run.ProcessLauncher;
 import dtm.ide.run.RemoteDebugSettings;
+import dtm.ide.run.BuildRunConfigurationBridge;
 import dtm.ide.run.JavaRunTypes;
 import dtm.ide.run.JavaRunValidation;
 import dtm.ide.run.form.RunFormChoicesLoader;
@@ -211,6 +215,8 @@ import dtm.ide.ui.ConditionalBreakpointHints;
 import dtm.ide.ui.JavaProjectStructurePanel;
 import dtm.ide.ui.JavaTodoPanel;
 import dtm.ide.ui.JavaIcons;
+import dtm.ide.ui.JavaProjectTreeIcons;
+import dtm.ide.ui.RepositoryCreationPanel;
 import dtm.ide.ui.JavaDebugValuePopup;
 import dtm.ide.ui.JavaEvaluateDialog;
 import dtm.ide.ui.SpringExplorerPanel;
@@ -493,6 +499,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicReference<ConditionEditorSession> activeConditionSession = new AtomicReference<>();
     private final TodoScanner todoScanner = new TodoScanner();
     private final AtomicLong todoRefreshTicket = new AtomicLong();
+    private final AtomicLong treeIconRefreshTicket = new AtomicLong();
+    private final AtomicBoolean treeIconRefreshAll = new AtomicBoolean();
+    private final Set<Path> treeIconRefreshPaths = ConcurrentHashMap.newKeySet();
+    private final Set<Path> migratedBuildRunConfigurations = ConcurrentHashMap.newKeySet();
     private volatile JavaTodoPanel todoPanel;
     private volatile String todoPanelId;
     private volatile JavaProjectStructurePanel structurePanel;
@@ -515,6 +525,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final Map<Path, PendingPasteImport> pendingPasteImports = new ConcurrentHashMap<>();
     private final Set<Path> pasteImportsResolving = ConcurrentHashMap.newKeySet();
     private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
+    private final Map<Path, String> lastEditorContents = new ConcurrentHashMap<>();
     private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
     private final AtomicBoolean languageServerReadyHandled = new AtomicBoolean();
     private final AtomicBoolean languageServerWorkVisible = new AtomicBoolean();
@@ -599,6 +610,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         detachAllCoverageGutters();
         javaEditors.clear();
         diskBaseline.clear();
+        lastEditorContents.clear();
         lspProgress.set(0);
         hideProgress(LSP_PROGRESS_ID);
         syncGeneration.incrementAndGet();
@@ -616,6 +628,23 @@ public class JavaIdeAdapter extends IdeAdapter {
     public void onUnload() {
         unloaded = true;
         lifecycle.incrementAndGet();
+        cancelStartupBuild();
+        background.close();
+        dtm.ide.run.OwnedRunProcesses.shutdownAll();
+        debugStartGeneration.incrementAndGet();
+        closeDebugRelay();
+        JavaDebugSession session = debugSession;
+        debugSession = null;
+        debugActive.set(false);
+        debugEdtWatchdog.stop();
+        if (session != null) {
+            try {
+                session.close();
+            } catch (RuntimeException error) {
+                log.warn("Falha ao fechar a sessao de debug no unload", error);
+            }
+        }
+        runDebuggeeTerminator(takeDebuggeeTerminator());
         ProblemsActionHandle action = clearBuildAction;
         clearBuildAction = null;
         if (action != null) {
@@ -627,7 +656,11 @@ public class JavaIdeAdapter extends IdeAdapter {
             jdtLs = null;
         }
         if (lsp != null) {
-            lsp.shutdown();
+            try {
+                lsp.shutdown();
+            } catch (RuntimeException error) {
+                log.warn("Falha ao encerrar o JDT LS no unload", error);
+            }
         }
         unregisterFileWatcher();
         DependencyManagerCoordinator coordinator = dependencyCoordinator;
@@ -639,7 +672,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         springIndex.shutdown();
         lexicalIndex.shutdown();
         dtm.ide.build.JavacDaemons.shutdownAll();
-        background.close();
     }
 
     @Override
@@ -711,6 +743,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         registerFileWatcher();
+        requestJavaTreeIconRefresh(null);
 
         if (settings().getLanguageServerMode().startsServer()) {
             String loading = text("status.startingLsp",
@@ -763,6 +796,36 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         ensureTestPanel();
         refreshRunButtonsForCurrentFile();
+        requestJavaTreeIconRefresh(null);
+    }
+
+    private void requestJavaTreeIconRefresh(Path file) {
+        Path root = projectRoot;
+        if (root == null) {
+            return;
+        }
+        if (file == null) {
+            treeIconRefreshAll.set(true);
+        } else {
+            treeIconRefreshPaths.add(file.toAbsolutePath().normalize());
+        }
+        long generation = lifecycle.get();
+        long ticket = treeIconRefreshTicket.incrementAndGet();
+        background.schedule(() -> {
+            if (ticket != treeIconRefreshTicket.get() || !current(generation, root)) {
+                return;
+            }
+            boolean all = treeIconRefreshAll.getAndSet(false);
+            List<Path> paths = new ArrayList<>();
+            for (Path path : List.copyOf(treeIconRefreshPaths)) {
+                if (treeIconRefreshPaths.remove(path)) {
+                    paths.add(path);
+                }
+            }
+            if (all || !paths.isEmpty()) {
+                requestProjectTreeNodeIconRefresh(all ? List.of() : paths);
+            }
+        }, 350, TimeUnit.MILLISECONDS);
     }
 
     private <T> T timed(String label, Supplier<T> operation) {
@@ -1759,7 +1822,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public boolean supportsIncrementalDiagnostics() {
-        return false;
+        return true;
     }
 
     @Override
@@ -1775,6 +1838,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!JavaProjectConventions.isJava(filePath)) {
             return null;
         }
+        if (incremental && context.getPreviousText() != null
+                && JavaDiagnosticEdits.sameCode(context.getPreviousText(), context.getText())) {
+            return JavaDiagnosticEdits.move(context.getPreviousDiagnostics(),
+                    context.getPreviousText(), context.getText());
+        }
         List<Diagnostic> merged = new ArrayList<>();
 
         JdtLsService lsp = jdtLs;
@@ -1784,9 +1852,76 @@ public class JavaIdeAdapter extends IdeAdapter {
         merged.addAll(problems.diagnostics(filePath));
 
         merged.addAll(pluginDiagnostics(filePath, context.getText()));
+        merged.addAll(unusedMethodDiagnostics(context.getText(), merged,
+                names -> lexicalIndex.unusedMethods(names, filePath, context.getText())));
+        merged.addAll(unusedFieldDiagnostics(context.getText(), merged,
+                names -> lexicalIndex.unusedFields(names, filePath, context.getText())));
         List<Diagnostic> visible = InspectionSuppressions.filter(merged, context.getText(),
                 settings().getDisabledInspections(), occurrenceFilterFor(filePath));
         return visible.isEmpty() && (lsp == null || !lsp.isInteractive()) ? null : visible;
+    }
+
+    static List<Diagnostic> unusedMethodDiagnostics(String text, Collection<Diagnostic> existing,
+                                                    Function<Set<String>, Set<String>> unusedLookup) {
+        return unusedDeclarationDiagnostics(text, existing, unusedLookup, SymbolKind.METHOD,
+                "diagnostic.unusedMethod", "Metodo sem uso no projeto", JavaInspection.UNUSED_METHOD.id());
+    }
+
+    static List<Diagnostic> unusedFieldDiagnostics(String text, Collection<Diagnostic> existing,
+                                                   Function<Set<String>, Set<String>> unusedLookup) {
+        return unusedDeclarationDiagnostics(text, existing, unusedLookup, SymbolKind.FIELD,
+                "diagnostic.unusedField", "Campo sem uso no projeto", JavaInspection.UNUSED_FIELD.id());
+    }
+
+    private static List<Diagnostic> unusedDeclarationDiagnostics(String text, Collection<Diagnostic> existing,
+            Function<Set<String>, Set<String>> unusedLookup, SymbolKind kind,
+            String labelKey, String fallback, String inspectionId) {
+        if (text == null || text.isBlank() || !DiagnosticTags.isSupported()) {
+            return List.of();
+        }
+        List<JavaLexicalSource.Declared> methods = JavaLexicalSource.declarations(text).stream()
+                .filter(declared -> declared.kind() == kind)
+                .toList();
+        if (methods.isEmpty()) {
+            return List.of();
+        }
+        Set<String> names = new LinkedHashSet<>();
+        methods.forEach(method -> names.add(method.name()));
+        Set<String> unused = unusedLookup.apply(names);
+        if (unused == null || unused.isEmpty()) {
+            return List.of();
+        }
+        String label = text(labelKey, fallback);
+        List<Diagnostic> diagnostics = new ArrayList<>();
+        for (JavaLexicalSource.Declared method : methods) {
+            Range range = method.range();
+            if (!unused.contains(method.name()) || alreadyMarkedUnnecessary(existing, range)) {
+                continue;
+            }
+            Diagnostic hint = DiagnosticTags.unnecessary(new Diagnostic(range.start().line(),
+                    range.start().col(), range.end().line(), range.end().col(), DiagnosticSeverity.HINT,
+                    label + ": " + method.name(), inspectionId, null), true);
+            if (!DiagnosticTags.isUnnecessary(hint)) {
+                return List.of();
+            }
+            diagnostics.add(hint);
+        }
+        return List.copyOf(diagnostics);
+    }
+
+    private static boolean alreadyMarkedUnnecessary(Collection<Diagnostic> existing, Range range) {
+        if (existing == null) {
+            return false;
+        }
+        int line = range.start().line();
+        for (Diagnostic diagnostic : existing) {
+            if (DiagnosticTags.isUnnecessary(diagnostic) && diagnostic.startLine() <= line && diagnostic.endLine() >= line
+                    && diagnostic.startCol() <= range.end().col()
+                    && (diagnostic.endLine() > line || diagnostic.endCol() >= range.start().col())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<Diagnostic> pluginDiagnostics(Path filePath, String text) {
@@ -1895,7 +2030,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 ? text("delete.usagesOne", "1 usage was found outside the selection.")
                 : usages.size() + text("delete.usagesMany", " usages were found outside the selection.");
 
-        Integer choice = onUi(() -> ModernDialog.builder()
+        Integer choice = onUi(() -> createModernDialogBuilder()
                 .type(ModernDialog.Type.QUESTION)
                 .accentColor(DELETE_ACCENT)
                 .title(text("delete.usagesTitle", "Usages detected"))
@@ -2024,6 +2159,8 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void onWatchedJavaFile(Path file, JavaFileChangeRouter.Change change,
                                    boolean editorManaged) {
+        JavaProjectTreeIcons.invalidate(file);
+        requestJavaTreeIconRefresh(file);
         if (change == JavaFileChangeRouter.Change.DELETED) {
             forgetJavaFile(file);
             JdtLsService lsp = jdtLs;
@@ -4488,7 +4625,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         Path openedPath = JavaProjectConventions.normalize(editorContext.filePath());
         javaEditors.put(openedPath, editorContext);
-        String openedText = editorContext.getText();
+        String openedText = Objects.toString(editorContext.getText(), "");
+        lastEditorContents.put(openedPath, openedText);
         diskBaseline.put(openedPath, diskBaselineFor(openedPath, openedText));
         if (activeJavaEditor == null) {
             activeJavaEditor = editorContext;
@@ -4697,9 +4835,17 @@ public class JavaIdeAdapter extends IdeAdapter {
         int line = editor.getCaretLine();
         int col = editor.getCaretCol();
         if (!editor.applyEdits(result.edits())) {
-            editor.setText(result.text());
+            return;
         }
-        editor.setCaretPosition(line >= result.firstLine() ? line + result.insertedLines() : line, col);
+        int shiftedLines = result.edits().stream()
+                .filter(edit -> edit.range().start().line() < line
+                        || (edit.range().start().line() == line && edit.range().start().col() <= col))
+                .mapToInt(edit -> (int) edit.newText().chars().filter(ch -> ch == '\n').count())
+                .sum();
+        int expectedLine = line + shiftedLines;
+        if (editor.getCaretLine() != expectedLine || editor.getCaretCol() != col) {
+            editor.setCaretPosition(expectedLine, col);
+        }
         String after = editor.getText();
         followUpPastedImports(pending, before, after);
         JdtLsService lsp = jdtLs;
@@ -5114,11 +5260,15 @@ public class JavaIdeAdapter extends IdeAdapter {
     public void onCodeEditorTextChanged(IdeEditorContext editorContext) {
         JdtLsService lsp = jdtLs;
         if (editorContext != null && JavaProjectConventions.isJava(editorContext.filePath())) {
-            if (lsp != null) {
-                lsp.changeDocument(editorContext.filePath(), editorContext.getText());
-            }
             Path edited = editorContext.filePath().toAbsolutePath().normalize();
-            if (problems.supersedeAll(edited)) {
+            String currentText = Objects.toString(editorContext.getText(), "");
+            String previousText = lastEditorContents.put(edited, currentText);
+            if (lsp != null) {
+                lsp.changeDocument(editorContext.filePath(), currentText);
+            }
+            if (JavaDiagnosticEdits.sameCode(previousText, currentText)) {
+                if (problems.move(edited, previousText, currentText)) refreshProblemsPanel();
+            } else if (problems.supersedeAll(edited)) {
                 requestRefreshDiagnostics(edited);
                 refreshProblemsPanel();
             }
@@ -5140,6 +5290,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             detachCoverageGutter(filePath);
             javaEditors.remove(JavaProjectConventions.normalize(filePath));
             diskBaseline.remove(JavaProjectConventions.normalize(filePath));
+            lastEditorContents.remove(JavaProjectConventions.normalize(filePath));
             if (lsp != null) {
                 lsp.closeDocument(filePath);
             }
@@ -5169,6 +5320,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         JdtLsService lsp = jdtLs;
         if (JavaProjectConventions.isJava(filePath)) {
             diskBaseline.put(JavaProjectConventions.normalize(filePath), content);
+            JavaProjectTreeIcons.invalidate(filePath);
+            requestJavaTreeIconRefresh(filePath);
         }
         if (lsp != null && JavaProjectConventions.isJava(filePath)) {
             lsp.saveDocument(filePath, content);
@@ -5420,7 +5573,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         menu.at(position)
                 .withId(MENU_ID_RELOAD)
                 .item(text("tree.reload", "Recarregar projeto"),
-                        JavaIcons.java(JavaIcons.SMALL), event -> clearCaches());
+                        JavaIcons.refresh(JavaIcons.SMALL), event -> clearCaches());
     }
 
     private void contributeMarkDirectoryMenu(IdeMenuBuilder menu, int position, Path directory) {
@@ -5540,6 +5693,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (current == null) {
             return;
         }
+        if (kind == JavaFileTemplates.Kind.REPOSITORY) {
+            createRepository(directory, current);
+            return;
+        }
         ModernInputDialog.ModernInputDialogBuilder dialog = createModernInputDialogBuilder();
         if (dialog == null) {
             return;
@@ -5578,16 +5735,65 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
+    private void createRepository(Path directory, JavaProjectDescriptor current) {
+        JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
+        List<JpaEntity> entities = springIndex.snapshot().entities().stream()
+                .filter(JpaEntity::persistent)
+                .filter(entity -> module == null || entity.file() == null
+                        || current.moduleOf(entity.file()).map(module::equals).orElse(false))
+                .sorted(java.util.Comparator.comparing(JpaEntity::type))
+                .toList();
+        RepositoryCreationPanel panel = new RepositoryCreationPanel(entities, choice -> {
+            Path file = directory.resolve(JavaFileTemplates.fileNameOf(choice.name()));
+            if (Files.exists(file)) {
+                setStatusBarText(text("status.fileExists", "Java: o arquivo ja existe")
+                        + " - " + file.getFileName());
+                requestOpenFile(file);
+                return;
+            }
+            try {
+                Files.createDirectories(directory);
+                Files.writeString(file, JavaFileTemplates.renderRepository(
+                        JavaFileTemplates.packageOf(directory, module), choice.name(),
+                        choice.entity().type(), choice.idType()));
+                JavaFileChangeRouter router = fileChangeRouter;
+                if (router != null) {
+                    router.acceptCreated(file);
+                }
+                requestProjectTreeRevealCreated(file);
+                requestOpenFile(file);
+            } catch (Exception error) {
+                log.warn("Falha ao criar {}", file, error);
+                setStatusBarText(text("status.createFailed", "Java: falha ao criar o arquivo")
+                        + " - " + rootMessage(error));
+            }
+        });
+        showPopup(PlatformPopupBuilder.builder()
+                .component(panel)
+                .title(text("dialog.repository.title", "Novo repository"))
+                .size(500, 320)
+                .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
+                .onLoad(component -> panel.focusName())
+                .build());
+    }
+
     @Override
     public List<ProjectTreeIgnoreRule> resolveProjectTreeIgnoredFolders(Path projectPath) {
         return List.of(
-                ProjectTreeIgnoreRule.any("target"),
                 ProjectTreeIgnoreRule.any("build"),
                 ProjectTreeIgnoreRule.any("out"),
                 ProjectTreeIgnoreRule.any("bin"),
                 ProjectTreeIgnoreRule.any(".gradle"),
                 ProjectTreeIgnoreRule.any(".settings"),
                 ProjectTreeIgnoreRule.specific(".orion"));
+    }
+
+    @Override
+    public Icon resolveProjectTreeNodeIcon(Path path, boolean directory, int iconSize) {
+        if (directory || !JavaProjectTreeIcons.isJava(path)) {
+            return null;
+        }
+        return JavaProjectTreeIcons.iconOf(path, iconSize > 0 ? iconSize : JavaIcons.SMALL);
     }
 
     @Override
@@ -5632,7 +5838,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .item(text("tree.sync", "Sincronizar projeto"),
                         JavaIcons.sync(JavaIcons.SMALL), event -> syncProject())
                 .item(text("tree.reload", "Recarregar projeto"),
-                        JavaIcons.java(JavaIcons.SMALL), event -> clearCaches())
+                        JavaIcons.refresh(JavaIcons.SMALL), event -> clearCaches())
                 .item(text("menu.buildTools", "Build Tools"),
                         JavaIcons.buildTool(current, JavaIcons.SMALL), event -> openBuildTools());
     }
@@ -5759,7 +5965,8 @@ public class JavaIdeAdapter extends IdeAdapter {
             return List.of();
         }
         RunFormContext formContext = RunFormContext.sharing(() -> descriptor, runFormChoicesLoader(),
-                this::requestRunConfigurations);
+                this::requestRunConfigurations, this::createModernDialogBuilder,
+                () -> this.<Boolean>createModernComponentDialogBuilder());
         List<RunConfigurationContribution> contributions = new ArrayList<>();
         contributions.add(new JavaRunConfigurationContribution(
                 JavaRunTypes.APPLICATION, formContext));
@@ -7010,10 +7217,13 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private RunProcessHandle launchWithBuildProgress(RunConfigurationData configuration,
                                                      Supplier<RunProcessHandle> launcher) {
+        if (unloaded) {
+            return ProcessLauncher.message("Plugin Java descarregado.");
+        }
         Optional<BuildSystem.BuildAction> action =
                 JavaRunSupport.buildBeforeRunAction(configuration);
         if (action.isEmpty()) {
-            return launcher.get();
+            return unloaded ? ProcessLauncher.message("Plugin Java descarregado.") : launcher.get();
         }
         JavaModule module = resolveDebugModule(configuration);
         BuildProgressTracker progress = new BuildProgressTracker(
@@ -7021,7 +7231,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 update -> updateProgress(RUN_BUILD_PROGRESS_ID,
                         update.label(), update.percent()));
         if (!runBuildProgress.compareAndSet(null, progress)) {
-            return launcher.get();
+            return unloaded ? ProcessLauncher.message("Plugin Java descarregado.") : launcher.get();
         }
         BuildProgressTracker.Update initial = progress.initial();
         showProgress(RUN_BUILD_PROGRESS_ID, initial.label());
@@ -7031,7 +7241,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         boolean slot = false;
         try {
             slot = awaitBuildSlot();
-            return launcher.get();
+            return unloaded ? ProcessLauncher.message("Plugin Java descarregado.") : launcher.get();
         } finally {
             if (slot) {
                 buildRunning.set(false);
@@ -7406,17 +7616,51 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public List<BuildRunConfigurations.Entry> runConfigurations() {
-            return new BuildRunConfigurations(projectRoot).all();
+            migrateLegacyBuildRunConfigurations();
+            return BuildRunConfigurationBridge.entries(requestRunConfigurations(), buildToolIsGradle());
         }
 
         @Override
         public void saveRunConfiguration(BuildRunConfigurations.Entry entry) {
-            new BuildRunConfigurations(projectRoot).save(entry);
+            if (entry == null || !entry.isValid()) {
+                return;
+            }
+            boolean gradle = buildToolIsGradle();
+            String existingId = BuildRunConfigurationBridge.idOf(requestRunConfigurations(), entry.name(), gradle)
+                    .orElse(null);
+            requestSaveRunConfiguration(BuildRunConfigurationBridge.toRunConfiguration(entry, gradle, existingId));
         }
 
         @Override
         public void removeRunConfiguration(String name) {
-            new BuildRunConfigurations(projectRoot).remove(name);
+            BuildRunConfigurationBridge.idOf(requestRunConfigurations(), name, buildToolIsGradle())
+                    .ifPresent(JavaIdeAdapter.this::requestRemoveRunConfiguration);
+        }
+
+        private boolean buildToolIsGradle() {
+            JavaProjectDescriptor current = descriptor;
+            return current != null && current.isGradle();
+        }
+
+        private void migrateLegacyBuildRunConfigurations() {
+            Path root = projectRoot;
+            if (root == null || !migratedBuildRunConfigurations.add(root.toAbsolutePath().normalize())) {
+                return;
+            }
+            BuildRunConfigurations legacy = new BuildRunConfigurations(root);
+            List<RunConfigurationData> current = requestRunConfigurations();
+            boolean gradle = buildToolIsGradle();
+            for (BuildRunConfigurations.Entry entry : legacy.all()) {
+                String existingId = BuildRunConfigurationBridge.idOf(current, entry.name(), gradle).orElse(null);
+                RunConfigurationData saved = existingId != null
+                        ? RunConfigurationData.builder().id(existingId).build()
+                        : requestSaveRunConfiguration(BuildRunConfigurationBridge.toRunConfiguration(entry, gradle, null));
+                if (BuildRunConfigurationBridge.saved(saved)) {
+                    legacy.remove(entry.name());
+                } else {
+                    migratedBuildRunConfigurations.remove(root.toAbsolutePath().normalize());
+                }
+            }
         }
 
         @Override
@@ -8122,7 +8366,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         DependencyManagerPanel panel = dependencyPanel;
         if (panel == null) {
-            panel = new DependencyManagerPanel(dependencyManagerHost());
+            panel = new DependencyManagerPanel(dependencyManagerHost(), this::createModernDialogBuilder);
             dependencyPanel = panel;
         } else {
             panel.reloadModules();
@@ -8346,7 +8590,8 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             DependencyManagerPanel panel = dependencyPanel;
             if (panel == null) {
-                panel = new DependencyManagerPanel(dependencyManagerHost());
+                panel = new DependencyManagerPanel(dependencyManagerHost(),
+                        JavaIdeAdapter.this::createModernDialogBuilder);
                 dependencyPanel = panel;
             }
             return panel;
@@ -8414,7 +8659,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     public void openJdkManager() {
         JdkManagerPanel panel = jdkManagerPanel;
         if (panel == null) {
-            panel = new JdkManagerPanel(new JdkManagerHost());
+            panel = new JdkManagerPanel(new JdkManagerHost(), this::createModernDialogBuilder);
             jdkManagerPanel = panel;
         } else {
             panel.reload();

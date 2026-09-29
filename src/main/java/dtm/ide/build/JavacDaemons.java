@@ -1,6 +1,7 @@
 package dtm.ide.build;
 
 import dtm.ide.build.daemon.CompilerDaemon;
+import dtm.ide.run.OwnedRunProcesses;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.BufferedReader;
@@ -141,9 +142,11 @@ public final class JavacDaemons {
                     CompilerDaemon.class.getName());
             Daemon daemon = null;
             try {
+                long launchGeneration = OwnedRunProcesses.launchGeneration();
                 Process process = new ProcessBuilder(command)
                         .redirectError(ProcessBuilder.Redirect.DISCARD)
                         .start();
+                OwnedRunProcesses.register(process, launchGeneration);
                 daemon = new Daemon(process);
                 Daemon started = daemon;
                 String ready = CompletableFuture.supplyAsync(started::readLine)

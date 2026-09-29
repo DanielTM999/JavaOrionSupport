@@ -173,7 +173,7 @@ class JdtLsProtocolTest {
     }
 
     @Test
-    void diagnosticsFollowTheCurrentDocumentVersion() throws Exception {
+    void formattingKeepsDiagnosticsWhileStaleVersionsAreIgnored() throws Exception {
         service.openDocument(FILE, TEXT);
         drainNotifications();
         int firstVersion = service.documentVersion(FILE);
@@ -184,10 +184,10 @@ class JdtLsProtocolTest {
         service.changeDocument(FILE, latest);
         awaitRequest("textDocument/didChange");
         int latestVersion = service.documentVersion(FILE);
-        assertTrue(service.diagnostics(FILE).isEmpty());
+        assertEquals("current", service.diagnostics(FILE).iterator().next().message());
 
         service.onPublishDiagnostics(diagnostics(firstVersion, "stale", 0, 0, 2, 0));
-        assertTrue(service.diagnostics(FILE).isEmpty());
+        assertEquals("current", service.diagnostics(FILE).iterator().next().message());
 
         service.onPublishDiagnostics(diagnostics(latestVersion, "latest", 1, 0, 1, 5));
         assertEquals("latest", service.diagnostics(FILE).iterator().next().message());

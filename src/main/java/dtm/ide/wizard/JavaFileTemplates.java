@@ -52,6 +52,51 @@ public final class JavaFileTemplates {
         return source.toString();
     }
 
+    public static String renderRepository(String packageName, String typeName,
+                                          String entityType, String idType) {
+        String name = sanitizeTypeName(typeName);
+        String entity = entityType == null ? "" : entityType.trim();
+        String id = idType == null ? "" : idType.trim();
+        String sourcePackage = packageName == null ? "" : packageName.trim();
+        StringBuilder source = new StringBuilder();
+        if (!sourcePackage.isEmpty()) {
+            source.append("package ").append(sourcePackage).append(";\n\n");
+        }
+        source.append("import org.springframework.data.jpa.repository.JpaRepository;\n");
+        String entityName = importType(source, sourcePackage, entity);
+        String idName = importType(source, sourcePackage, boxedIdType(id));
+        source.append("\npublic interface ").append(name)
+                .append(" extends JpaRepository<").append(entityName)
+                .append(", ").append(idName).append("> {\n}\n");
+        return source.toString();
+    }
+
+    private static String importType(StringBuilder source, String sourcePackage, String type) {
+        int dot = type.lastIndexOf('.');
+        if (dot < 0) {
+            return type;
+        }
+        String typePackage = type.substring(0, dot);
+        if (!typePackage.equals(sourcePackage) && !typePackage.equals("java.lang")) {
+            source.append("import ").append(type).append(";\n");
+        }
+        return type.substring(dot + 1);
+    }
+
+    private static String boxedIdType(String type) {
+        return switch (type) {
+            case "long" -> "Long";
+            case "int" -> "Integer";
+            case "short" -> "Short";
+            case "byte" -> "Byte";
+            case "char" -> "Character";
+            case "boolean" -> "Boolean";
+            case "float" -> "Float";
+            case "double" -> "Double";
+            default -> type;
+        };
+    }
+
     private static String importsFor(Kind kind) {
         return switch (kind) {
             case SERVICE -> "import org.springframework.stereotype.Service;\n\n";

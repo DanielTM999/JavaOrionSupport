@@ -7,17 +7,21 @@ import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.project.JavaProjectKind;
 import dtm.ide.run.JavaRunConfigurationContribution;
 import dtm.ide.run.JavaRunTypes;
+import dtm.stools.component.inputfields.textfield.MaskedTextField;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
+import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import javax.swing.JComboBox;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -112,6 +116,65 @@ class RunConfigurationFormTest {
         properties.put(JavaRunTypes.BUILD_BEFORE_RUN, "false");
 
         assertRoundTrip(JavaRunTypes.SPRING_BOOT, properties);
+    }
+
+    @Test
+    void springRunProfilesAndFileProfilesStayIndependent() throws IOException {
+        Path file = root.resolve("src/main/resources/application.properties");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "spring.profiles.active=from-file\n");
+        ApplicationRunForm form = (ApplicationRunForm) formFor(JavaRunTypes.SPRING_BOOT);
+        form.setData(RunConfigurationData.builder().type(JavaRunTypes.SPRING_BOOT)
+                .properties(Map.of(JavaRunTypes.MAIN_CLASS, "com.example.Main",
+                        JavaRunTypes.SPRING_PROFILES, "from-jvm")).build());
+
+        assertEquals("from-file", ((MaskedTextField) form.cell("springFileProfiles")
+                .control()).getText());
+        ((MaskedTextField) form.cell("springFileProfiles").control()).setText("changed-file");
+        assertEquals("from-jvm", form.getData().getProperties().get(JavaRunTypes.SPRING_PROFILES));
+        assertEquals("spring.profiles.active=from-file\n", Files.readString(file));
+
+        form.applyProjectChanges();
+        assertEquals("changed-file", SpringProfileFile.read(file));
+        assertEquals("from-jvm", form.getData().getProperties().get(JavaRunTypes.SPRING_PROFILES));
+    }
+
+    @Test
+    void changingOnlyJvmProfilesDoesNotWriteTheSpringFile() throws IOException {
+        Path file = root.resolve("src/main/resources/application.properties");
+        Files.createDirectories(file.getParent());
+        String original = "# project default\nspring.profiles.active=local\n";
+        Files.writeString(file, original);
+        ApplicationRunForm form = (ApplicationRunForm) formFor(JavaRunTypes.SPRING_BOOT);
+        form.setData(RunConfigurationData.builder().type(JavaRunTypes.SPRING_BOOT)
+                .properties(Map.of(JavaRunTypes.MAIN_CLASS, "com.example.Main")).build());
+
+        ((MaskedTextField) form.cell(JavaRunTypes.SPRING_PROFILES).control()).setText("prod");
+        form.applyProjectChanges();
+
+        assertEquals(original, Files.readString(file));
+        assertEquals("prod", form.getData().getProperties().get(JavaRunTypes.SPRING_PROFILES));
+    }
+
+    @Test
+    void multipleSpringFilesRequireAnExplicitChoice() throws IOException {
+        Path resources = root.resolve("src/main/resources");
+        Files.createDirectories(resources);
+        Files.writeString(resources.resolve("application.properties"),
+                "spring.profiles.active=local\n");
+        Files.writeString(resources.resolve("application.yml"),
+                "spring.profiles.active: staging\n");
+        ApplicationRunForm form = (ApplicationRunForm) formFor(JavaRunTypes.SPRING_BOOT);
+        form.setData(RunConfigurationData.builder().type(JavaRunTypes.SPRING_BOOT)
+                .properties(Map.of(JavaRunTypes.MAIN_CLASS, "com.example.Main")).build());
+
+        JComboBox<?> selector = (JComboBox<?>) form.cell(JavaRunTypes.SPRING_CONFIG_FILE).control();
+        assertNull(selector.getSelectedItem());
+        selector.setSelectedItem("application.yml");
+        assertEquals("staging", ((MaskedTextField) form.cell("springFileProfiles")
+                .control()).getText());
+        assertEquals("application.yml",
+                form.getData().getProperties().get(JavaRunTypes.SPRING_CONFIG_FILE));
     }
 
     @Test

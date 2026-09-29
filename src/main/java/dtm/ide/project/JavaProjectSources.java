@@ -9,9 +9,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-/**
- * A single, short-lived read of the Java sources used to seed the local indexes.
- */
+
 @Slf4j
 public final class JavaProjectSources {
 

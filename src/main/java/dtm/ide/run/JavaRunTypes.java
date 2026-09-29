@@ -50,6 +50,7 @@ public final class JavaRunTypes {
 
     public static final String MAIN_CLASS = "mainClass";
     public static final String SPRING_PROFILES = "springProfiles";
+    public static final String SPRING_CONFIG_FILE = "springConfigFile";
     public static final String SERVER_PORT = "serverPort";
     public static final String USE_TEST_CLASSPATH = "useTestClasspath";
 

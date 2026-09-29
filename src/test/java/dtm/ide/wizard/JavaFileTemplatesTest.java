@@ -103,6 +103,26 @@ class JavaFileTemplatesTest {
     }
 
     @Test
+    void repositoryUsesSelectedEntityAndConfiguredId() {
+        String source = JavaFileTemplates.renderRepository("com.example.repository",
+                "ClienteRepository", "com.example.domain.Cliente", "java.util.UUID");
+
+        assertTrue(source.contains("import org.springframework.data.jpa.repository.JpaRepository;"));
+        assertTrue(source.contains("import com.example.domain.Cliente;"));
+        assertTrue(source.contains("import java.util.UUID;"));
+        assertTrue(source.contains("public interface ClienteRepository extends JpaRepository<Cliente, UUID>"));
+    }
+
+    @Test
+    void repositoryBoxesPrimitiveIdAndAvoidsSamePackageImport() {
+        String source = JavaFileTemplates.renderRepository("com.example",
+                "PedidoRepository", "com.example.Pedido", "long");
+
+        assertFalse(source.contains("import com.example.Pedido;"));
+        assertTrue(source.contains("JpaRepository<Pedido, Long>"));
+    }
+
+    @Test
     void restControllerSuggestsARouteFromTheTypeName() {
         String source = JavaFileTemplates.render(
                 JavaFileTemplates.Kind.REST_CONTROLLER, "com.example", "ClienteController");

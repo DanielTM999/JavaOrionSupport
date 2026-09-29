@@ -6,6 +6,7 @@ import dtm.stools.component.feedback.badge.BadgeLabel;
 import dtm.stools.component.inputfields.osfilepicker.OsFilePicker;
 import dtm.stools.component.panels.card.CardPanel;
 import dtm.stools.component.panels.toolbar.ToolBarPanel;
+import dtm.stools.component.popup.ModernDialog;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.i18n.I18n;
 
@@ -13,7 +14,6 @@ import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JLabel;
-import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
@@ -25,6 +25,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 public final class JdkManagerPanel extends JPanel {
 
@@ -52,6 +53,7 @@ public final class JdkManagerPanel extends JPanel {
     }
 
     private final Host host;
+    private final Supplier<ModernDialog.ModernDialogBuilder> dialogBuilder;
     private final JdkTableModel model = new JdkTableModel();
     private final JTable table = new JTable(model);
     private final JComboBox<Integer> versions = new JComboBox<>();
@@ -70,8 +72,14 @@ public final class JdkManagerPanel extends JPanel {
             .setStyle(BadgeLabel.Style.SOFT).setShowDot(true).setSize(BadgeLabel.Size.SM);
 
     public JdkManagerPanel(Host host) {
+        this(host, ModernDialog::builder);
+    }
+
+    public JdkManagerPanel(Host host,
+                           Supplier<ModernDialog.ModernDialogBuilder> dialogBuilder) {
         super(new BorderLayout(0, UiTokens.space(2)));
         this.host = host;
+        this.dialogBuilder = dialogBuilder;
         int pad = UiTokens.space(2);
         setBackground(UiTokens.background());
         setBorder(BorderFactory.createEmptyBorder(pad, pad, pad, pad));
@@ -158,8 +166,11 @@ public final class JdkManagerPanel extends JPanel {
         String message = failure == null
                 ? detail + "\n\n" + action
                 : detail + "\n\n" + failure + "\n\n" + action;
-        JOptionPane.showMessageDialog(this, message, text("prompt.title", "JDK necessaria"),
-                JOptionPane.WARNING_MESSAGE);
+        dialogBuilder.get()
+                .type(ModernDialog.Type.INFO)
+                .title(text("prompt.title", "JDK necessaria"))
+                .message(message)
+                .show();
     }
 
     private void addExistingFromDisk() {

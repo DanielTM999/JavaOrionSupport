@@ -201,9 +201,56 @@ class JavaLexicalIndexTest {
     }
 
     @Test
+    void constructorsAreNeverReportedAsUnusedMethods() throws Exception {
+        Path controller = write("Controller.java", """
+                class Controller {
+                    public Controller(Service service) {
+                    }
+                }
+                """);
+
+        assertEquals(Set.of(), index.unusedMethods(List.of("Controller"), controller,
+                Files.readString(controller)));
+    }
+
+    @Test
     void emptyIndexReportsNothing() {
         assertEquals(Set.of(), new JavaLexicalIndex().unusedMethods(List.of("orphan"),
                 root.resolve("A.java"), "class A { void orphan() {} }"));
+    }
+
+    @Test
+    void unusedFieldsIncludeAllVisibilitiesAndMultipleDeclarations() throws Exception {
+        Path file = write("Fields.java", """
+                class Fields {
+                    private int hidden;
+                    protected int used;
+                    public int exposed;
+                    int first, second;
+                    void read() { System.out.println(used + second); }
+                }
+                """);
+
+        assertEquals(Set.of("hidden", "exposed", "first"), index.unusedFields(
+                List.of("hidden", "used", "exposed", "first", "second"),
+                file, Files.readString(file)));
+    }
+
+    @Test
+    void oneLineFieldAndSingleCharacterNameAreDetected() throws Exception {
+        Path file = write("Compact.java", "class Compact { int x; }");
+        assertEquals(Set.of("x"), index.unusedFields(List.of("x"), file, Files.readString(file)));
+    }
+
+    @Test
+    void annotatedAndNestedGenericFieldsAreDetected() throws Exception {
+        Path file = write("Generic.java", """
+                class Generic {
+                    @Deprecated private java.util.Map<String, java.util.List<Integer>> items;
+                }
+                """);
+        assertEquals(Set.of("items"), index.unusedFields(List.of("items"),
+                file, Files.readString(file)));
     }
 
     private Path write(String name, String content) throws Exception {

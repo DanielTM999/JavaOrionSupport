@@ -55,8 +55,9 @@ public final class DiagnosticRanges {
                 && startCol == diagnostic.startCol() && endCol == diagnostic.endCol()) {
             return diagnostic;
         }
-        return new Diagnostic(startLine, startCol, endLine, endCol, diagnostic.severity(),
-                diagnostic.message(), diagnostic.source(), diagnostic.overrideColor());
+        return DiagnosticTags.unnecessary(new Diagnostic(startLine, startCol, endLine, endCol, diagnostic.severity(),
+                diagnostic.message(), diagnostic.source(), diagnostic.overrideColor()),
+                DiagnosticTags.isUnnecessary(diagnostic));
     }
 
     private static Diagnostic compactMultiline(Diagnostic diagnostic, String[] lines) {
@@ -72,8 +73,9 @@ public final class DiagnosticRanges {
             startCol = firstNonWhitespaceColumn(lines, anchorLine);
         }
         int endCol = Math.max(startCol, lineLength);
-        return new Diagnostic(anchorLine, startCol, anchorLine, endCol, diagnostic.severity(),
-                diagnostic.message(), diagnostic.source(), diagnostic.overrideColor());
+        return DiagnosticTags.unnecessary(new Diagnostic(anchorLine, startCol, anchorLine, endCol, diagnostic.severity(),
+                diagnostic.message(), diagnostic.source(), diagnostic.overrideColor()),
+                DiagnosticTags.isUnnecessary(diagnostic));
     }
 
     private static int firstMeaningfulLine(String[] lines, int startLine, int endLine) {

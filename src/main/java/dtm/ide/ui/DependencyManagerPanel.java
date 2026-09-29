@@ -19,6 +19,7 @@ import dtm.stools.component.panels.scroll.ScrollPanel;
 import dtm.stools.component.panels.skeleton.SkeletonPanel;
 import dtm.stools.component.panels.split.SplitPanel;
 import dtm.stools.component.panels.toolbar.ToolBarPanel;
+import dtm.stools.component.popup.ModernDialog;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.i18n.I18n;
 
@@ -34,7 +35,6 @@ import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JPanel;
-import javax.swing.JOptionPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTextArea;
 import javax.swing.ListSelectionModel;
@@ -55,6 +55,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 public final class DependencyManagerPanel extends JPanel {
 
@@ -122,6 +123,7 @@ public final class DependencyManagerPanel extends JPanel {
     private static final String CARD_EMPTY = "empty";
 
     private final Host host;
+    private final Supplier<ModernDialog.ModernDialogBuilder> dialogBuilder;
 
     private final JComboBox<ModuleItem> moduleSelector = new JComboBox<>();
     private final SegmentedField<Tab> tabs = new SegmentedField<>();
@@ -178,8 +180,14 @@ public final class DependencyManagerPanel extends JPanel {
     private long searchGeneration;
 
     public DependencyManagerPanel(Host host) {
+        this(host, ModernDialog::builder);
+    }
+
+    public DependencyManagerPanel(Host host,
+                                  Supplier<ModernDialog.ModernDialogBuilder> dialogBuilder) {
         super(new BorderLayout(0, UiTokens.space(2)));
         this.host = host;
+        this.dialogBuilder = dialogBuilder;
         versionSelector.setRenderer(new DependencyVersionChoiceRenderer());
         host.onLocalRepositoryChanged(() -> onUi(this::onLocalRepositoryChanged));
         int pad = UiTokens.space(2);
@@ -1255,12 +1263,15 @@ public final class DependencyManagerPanel extends JPanel {
     }
 
     private boolean confirmUpdate(String preview) {
-        int answer = JOptionPane.showConfirmDialog(this,
-                text("confirm.update.message", "As seguintes versoes serao alteradas:")
-                        + "\n\n" + preview,
-                text("confirm.update.title", "Confirmar atualizacao"),
-                JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
-        return answer == JOptionPane.OK_OPTION;
+        int answer = dialogBuilder.get()
+                .type(ModernDialog.Type.QUESTION)
+                .title(text("confirm.update.title", "Confirmar atualizacao"))
+                .message(text("confirm.update.message", "As seguintes versoes serao alteradas:")
+                        + "\n\n" + preview)
+                .option(text("confirm.update.apply", "Atualizar"), 0)
+                .option(text("confirm.update.cancel", "Cancelar"), 1)
+                .show();
+        return answer == 0;
     }
 
     private void applyNextUpdate(JavaModule module,

@@ -1,5 +1,6 @@
 package dtm.ide.build;
 
+import dtm.ide.run.OwnedRunProcesses;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.BufferedReader;
@@ -34,8 +35,10 @@ public final class ProcessRunner {
         }
 
         Process process;
+        long launchGeneration = OwnedRunProcesses.launchGeneration();
         try {
             process = builder.start();
+            OwnedRunProcesses.register(process, launchGeneration);
         } catch (Exception e) {
             emit(output, "Nao foi possivel executar: " + String.join(" ", command));
             emit(output, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());

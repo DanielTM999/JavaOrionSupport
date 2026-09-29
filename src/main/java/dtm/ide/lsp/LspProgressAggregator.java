@@ -27,7 +27,7 @@ final class LspProgressAggregator {
         }
     }
 
-    record Snapshot(String label, int percent, int workPercent, int active) {
+    record Snapshot(String label, int percent, int workPercent, int active, boolean visibleWork) {
 
         boolean idle() {
             return active == 0;
@@ -114,11 +114,13 @@ final class LspProgressAggregator {
         int active = 0;
         int known = 0;
         int knownSum = 0;
+        boolean visibleWork = false;
         Task dominant = null;
         Phase furthest = null;
         for (Task task : tasks.values()) {
             if (!task.done) {
                 active++;
+                visibleWork |= task.phase == Phase.IMPORT || task.phase == Phase.BUILD;
                 if (task.percent >= 0) {
                     known++;
                     knownSum += task.percent;
@@ -146,7 +148,7 @@ final class LspProgressAggregator {
         percent = Math.min(MAX_BEFORE_READY, percent);
         floor = percent;
         int workPercent = known == 0 ? -1 : knownSum / known;
-        return new Snapshot(labelOf(dominant, active), percent, workPercent, active);
+        return new Snapshot(labelOf(dominant, active), percent, workPercent, active, visibleWork);
     }
 
     private String labelOf(Task dominant, int active) {
@@ -184,9 +186,12 @@ final class LspProgressAggregator {
 
     static Phase phaseOf(String text) {
         String value = text == null ? "" : text.toLowerCase(Locale.ROOT);
+        if (value.contains("publish") || value.contains("validat")
+                || value.contains("diagnostic") || value.contains("reconcil")) {
+            return Phase.OTHER;
+        }
         if (value.contains("build") || value.contains("compil") || value.contains("index")
-                || value.contains("refresh") || value.contains("validat")
-                || value.contains("publish") || value.contains("search")) {
+                || value.contains("refresh") || value.contains("search")) {
             return Phase.BUILD;
         }
         if (value.contains("import") || value.contains("synchroniz") || value.contains("maven")

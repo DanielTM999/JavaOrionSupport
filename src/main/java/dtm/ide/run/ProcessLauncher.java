@@ -17,9 +17,11 @@ public final class ProcessLauncher {
     }
 
     public static RunProcessHandle launch(ProcessSpec spec) throws Exception {
+        long launchGeneration = OwnedRunProcesses.launchGeneration();
         PtyLauncher.Result result = PtyLauncher.launch(
                 spec.command(), spec.workingDirectory(), spec.environment());
         Process process = result.process();
+        OwnedRunProcesses.register(process, launchGeneration);
 
         if (spec.termination() == ProcessSpec.Termination.PROCESS_ONLY) {
             return RunProcessHandle.builder()

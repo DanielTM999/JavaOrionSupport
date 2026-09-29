@@ -68,7 +68,7 @@ public final class JavaLexicalIndex {
                                Map<String, Integer> selfReferences) {
     }
 
-    private record BufferUsage(Path file, String text, Set<String> methods,
+    private record BufferUsage(Path file, String text, Set<String> methods, Set<String> fields,
                                Map<String, Integer> references) {
 
         int references(String name) {
@@ -254,6 +254,15 @@ public final class JavaLexicalIndex {
     }
 
     public Set<String> unusedMethods(Collection<String> names, Path currentFile, String currentText) {
+        return unusedDeclarations(names, currentFile, currentText, SymbolKind.METHOD);
+    }
+
+    public Set<String> unusedFields(Collection<String> names, Path currentFile, String currentText) {
+        return unusedDeclarations(names, currentFile, currentText, SymbolKind.FIELD);
+    }
+
+    private Set<String> unusedDeclarations(Collection<String> names, Path currentFile,
+                                           String currentText, SymbolKind kind) {
         if (names == null || names.isEmpty()) {
             return Set.of();
         }
@@ -266,8 +275,9 @@ public final class JavaLexicalIndex {
                 return Set.of();
             }
             for (String name : names) {
-                if (name != null && name.length() > 1 && !JavaLexicalSource.isKeyword(name)
-                        && isUnusedMethod(name, current, buffer)) {
+                if (name != null && !name.isEmpty() && !JavaLexicalSource.isKeyword(name)
+                        && (kind != SymbolKind.METHOD || !Character.isUpperCase(name.charAt(0)))
+                        && isUnusedDeclaration(name, kind, current, buffer)) {
                     unused.add(name);
                 }
             }
@@ -277,8 +287,9 @@ public final class JavaLexicalIndex {
         return Set.copyOf(unused);
     }
 
-    private boolean isUnusedMethod(String name, Path current, BufferUsage buffer) {
-        boolean method = buffer != null && buffer.methods().contains(name);
+    private boolean isUnusedDeclaration(String name, SymbolKind kind, Path current, BufferUsage buffer) {
+        boolean declared = buffer != null && (kind == SymbolKind.METHOD
+                ? buffer.methods().contains(name) : buffer.fields().contains(name));
         int references = buffer == null ? 0 : buffer.references(name);
         if (references > 0) {
             return false;
@@ -294,11 +305,11 @@ public final class JavaLexicalIndex {
                 if (self == null || self > 0) {
                     return false;
                 }
-                method |= indexed.declarations().stream().anyMatch(declaration ->
-                        name.equals(declaration.name()) && declaration.kind() == SymbolKind.METHOD);
+                declared |= indexed.declarations().stream().anyMatch(declaration ->
+                        name.equals(declaration.name()) && declaration.kind() == kind);
             }
         }
-        return method;
+        return declared;
     }
 
     private BufferUsage bufferUsage(Path file, String text) {
@@ -312,9 +323,12 @@ public final class JavaLexicalIndex {
         List<JavaLexicalSource.Declared> declared = JavaLexicalSource.declarations(text);
         Map<String, Integer> references = selfReferences(declared, JavaLexicalSource.mask(text), true);
         Set<String> methods = new LinkedHashSet<>();
+        Set<String> fields = new LinkedHashSet<>();
         declared.stream().filter(entry -> entry.kind() == SymbolKind.METHOD)
                 .forEach(entry -> methods.add(entry.name()));
-        BufferUsage usage = new BufferUsage(file, text, Set.copyOf(methods), references);
+        declared.stream().filter(entry -> entry.kind() == SymbolKind.FIELD)
+                .forEach(entry -> fields.add(entry.name()));
+        BufferUsage usage = new BufferUsage(file, text, Set.copyOf(methods), Set.copyOf(fields), references);
         lastBuffer = usage;
         return usage;
     }

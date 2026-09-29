@@ -59,6 +59,30 @@ class JdtLsServiceTest {
     }
 
     @Test
+    void shutdownAlsoTerminatesAProcessAlreadyRetiringAsynchronously() throws Exception {
+        String executable = System.getProperty("os.name").startsWith("Windows")
+                ? "java.exe" : "java";
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", executable).toString(),
+                "-cp", System.getProperty("java.class.path"), IdleServer.class.getName()).start();
+        JdtLsService service = new JdtLsService(null, null, null, null);
+        try {
+            assertEquals('R', child.getInputStream().read());
+            var processField = JdtLsService.class.getDeclaredField("process");
+            processField.setAccessible(true);
+            processField.set(service, child);
+
+            service.stopAsync();
+            service.shutdown();
+
+            assertTrue(child.waitFor(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertFalse(child.isAlive());
+        } finally {
+            child.destroyForcibly();
+            service.shutdown();
+        }
+    }
+
+    @Test
     void deletingASourceDoesNotReimportTheMavenProject() {
         assertFalse(JdtLsService.affectsProjectStructure(Path.of("/p/src/main/java/a/App.java")));
         assertTrue(JdtLsService.affectsProjectStructure(Path.of("/p/modulo/pom.xml")));
@@ -344,6 +368,37 @@ class JdtLsServiceTest {
         assertEquals(List.of(source), published);
         service.clearDiagnostics();
         assertEquals(List.of(source), published);
+    }
+
+    @Test
+    void formattingMovesPublishedDiagnosticsAndIdenticalPublicationIsIgnored() {
+        List<Path> published = new ArrayList<>();
+        JdtLsService service = new JdtLsService(null, null, null, published::add);
+        Path source = root.resolve("Moving.java").toAbsolutePath().normalize();
+        String original = "class Moving {\n    private int value;\n}";
+        service.openDocument(source, original);
+        service.settleDiagnostics();
+        var params = new ObjectMapper().valueToTree(Map.of(
+                "uri", source.toUri().toString(),
+                "diagnostics", List.of(Map.of(
+                        "range", Map.of(
+                                "start", Map.of("line", 1, "character", 16),
+                                "end", Map.of("line", 1, "character", 21)),
+                        "severity", 2,
+                        "message", "unused field",
+                        "source", "Java"))));
+
+        service.onPublishDiagnostics(params);
+        published.clear();
+        service.onPublishDiagnostics(params);
+        assertTrue(published.isEmpty());
+
+        service.changeDocument(source, "class Moving {\n\n    private int value;\n}");
+        assertEquals(2, service.diagnostics(source).iterator().next().startLine());
+        assertEquals(List.of(source), published);
+
+        service.changeDocument(source, "class Moving {\n\n    private int renamed;\n}");
+        assertTrue(service.diagnostics(source).isEmpty());
     }
 
     @Test

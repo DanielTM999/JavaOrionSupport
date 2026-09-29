@@ -23,9 +23,10 @@ public final class JavaLexicalSource {
                     + "synchronized|native|strictfp)\\s+)*(?:<[^>]+>\\s*)?"
                     + "([A-Za-z_$][\\w$.,<>? \\[\\]]*)\\s+([A-Za-z_$][\\w$]*)\\s*\\(");
     private static final Pattern FIELD = Pattern.compile(
-            "(?m)^[ \\t]*(?:(?:public|protected|private)\\s+)"
-                    + "(?:(?:static|final|transient|volatile)\\s+)*"
-                    + "[A-Za-z_$][\\w$.<>,\\[\\] ?]*\\s+([A-Za-z_$][\\w$]*)\\s*(?:=|;)");
+            "(?m)(?:^[ \\t]*|(?<=[{;])[ \\t]*)(?:@[\\w$.]+(?:\\([^\\n]*\\))?[ \\t]+)*"
+                    + "(?:(?:public|protected|private|static|final|transient|volatile)[ \\t]+)*"
+                    + "[A-Za-z_$][\\w$.]*(?:<[^;\\n]+>)?(?:[ \\t]*\\[[ \\t]*\\])*[ \\t]+"
+                    + "([A-Za-z_$][\\w$]*)\\s*(?:=|,|;)");
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_$][\\w$]*");
 
     private static final Set<String> KEYWORDS = Set.of(
@@ -143,9 +144,22 @@ public final class JavaLexicalSource {
             if (KEYWORDS.contains(name)) {
                 continue;
             }
+            int depth = depthAt(depths, fields.start(1));
+            if (found.stream().noneMatch(entry -> isType(entry.kind()) && entry.depth() == depth - 1
+                    && entry.range().start().line() <= lineOf(lineStarts, fields.start(1)))) {
+                continue;
+            }
             found.add(new Declared(name, SymbolKind.FIELD,
-                    rangeOf(lineStarts, fields.start(1), fields.end(1)),
-                    depthAt(depths, fields.start(1))));
+                    rangeOf(lineStarts, fields.start(1), fields.end(1)), depth));
+            int end = code.indexOf(';', fields.end(1));
+            if (end < 0 || code.substring(fields.end(1), end).indexOf('{') >= 0) continue;
+            String tail = code.substring(fields.end(1), end);
+            Matcher additional = Pattern.compile(",\\s*([A-Za-z_$][\\w$]*)\\s*(?==|,|$)").matcher(tail);
+            while (additional.find()) {
+                int start = fields.end(1) + additional.start(1);
+                found.add(new Declared(additional.group(1), SymbolKind.FIELD,
+                        rangeOf(lineStarts, start, start + additional.group(1).length()), depth));
+            }
         }
 
         found.sort((left, right) -> {
@@ -227,7 +241,7 @@ public final class JavaLexicalSource {
         Matcher matcher = IDENTIFIER.matcher(maskedCode);
         while (matcher.find()) {
             String name = matcher.group();
-            if (name.length() > 1 && !KEYWORDS.contains(name)) {
+            if (!KEYWORDS.contains(name)) {
                 sink.accept(name);
             }
         }

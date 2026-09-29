@@ -7,6 +7,7 @@ import dtm.ide.api.hierarchy.CallHierarchyItem;
 import dtm.stools.component.panels.editor.code.documenthighlight.DocumentHighlight;
 import dtm.ide.api.project.editor.SemanticToken;
 import dtm.ide.inspection.DiagnosticRanges;
+import dtm.ide.inspection.JavaDiagnosticEdits;
 import dtm.ide.navigation.JavaNavigation;
 import dtm.ide.navigation.JavaNavigation.Kind;
 import dtm.ide.navigation.JavaNavigation.Result;
@@ -145,8 +146,9 @@ public class JdtLsService {
     private static final long SERVICE_READY_AFTER_PROJECTS_MS = 30_000;
     private static final long SHUTDOWN_TIMEOUT_MS = 10_000;
     private static final long EXIT_TIMEOUT_MS = 5_000;
-    private static final long UNLOAD_SHUTDOWN_TIMEOUT_MS = 1_500;
-    private static final long UNLOAD_EXIT_TIMEOUT_MS = 1_500;
+    private static final long UNLOAD_SHUTDOWN_TIMEOUT_MS = 500;
+    private static final long UNLOAD_EXIT_TIMEOUT_MS = 500;
+    private static final long UNLOAD_RETIRE_WAIT_MS = 3_000;
     private static final long EXIT_HOOK_SHUTDOWN_TIMEOUT_MS = 1_000;
     private static final long EXIT_HOOK_TOTAL_TIMEOUT_MS = 4_000;
     private static final long RETIRE_WAIT_MS = 20_000;
@@ -223,6 +225,7 @@ public class JdtLsService {
     private volatile LspJsonRpcClient client;
     private volatile JdtLsWorkspaceLease workspaceLease;
     private volatile CompletableFuture<Void> retiring = CompletableFuture.completedFuture(null);
+    private final Set<ProcessHandle> retiringProcesses = ConcurrentHashMap.newKeySet();
     private volatile boolean terminated;
     private volatile LaunchRequest lastLaunch;
     private final AtomicLong generation = new AtomicLong();
@@ -906,7 +909,7 @@ public class JdtLsService {
     private void stop(long shutdownTimeoutMs, long exitTimeoutMs) {
         Retired retired = retire();
         CompletableFuture<Void> done = new CompletableFuture<>();
-        trackRetirement(done);
+        trackRetirement(done, retired);
         try {
             finishRetired(retired, shutdownTimeoutMs, exitTimeoutMs);
         } finally {
@@ -917,7 +920,7 @@ public class JdtLsService {
     public CompletableFuture<Void> stopAsync() {
         Retired retired = retire();
         CompletableFuture<Void> done = new CompletableFuture<>();
-        trackRetirement(done);
+        trackRetirement(done, retired);
         Thread.ofVirtual().name("jdtls-stop").start(() -> {
             try {
                 finishRetired(retired, SHUTDOWN_TIMEOUT_MS, EXIT_TIMEOUT_MS);
@@ -941,8 +944,11 @@ public class JdtLsService {
         stopAsync();
     }
 
-    private void trackRetirement(CompletableFuture<Void> done) {
+    private void trackRetirement(CompletableFuture<Void> done, Retired retired) {
         synchronized (processLock) {
+            if (retired.process() != null) {
+                retiringProcesses.add(retired.process().toHandle());
+            }
             CompletableFuture<Void> previous = retiring;
             retiring = previous.isDone() ? done : CompletableFuture.allOf(previous, done);
         }
@@ -955,10 +961,23 @@ public class JdtLsService {
 
     public void shutdown() {
         terminated = true;
-        LIVE_SERVICES.remove(this);
-        stop(UNLOAD_SHUTDOWN_TIMEOUT_MS, UNLOAD_EXIT_TIMEOUT_MS);
-        resetProjectState();
-        executor.shutdownNow();
+        try {
+            stop(UNLOAD_SHUTDOWN_TIMEOUT_MS, UNLOAD_EXIT_TIMEOUT_MS);
+            try {
+                retiring.get(UNLOAD_RETIRE_WAIT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } catch (Exception error) {
+                log.debug("Parada anterior do JDT LS ainda em andamento", error);
+            }
+        } finally {
+            for (ProcessHandle handle : List.copyOf(retiringProcesses)) {
+                terminateProcessTree(handle);
+            }
+            LIVE_SERVICES.remove(this);
+            resetProjectState();
+            executor.shutdownNow();
+        }
     }
 
     private record Retired(Process process, LspJsonRpcClient rpc, JdtLsWorkspaceLease lease) {
@@ -989,28 +1008,34 @@ public class JdtLsService {
     }
 
     private void finishRetired(Retired retired, long shutdownTimeoutMs, long exitTimeoutMs) {
-        LspJsonRpcClient rpc = retired.rpc();
-        Process running = retired.process();
-        if (rpc != null && !rpc.isClosed() && shutdownTimeoutMs > 0
-                && running != null && running.isAlive()) {
-            try {
-                rpc.request("shutdown", Map.of()).get(shutdownTimeoutMs, TimeUnit.MILLISECONDS);
-                rpc.notify("exit", Map.of());
-                running.waitFor(exitTimeoutMs, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            } catch (Exception error) {
-                log.debug("JDT LS nao confirmou o encerramento dentro do prazo", error);
+        try {
+            LspJsonRpcClient rpc = retired.rpc();
+            Process running = retired.process();
+            if (rpc != null && !rpc.isClosed() && shutdownTimeoutMs > 0
+                    && running != null && running.isAlive()) {
+                try {
+                    rpc.request("shutdown", Map.of()).get(shutdownTimeoutMs, TimeUnit.MILLISECONDS);
+                    rpc.notify("exit", Map.of());
+                    running.waitFor(exitTimeoutMs, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                } catch (Exception error) {
+                    log.debug("JDT LS nao confirmou o encerramento dentro do prazo", error);
+                }
             }
-        }
-        if (running != null) {
-            terminateProcessTree(running.toHandle());
-        }
-        if (rpc != null) {
-            rpc.close();
-        }
-        if (retired.lease() != null) {
-            retired.lease().close();
+            if (running != null) {
+                terminateProcessTree(running.toHandle());
+            }
+            if (rpc != null) {
+                rpc.close();
+            }
+            if (retired.lease() != null) {
+                retired.lease().close();
+            }
+        } finally {
+            if (retired.process() != null) {
+                retiringProcesses.remove(retired.process().toHandle());
+            }
         }
     }
 
@@ -1029,9 +1054,13 @@ public class JdtLsService {
         List<Thread> stoppers = new ArrayList<>();
         for (JdtLsService service : List.copyOf(LIVE_SERVICES)) {
             service.terminated = true;
-            stoppers.add(Thread.ofPlatform().name("jdtls-exit").start(() ->
-                    service.finishRetired(service.detach(), EXIT_HOOK_SHUTDOWN_TIMEOUT_MS,
-                            EXIT_HOOK_SHUTDOWN_TIMEOUT_MS)));
+            stoppers.add(Thread.ofPlatform().name("jdtls-exit").start(() -> {
+                service.finishRetired(service.detach(), EXIT_HOOK_SHUTDOWN_TIMEOUT_MS,
+                        EXIT_HOOK_SHUTDOWN_TIMEOUT_MS);
+                for (ProcessHandle handle : List.copyOf(service.retiringProcesses)) {
+                    terminateProcessTree(handle);
+                }
+            }));
         }
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(EXIT_HOOK_TOTAL_TIMEOUT_MS);
         for (Thread stopper : stoppers) {
@@ -1070,26 +1099,29 @@ public class JdtLsService {
     }
 
     private static void terminateProcessTree(ProcessHandle handle) {
-        if (handle == null || !handle.isAlive()) {
+        if (handle == null) {
             return;
         }
-        try (var descendants = handle.descendants()) {
-            descendants.filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroy);
+        List<ProcessHandle> descendants;
+        try (var children = handle.descendants()) {
+            descendants = children.toList();
+        } catch (RuntimeException error) {
+            descendants = List.of();
         }
-        handle.destroy();
-        try {
-            handle.onExit().get(3, TimeUnit.SECONDS);
-            return;
-        } catch (TimeoutException ignored) {
-            // Escala abaixo para encerramento forcado.
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (Exception error) {
-            log.debug("Falha ao aguardar encerramento normal do processo JDT LS", error);
+        descendants.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroy);
+        if (handle.isAlive()) {
+            handle.destroy();
+            try {
+                handle.onExit().get(3, TimeUnit.SECONDS);
+            } catch (TimeoutException ignored) {
+                // Escala abaixo para encerramento forcado.
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception error) {
+                log.debug("Falha ao aguardar encerramento normal do processo JDT LS", error);
+            }
         }
-        try (var descendants = handle.descendants()) {
-            descendants.filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
-        }
+        descendants.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
         if (handle.isAlive()) {
             handle.destroyForcibly();
             try {
@@ -1376,11 +1408,12 @@ public class JdtLsService {
         if (path != null) {
             Path key = normalizePath(path);
             String content = documents.content(uri);
-            diagnosticsByPath.put(key, content == null
+            List<Diagnostic> latest = content == null
                     ? List.copyOf(diagnostics)
-                    : DiagnosticRanges.compactMultiline(diagnostics, content));
+                    : DiagnosticRanges.compactMultiline(diagnostics, content);
+            List<Diagnostic> previous = diagnosticsByPath.put(key, latest);
             rawDiagnosticsByPath.put(key, List.copyOf(rawDiagnostics));
-            if (diagnosticsSettled) {
+            if (diagnosticsSettled && !latest.equals(previous)) {
                 onDiagnosticsPublished.accept(path);
             }
         }
@@ -1452,7 +1485,7 @@ public class JdtLsService {
         State current = state;
         if (current == State.READY) {
             String label = snapshot.label().isBlank() ? "" : "Java: " + snapshot.label();
-            workListener.onWork(label, snapshot.workPercent(), !snapshot.idle());
+            workListener.onWork(label, snapshot.workPercent(), snapshot.visibleWork());
             if (snapshot.idle()) {
                 progressAggregator.restartBackgroundWork();
             }
@@ -1548,7 +1581,7 @@ public class JdtLsService {
         String content = text == null ? "" : text;
         String previous = documents.put(uri, content);
         if (!content.equals(previous)) {
-            documentContentChanged(filePath, uri, false);
+            documentContentChanged(filePath, uri, previous, content, false);
         }
         if (!canSyncDocuments()) {
             return;
@@ -1570,7 +1603,7 @@ public class JdtLsService {
             return;
         }
         String previous = documents.put(uri, content);
-        documentContentChanged(filePath, uri, true);
+        documentContentChanged(filePath, uri, previous, content, true);
 
         if (!canSyncDocuments()) {
             return;
@@ -1992,15 +2025,24 @@ public class JdtLsService {
         navigationCache.clear();
     }
 
-    private void documentContentChanged(Path filePath, String uri, boolean deferCodeLensRefresh) {
+    private void documentContentChanged(Path filePath, String uri, String previous,
+                                        String content, boolean deferCodeLensRefresh) {
         symbolCache.remove(uri);
         discardCodeLenses(uri);
         invalidateNavigationForEdit();
         cancelInFlightForUri(uri);
         Path key = normalizePath(filePath);
-        boolean hadDiagnostics = diagnosticsByPath.remove(key) != null;
-        hadDiagnostics |= rawDiagnosticsByPath.remove(key) != null;
-        if (hadDiagnostics) {
+        List<Diagnostic> oldDiagnostics = diagnosticsByPath.get(key);
+        boolean sameCode = JavaDiagnosticEdits.sameCode(previous, content);
+        List<Diagnostic> nextDiagnostics = sameCode && oldDiagnostics != null
+                ? JavaDiagnosticEdits.move(oldDiagnostics, previous, content) : null;
+        if (nextDiagnostics == null) {
+            diagnosticsByPath.remove(key);
+        } else {
+            diagnosticsByPath.put(key, nextDiagnostics);
+        }
+        rawDiagnosticsByPath.remove(key);
+        if (oldDiagnostics != null && !java.util.Objects.equals(oldDiagnostics, nextDiagnostics)) {
             onDiagnosticsPublished.accept(filePath);
         }
         if (deferCodeLensRefresh) {

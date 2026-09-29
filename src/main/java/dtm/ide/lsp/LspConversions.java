@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
+import dtm.ide.inspection.DiagnosticTags;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
 import dtm.stools.component.panels.editor.code.api.Command;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
@@ -32,6 +33,7 @@ import java.util.Map;
 final class LspConversions {
 
     private static final ObjectMapper ERROR_JSON = new ObjectMapper();
+    static final int DIAGNOSTIC_TAG_UNNECESSARY = 1;
 
     private LspConversions() {
     }
@@ -128,13 +130,25 @@ final class LspConversions {
         if (message.isBlank()) {
             return null;
         }
-        return new Diagnostic(
+        return DiagnosticTags.unnecessary(new Diagnostic(
                 range.start().line(), range.start().col(),
                 range.end().line(), range.end().col(),
                 severity(node.path("severity").asInt(1)),
                 message,
                 node.path("source").asText("java"),
-                null);
+                null), hasTag(node.get("tags"), DIAGNOSTIC_TAG_UNNECESSARY));
+    }
+
+    static boolean hasTag(JsonNode tags, int tag) {
+        if (tags == null || !tags.isArray()) {
+            return false;
+        }
+        for (JsonNode value : tags) {
+            if (value.asInt(-1) == tag) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static DiagnosticSeverity severity(int lspSeverity) {

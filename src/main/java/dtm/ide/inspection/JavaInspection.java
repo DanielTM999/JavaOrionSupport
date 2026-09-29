@@ -17,7 +17,9 @@ public enum JavaInspection {
     INFRA_NO_ENABLE_METHOD_SECURITY("infra.noEnableMethodSecurity", "Sem @EnableMethodSecurity"),
     INFRA_CACHE_WITHOUT_NAME("infra.cacheWithoutName", "Cache sem nome"),
     CONFIG_DEPRECATED_KEY("config.deprecatedKey", "Propriedade obsoleta"),
-    CONFIG_UNKNOWN_KEY("config.unknownKey", "Propriedade desconhecida");
+    CONFIG_UNKNOWN_KEY("config.unknownKey", "Propriedade desconhecida"),
+    UNUSED_METHOD("unused", "Metodo sem uso"),
+    UNUSED_FIELD("unused.field", "Campo sem uso");
 
     private final String id;
     private final String label;
