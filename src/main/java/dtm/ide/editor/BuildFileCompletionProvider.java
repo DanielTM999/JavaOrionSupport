@@ -99,13 +99,17 @@ public final class BuildFileCompletionProvider {
         Insertion insertion = Insertion.of(context);
         String before = insertion.before();
         if (!JavaProjectConventions.isMavenPom(context.filePath())) {
-            return gradleSuggestions(before, insertion);
+            List<AutoCompleteItem> coordinates = gradleSuggestions(before, insertion);
+            return coordinates.isEmpty()
+                    ? GradleDslCompletion.suggestions(context.filePath(), insertion)
+                    : coordinates;
         }
         Matcher property = PROPERTY_AT_CARET.matcher(before);
         if (property.find()) {
             return propertySuggestions(context, property.group(1), insertion);
         }
-        return mavenSuggestions(before, insertion);
+        List<AutoCompleteItem> coordinates = mavenSuggestions(before, insertion);
+        return coordinates.isEmpty() ? PomStructureCompletion.suggestions(insertion) : coordinates;
     }
 
     private List<AutoCompleteItem> propertySuggestions(IdeCompletionContext context, String typed,
@@ -169,8 +173,9 @@ public final class BuildFileCompletionProvider {
     }
 
     private List<AutoCompleteItem> gradleSuggestions(String before, Insertion insertion) {
-        Matcher quoted = GRADLE_NOTATION.matcher(before);
-        if (!quoted.find()) {
+        String line = before.substring(before.lastIndexOf('\n') + 1);
+        Matcher quoted = GRADLE_NOTATION.matcher(line);
+        if (!quoted.find() || !insideString(line)) {
             return List.of();
         }
         String typed = quoted.group(1);
@@ -181,6 +186,19 @@ public final class BuildFileCompletionProvider {
             case 3 -> versions(parts[0], parts[1], parts[2], insertion);
             default -> List.of();
         };
+    }
+
+    private static boolean insideString(String line) {
+        char open = '\0';
+        for (int index = 0; index < line.length(); index++) {
+            char current = line.charAt(index);
+            if (open == '\0' && (current == '"' || current == '\'')) {
+                open = current;
+            } else if (current == open) {
+                open = '\0';
+            }
+        }
+        return open != '\0';
     }
 
     private List<AutoCompleteItem> coordinates(String typed, Function<DependencyCoordinate, String> field,
@@ -255,7 +273,7 @@ public final class BuildFileCompletionProvider {
         return last;
     }
 
-    private record Insertion(String text, int caret, int wordStart, String before) {
+    record Insertion(String text, int caret, int wordStart, String before) {
 
         static Insertion of(IdeCompletionContext context) {
             String text = context.text() == null ? "" : context.text();
@@ -286,6 +304,24 @@ public final class BuildFileCompletionProvider {
             TextEdit removeKept = TextEdit.delete(new Range(position(keptStart), position(wordStart)));
             return new AutoCompleteItem(value + suffix, value, detail, description, null, kind,
                     List.of(removeKept));
+        }
+
+        AutoCompleteItem replacing(String label, String typed, String insert, String detail,
+                                   String description, AutoCompleteItem.Kind kind) {
+            String written = typed == null ? "" : typed;
+            int word = caret - wordStart;
+            String kept = written.length() >= word ? written.substring(0, written.length() - word) : "";
+            if (kept.isEmpty()) {
+                return new AutoCompleteItem(insert, label, detail, description, null, kind, List.of());
+            }
+            int keptStart = wordStart - kept.length();
+            TextEdit removeKept = TextEdit.delete(new Range(position(keptStart), position(wordStart)));
+            return new AutoCompleteItem(insert, label, detail, description, null, kind,
+                    List.of(removeKept));
+        }
+
+        String head() {
+            return text.substring(0, caret);
         }
 
         private Position position(int offset) {

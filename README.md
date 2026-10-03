@@ -9,6 +9,8 @@ projetos Maven e Gradle, execução, depuração, testes e ferramentas Spring em
 - CodeLens para referências, implementações, execução, depuração, testes e injeções Spring.
 - Refatorações, ações rápidas, geração de código e Safe Delete com busca de usos.
 - Projetos Maven, Gradle Groovy/Kotlin e Java sem ferramenta de build.
+- Autocomplete no `pom.xml` (tags conforme o elemento pai, fechamento de tags, valores e coordenadas)
+  e nos scripts Gradle (blocos, configurações de dependência, plugins, repositórios e coordenadas).
 - Painel **Problemas** com erros navegáveis do Java, Maven, Gradle e JUnit.
 - Relatórios existentes do Checkstyle, PMD e SpotBugs integrados ao painel **Problemas**.
 - Gerenciamento e provisionamento de JDKs, JDT LS e extensões Java.

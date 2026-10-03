@@ -223,6 +223,167 @@ class BuildFileCompletionProviderTest {
         assertEquals("b", item.insertText());
     }
 
+    @Test
+    void suggestsChildElementsOfTheEnclosingPomElement() {
+        List<AutoCompleteItem> items = complete("pom.xml", """
+                <project>
+                    <dependencies>
+                        <dep""");
+
+        assertEquals(List.of("dependency"), labels(items));
+        assertEquals(AutoCompleteItem.Kind.SNIPPET, items.getFirst().kind());
+        assertTrue(items.getFirst().insertText().startsWith("dependency>"));
+        assertTrue(items.getFirst().insertText().contains("<groupId>$1</groupId>"));
+        assertTrue(items.getFirst().insertText().endsWith("</dependency>"));
+    }
+
+    @Test
+    void anOpeningBracketListsTheElementsAllowedThere() {
+        List<String> labels = labels(complete("pom.xml", """
+                <project>
+                    <modelVersion>4.0.0</modelVersion>
+                    <groupId>com.acme</groupId>
+                    <"""));
+
+        assertTrue(labels.contains("artifactId"));
+        assertTrue(labels.contains("dependencies"));
+        assertFalse(labels.contains("groupId"), "elementos unicos ja declarados nao se repetem");
+        assertFalse(labels.contains("modelVersion"));
+        assertFalse(labels.contains("dependency"));
+    }
+
+    @Test
+    void leafElementsCloseOnTheSameLine() {
+        AutoCompleteItem item = complete("pom.xml", """
+                <project><dependencies><dependency>
+                    <groupId>a</groupId>
+                    <sco""").getFirst();
+
+        assertEquals("scope", item.label());
+        assertEquals("scope>$0</scope>", item.insertText());
+    }
+
+    @Test
+    void commentsAndClosedElementsDoNotConfuseTheParent() {
+        List<String> labels = labels(complete("pom.xml", """
+                <project>
+                    <!-- <dependencies> -->
+                    <build>
+                        <plugins/>
+                    </build>
+                    <pa"""));
+
+        assertEquals(List.of("parent", "packaging"), labels);
+    }
+
+    @Test
+    void closesTheInnermostOpenElement() {
+        AutoCompleteItem item = complete("pom.xml", """
+                <project>
+                    <dependencies>
+                        <dependency>
+                            <groupId>a</groupId>
+                        </""").getFirst();
+
+        assertEquals("dependency", item.label());
+        assertEquals("dependency>", item.insertText());
+    }
+
+    @Test
+    void suggestsKnownValuesOfAnElement() {
+        List<AutoCompleteItem> items = complete("pom.xml", """
+                <project><dependencies><dependency>
+                    <scope>te""");
+
+        assertEquals(List.of("test"), labels(items));
+    }
+
+    @Test
+    void suggestsCommonPropertyNames() {
+        AutoCompleteItem item = complete("pom.xml", """
+                <project>
+                    <properties>
+                        <maven.compiler.rel""").getFirst();
+
+        assertEquals("maven.compiler.release", item.label());
+        assertEquals("release>$0</maven.compiler.release>", item.insertText());
+    }
+
+    @Test
+    void nothingIsSuggestedInsideAComment() {
+        assertTrue(complete("pom.xml", "<project>\n    <!-- <dep").isEmpty());
+    }
+
+    @Test
+    void suggestsTopLevelGradleBlocks() {
+        List<AutoCompleteItem> items = complete("build.gradle", """
+                plugins {
+                    id 'java'
+                }
+
+                dep""");
+
+        assertEquals(List.of("dependencies"), labels(items));
+        assertEquals("dependencies {\n    $0\n}", items.getFirst().insertText());
+        assertEquals(null, client.lastQuery);
+    }
+
+    @Test
+    void suggestsDependencyConfigurationsInGroovyAndKotlin() {
+        String text = """
+                dependencies {
+                    implementation 'org.projectlombok:lombok:1.18.42'
+                    testImpl""";
+
+        AutoCompleteItem groovy = complete("build.gradle", text).getFirst();
+        assertEquals("testImplementation", groovy.label());
+        assertEquals("testImplementation '$0'", groovy.insertText());
+        assertEquals(null, client.lastQuery);
+
+        AutoCompleteItem kotlin = complete("build.gradle.kts", text.replace("'org.projectlombok:lombok:1.18.42'",
+                "(\"org.projectlombok:lombok:1.18.42\")")).getFirst();
+        assertEquals("testImplementation(\"$0\")", kotlin.insertText());
+    }
+
+    @Test
+    void suggestsGradlePluginsAndRepositories() {
+        List<String> plugins = labels(complete("build.gradle.kts", "plugins {\n    java"));
+        assertEquals(List.of("java", "java-library"), plugins);
+
+        AutoCompleteItem central = complete("build.gradle", """
+                repositories {
+                    mavenC""").getFirst();
+        assertEquals("mavenCentral()$0", central.insertText());
+    }
+
+    @Test
+    void understandsNamedTaskBlocks() {
+        List<String> labels = labels(complete("build.gradle", """
+                tasks.named('test') {
+                    use"""));
+
+        assertEquals(List.of("useJUnitPlatform", "useJUnit", "useTestNG"), labels);
+    }
+
+    @Test
+    void settingsFilesGetSettingsKeywords() {
+        AutoCompleteItem item = complete("settings.gradle.kts", "rootP").getFirst();
+
+        assertEquals("rootProject.name", item.label());
+        assertEquals("rootProject.name = \"$0\"", item.insertText());
+    }
+
+    @Test
+    void gradleKeywordsAreNotSuggestedInsideStringsOrComments() {
+        assertTrue(complete("build.gradle", "// dep").isEmpty());
+        assertTrue(complete("build.gradle", "/* comentario\ndep").isEmpty());
+        assertTrue(complete("build.gradle", "description = \"\"\"\ndep").isEmpty());
+    }
+
+    private static List<String> labels(List<AutoCompleteItem> items) {
+        return items.stream().map(AutoCompleteItem::label).toList();
+    }
+
     private List<AutoCompleteItem> complete(String fileName, String text) {
         return complete(Path.of(fileName), text);
     }

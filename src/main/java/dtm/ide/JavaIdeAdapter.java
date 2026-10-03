@@ -348,7 +348,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 150;
     private static final long DELETE_REFERENCES_TIMEOUT_MS = 30_000;
     private static final int DELETE_SEARCH_PARALLELISM = 4;
-    private static final Set<Character> COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$');
+    private static final Set<Character> JAVA_COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$');
+    private static final Set<Character> BUILD_FILE_ONLY_TRIGGERS = Set.of('<', '/');
+    private static final Set<Character> COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$', '<', '/');
     private static final long COVERAGE_POLL_INTERVAL_MS = 400L;
     private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
@@ -1391,6 +1393,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (BuildFileCompletionProvider.handles(context.filePath())) {
             return settings().isBuildFileCompletion();
         }
+        if (typedBuildFileOnlyTrigger(context)) {
+            return false;
+        }
         if (SpringConfigSupport.isConfigFile(context.filePath())) {
             return settings().isSpringSupport();
         }
@@ -1407,6 +1412,13 @@ public class JavaIdeAdapter extends IdeAdapter {
             return isJpaQueryLiteral(context) || isSpringAnnotationLiteral(line, col);
         }
         return JavaTypingContext.allowsTriggerCharacter(context.text(), context.caretOffset(), previous);
+    }
+
+    private static boolean typedBuildFileOnlyTrigger(IdeCompletionContext context) {
+        String line = context.currentLine();
+        int col = context.caretCol();
+        return line != null && col > 0 && col <= line.length()
+                && BUILD_FILE_ONLY_TRIGGERS.contains(line.charAt(col - 1));
     }
 
     private boolean isIdleCompletionEligible(Path filePath) {
@@ -1519,7 +1531,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             boolean reused = !semantic.isEmpty();
             if (!reused) {
                 Character triggerCharacter = completionTriggerCharacter(context.currentLine(),
-                        context.caretCol(), getCompletionTriggerCharacters());
+                        context.caretCol(), JAVA_COMPLETION_TRIGGER_CHARACTERS);
                 JdtLsService.CompletionTrigger trigger =
                         context.triggerKind() == IdeCompletionTriggerKind.TYPING && triggerCharacter != null
                                 ? JdtLsService.CompletionTrigger.TRIGGER_CHARACTER
