@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
+import dtm.ide.api.hierarchy.TypeHierarchyItem;
 import dtm.stools.component.panels.editor.code.documenthighlight.DocumentHighlight;
 import dtm.ide.api.project.editor.SemanticToken;
 import dtm.ide.inspection.DiagnosticRanges;
@@ -27,6 +28,7 @@ import dtm.stools.component.panels.editor.code.api.TextEdit;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
 import dtm.stools.component.panels.editor.code.hover.HoverInfo;
+import dtm.stools.component.panels.editor.code.prototype.folding.FoldRange;
 import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
 import lombok.extern.slf4j.Slf4j;
@@ -156,8 +158,8 @@ public class JdtLsService {
     private static final long EXIT_HOOK_SHUTDOWN_TIMEOUT_MS = 1_000;
     private static final long EXIT_HOOK_TOTAL_TIMEOUT_MS = 4_000;
     private static final long RETIRE_WAIT_MS = 20_000;
-    private static final long CRASH_RESTART_DELAY_MS = 2_000;
-    private static final long CRASH_RESTART_WINDOW_MS = 300_000;
+    private static final long[] CRASH_RESTART_DELAYS_MS = {1_000, 5_000, 30_000};
+    private static final long CRASH_RESTART_WINDOW_MS = 600_000;
     private static final Set<JdtLsService> LIVE_SERVICES = ConcurrentHashMap.newKeySet();
     private static final AtomicBoolean SHUTDOWN_HOOK_INSTALLED = new AtomicBoolean();
     private static final long DOCUMENT_RECOVERY_COOLDOWN_MS = 5_000;
@@ -233,7 +235,7 @@ public class JdtLsService {
     private volatile boolean terminated;
     private volatile LaunchRequest lastLaunch;
     private final AtomicLong generation = new AtomicLong();
-    private final AtomicLong lastCrashRestart = new AtomicLong();
+    private final List<Long> crashRestarts = new ArrayList<>();
     private volatile CountDownLatch readyLatch = new CountDownLatch(1);
     private volatile CountDownLatch serviceReadyLatch = new CountDownLatch(1);
     private volatile ServerCapabilities capabilities = ServerCapabilities.none();
@@ -244,6 +246,8 @@ public class JdtLsService {
     };
     private final LspProgressAggregator progressAggregator = new LspProgressAggregator();
     private volatile String maxHeap = "2G";
+    private volatile dtm.ide.settings.InlayHintsMode inlayHintsMode =
+            dtm.ide.settings.InlayHintsMode.LITERALS;
     private volatile dtm.ide.settings.JdtBuildMode buildMode =
             dtm.ide.settings.JdtBuildMode.PROJECT_BUILD;
     private volatile Path lombokAgentJar;
@@ -302,6 +306,8 @@ public class JdtLsService {
             boolean callHierarchy,
             boolean executeCommand,
             boolean workspaceSymbol,
+            boolean typeHierarchy,
+            boolean foldingRange,
             boolean completionResolve,
             boolean incrementalSync,
             Set<Character> completionTriggers,
@@ -310,7 +316,7 @@ public class JdtLsService {
         static ServerCapabilities none() {
             return new ServerCapabilities(false, false, false, false, false, false, false, false,
                     false, false, false, false, false, false, false, false, false, false, false,
-                    false, Set.of(), Set.of());
+                    false, false, false, Set.of(), Set.of());
         }
     }
 
@@ -407,6 +413,21 @@ public class JdtLsService {
 
     public void setMaxHeap(String value) {
         this.maxHeap = value == null || value.isBlank() ? "2G" : value.trim();
+    }
+
+    /** Applies immediately to a running server through {@code workspace/didChangeConfiguration}. */
+    public void setInlayHintsMode(dtm.ide.settings.InlayHintsMode value) {
+        dtm.ide.settings.InlayHintsMode mode = value == null ? dtm.ide.settings.InlayHintsMode.LITERALS : value;
+        if (mode == inlayHintsMode) {
+            return;
+        }
+        inlayHintsMode = mode;
+        Map<String, Object> updated = JdtLsSettings.withInlayHints(effectiveSettings, mode);
+        effectiveSettings = updated;
+        LspJsonRpcClient rpc = client;
+        if (rpc != null && !rpc.isClosed() && isInteractive()) {
+            rpc.notify("workspace/didChangeConfiguration", Map.of("settings", updated));
+        }
     }
 
     public void setBuildMode(dtm.ide.settings.JdtBuildMode value) {
@@ -568,6 +589,7 @@ public class JdtLsService {
             lease = null;
             started = null;
             watchServerExit(owned, launchGeneration);
+            rpc.onUnexpectedDisconnect(() -> onProtocolLost(owned, launchGeneration));
             pumpStderr(owned);
             registerHandlers(rpc);
 
@@ -680,21 +702,49 @@ public class JdtLsService {
         }
     }
 
+    /**
+     * The JSON-RPC stream broke but the process may still be running: kill it so the regular
+     * exit path reports the crash and schedules a restart.
+     */
+    private void onProtocolLost(Process server, long launchGeneration) {
+        if (!isCurrent(launchGeneration) || !server.isAlive()) {
+            return;
+        }
+        log.warn("Conexao com o JDT LS perdida com o processo ainda vivo; encerrando para reiniciar");
+        server.destroyForcibly();
+    }
+
     private boolean scheduleRestart(String status) {
         LaunchRequest again = lastLaunch;
-        long now = System.currentTimeMillis();
-        long previous = lastCrashRestart.get();
-        if (again == null || terminated || now - previous <= CRASH_RESTART_WINDOW_MS
-                || !lastCrashRestart.compareAndSet(previous, now)) {
+        if (again == null || terminated) {
             return false;
+        }
+        long delay;
+        synchronized (crashRestarts) {
+            long now = System.currentTimeMillis();
+            crashRestarts.removeIf(time -> now - time > CRASH_RESTART_WINDOW_MS);
+            if (crashRestarts.size() >= CRASH_RESTART_DELAYS_MS.length) {
+                log.warn("JDT LS reiniciado {} vezes em {} min; desistindo ate um reinicio manual",
+                        crashRestarts.size(), CRASH_RESTART_WINDOW_MS / 60_000);
+                return false;
+            }
+            delay = CRASH_RESTART_DELAYS_MS[crashRestarts.size()];
+            crashRestarts.add(now);
         }
         statusListener.onStatus(status, -1);
         try {
             CompletableFuture.runAsync(() -> launch(again.root(), again.jdk(), again.progress()),
-                    CompletableFuture.delayedExecutor(CRASH_RESTART_DELAY_MS, TimeUnit.MILLISECONDS, executor));
+                    CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS, executor));
             return true;
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
             return false;
+        }
+    }
+
+    /** Clears the crash history, e.g. when the user restarts the server by hand. */
+    public void resetCrashHistory() {
+        synchronized (crashRestarts) {
+            crashRestarts.clear();
         }
     }
 
@@ -1213,7 +1263,8 @@ public class JdtLsService {
                 "name", root.getFileName() == null ? "workspace" : root.getFileName().toString())));
         params.put("capabilities", LspClientCapabilities.build(TOKEN_TYPES, TOKEN_MODIFIERS));
         JdkInstallation configuredJdk = preferredProjectJdk == null ? runtime : preferredProjectJdk;
-        effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode);
+        effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode,
+                inlayHintsMode);
         params.put("initializationOptions", initializationOptions(effectiveSettings, bundlePaths));
 
         JsonNode result = awaitWhileAlive(rpc.request("initialize", params),
@@ -1415,21 +1466,16 @@ public class JdtLsService {
         return current;
     }
 
-    synchronized void onPublishDiagnostics(JsonNode params) {
+    /**
+     * Parses outside the service lock and notifies listeners after leaving it, so diagnostics
+     * arriving for a large file never hold up document changes coming from the editor.
+     */
+    void onPublishDiagnostics(JsonNode params) {
         if (params == null) {
             return;
         }
         String uri = params.path("uri").asText("");
         if (uri.isBlank()) {
-            return;
-        }
-        JsonNode publishedVersion = params.get("version");
-        int currentVersion = documents.version(uri);
-        if (publishedVersion != null && publishedVersion.isIntegralNumber()
-                && currentVersion != ANY_VERSION
-                && publishedVersion.asInt() != currentVersion) {
-            log.debug("Diagnosticos descartados para {}: versao {} recebida, {} atual",
-                    uri, publishedVersion.asInt(), currentVersion);
             return;
         }
         List<Diagnostic> diagnostics = new ArrayList<>();
@@ -1444,19 +1490,35 @@ public class JdtLsService {
                 }
             }
         }
-        Path path = LspConversions.toPath(uri);
-        if (path != null) {
-            Path key = normalizePath(path);
-            String content = documents.content(uri);
-            List<Diagnostic> latest = content == null
-                    ? List.copyOf(diagnostics)
-                    : DiagnosticRanges.compactMultiline(diagnostics, content);
-            List<Diagnostic> previous = diagnosticsByPath.put(key, latest);
-            rawDiagnosticsByPath.put(key, List.copyOf(rawDiagnostics));
-            if (diagnosticsSettled && !latest.equals(previous)) {
-                onDiagnosticsPublished.accept(path);
-            }
+        Path changed = recordDiagnostics(uri, params.get("version"), diagnostics, rawDiagnostics);
+        if (changed != null) {
+            onDiagnosticsPublished.accept(changed);
         }
+    }
+
+    private synchronized Path recordDiagnostics(String uri, JsonNode publishedVersion,
+                                                List<Diagnostic> diagnostics,
+                                                List<JsonNode> rawDiagnostics) {
+        int currentVersion = documents.version(uri);
+        if (publishedVersion != null && publishedVersion.isIntegralNumber()
+                && currentVersion != ANY_VERSION
+                && publishedVersion.asInt() != currentVersion) {
+            log.debug("Diagnosticos descartados para {}: versao {} recebida, {} atual",
+                    uri, publishedVersion.asInt(), currentVersion);
+            return null;
+        }
+        Path path = LspConversions.toPath(uri);
+        if (path == null) {
+            return null;
+        }
+        Path key = normalizePath(path);
+        String content = documents.content(uri);
+        List<Diagnostic> latest = content == null
+                ? List.copyOf(diagnostics)
+                : DiagnosticRanges.compactMultiline(diagnostics, content);
+        List<Diagnostic> previous = diagnosticsByPath.put(key, latest);
+        rawDiagnosticsByPath.put(key, List.copyOf(rawDiagnostics));
+        return diagnosticsSettled && !latest.equals(previous) ? path : null;
     }
 
     boolean isDiagnosticsSettled() {
@@ -2163,50 +2225,15 @@ public class JdtLsService {
     public List<AutoCompleteItem> complete(Path filePath, String text, int line, int col,
                                            CompletionTrigger trigger, Character triggerCharacter,
                                            int expectedVersion, boolean announceLateResult) {
-        if (!isInteractive()) {
-            return List.of();
-        }
-        String uri = LspConversions.toUri(filePath);
-        String requestedText = text == null ? "" : text;
-        int versionBeforeSync = documents.version(uri);
-        if (!syncBeforeRequest(filePath, text)) {
-            return List.of();
-        }
-        if (expectedVersion == versionBeforeSync) {
-            expectedVersion = documents.version(uri);
-        }
-        CompletionCache cached = completionCache.get(uri);
-        if (cached != null && cached.text().equals(requestedText)
-                && cached.line() == line && cached.col() == col) {
-            return cached.items();
-        }
-        int version = documents.version(uri);
-        if (isStaleVersion(expectedVersion, version)) {
-            log.debug("Completion descartada antes do envio: versao {} esperada, {} atual",
-                    expectedVersion, version);
-            return List.of();
-        }
-        CompletionTrigger kind = trigger == null ? CompletionTrigger.INVOKED : trigger;
+        CompletableFuture<List<AutoCompleteItem>> pending = completeAsync(filePath, text, line, col,
+                trigger, triggerCharacter, expectedVersion);
         long timeout = isReady() ? READY_COMPLETION_TIMEOUT_MS : INDEXING_COMPLETION_TIMEOUT_MS;
-        long started = System.nanoTime();
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || !isInteractive()) {
-            return List.of();
-        }
-        String key = "completion|" + uri + "|" + version + "|" + line + "|" + col;
-        CompletableFuture<JsonNode> future = inFlightRequests.computeIfAbsent(key, ignored ->
-                rpc.request("textDocument/completion",
-                        completionParams(filePath, line, col, kind, triggerCharacter)));
-        future.whenComplete((result, error) -> inFlightRequests.remove(key, future));
-        JsonNode result;
         try {
-            result = future.get(timeout, TimeUnit.MILLISECONDS);
+            return pending.get(timeout, TimeUnit.MILLISECONDS);
         } catch (TimeoutException timedOut) {
-            log.debug("Completion sem resposta em {} ms (acionamento {}); aguardando em segundo plano",
-                    timeout, kind);
+            log.debug("Completion sem resposta em {} ms; aguardando em segundo plano", timeout);
             if (announceLateResult) {
-                future.thenAccept(late -> acceptLateCompletion(filePath, uri, requestedText,
-                        line, col, version, late));
+                pending.thenAccept(late -> announceLateCompletion(filePath, line, col, late));
             }
             return List.of();
         } catch (InterruptedException interrupted) {
@@ -2216,35 +2243,95 @@ public class JdtLsService {
             logRequestFailure("textDocument/completion", failure);
             return List.of();
         }
-        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
-        int current = documents.version(uri);
-        if (!requestedText.equals(documents.content(uri)) || current != version
-                || isStaleVersion(expectedVersion, current)) {
-            log.debug("Completion descartada: documento mudou durante a requisicao ({} ms)",
-                    elapsedMs);
-            return List.of();
-        }
-        CompletionAnswer answer = completionItems(result);
-        completionCache.put(uri, new CompletionCache(requestedText, line, col,
-                linePrefixAtWordStart(requestedText, line, col), answer.incomplete(), answer.items()));
-        log.debug("Completion com {} item(ns) em {} ms (acionamento {}, incompleta={})",
-                answer.items().size(), elapsedMs, kind, answer.incomplete());
-        return answer.items();
     }
 
-    private void acceptLateCompletion(Path filePath, String uri, String requestedText,
-                                      int line, int col, int version, JsonNode result) {
-        if (result == null || documents.version(uri) != version
-                || !requestedText.equals(documents.content(uri))) {
+    /**
+     * Requests completion without blocking the caller. The future completes with an empty list
+     * when the document changed while JDT LS was answering, and cancelling it cancels the
+     * request on the server.
+     */
+    public CompletableFuture<List<AutoCompleteItem>> completeAsync(Path filePath, String text, int line,
+                                                                   int col, CompletionTrigger trigger,
+                                                                   Character triggerCharacter,
+                                                                   int expectedVersion) {
+        if (!isInteractive()) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        String uri = LspConversions.toUri(filePath);
+        String requestedText = text == null ? "" : text;
+        int versionBeforeSync = documents.version(uri);
+        if (!syncBeforeRequest(filePath, text)) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        int expected = expectedVersion == versionBeforeSync ? documents.version(uri) : expectedVersion;
+        CompletionCache cached = completionCache.get(uri);
+        if (cached != null && cached.text().equals(requestedText)
+                && cached.line() == line && cached.col() == col) {
+            return CompletableFuture.completedFuture(cached.items());
+        }
+        int version = documents.version(uri);
+        if (isStaleVersion(expected, version)) {
+            log.debug("Completion descartada antes do envio: versao {} esperada, {} atual",
+                    expected, version);
+            return CompletableFuture.completedFuture(List.of());
+        }
+        CompletionTrigger kind = trigger == null ? CompletionTrigger.INVOKED : trigger;
+        LspJsonRpcClient rpc = client;
+        if (rpc == null || !isInteractive()) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        long started = System.nanoTime();
+        String key = "completion|" + uri + "|" + version + "|" + line + "|" + col;
+        CompletableFuture<JsonNode> request = inFlightRequests.computeIfAbsent(key, ignored ->
+                rpc.request("textDocument/completion",
+                        completionParams(filePath, line, col, kind, triggerCharacter)));
+        request.whenComplete((result, error) -> inFlightRequests.remove(key, request));
+        CompletableFuture<List<AutoCompleteItem>> items = request.handle((result, error) -> {
+            if (error != null) {
+                if (!(error instanceof java.util.concurrent.CancellationException)
+                        && !(error.getCause() instanceof java.util.concurrent.CancellationException)) {
+                    logRequestFailure("textDocument/completion",
+                            error instanceof Exception exception ? exception : new Exception(error));
+                }
+                return List.<AutoCompleteItem>of();
+            }
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            int current = documents.version(uri);
+            if (!requestedText.equals(documents.content(uri)) || current != version
+                    || isStaleVersion(expected, current)) {
+                log.debug("Completion descartada: documento mudou durante a requisicao ({} ms)",
+                        elapsedMs);
+                return List.<AutoCompleteItem>of();
+            }
+            CompletionAnswer answer = completionItems(result);
+            completionCache.put(uri, new CompletionCache(requestedText, line, col,
+                    linePrefixAtWordStart(requestedText, line, col), answer.incomplete(), answer.items()));
+            log.debug("Completion com {} item(ns) em {} ms (acionamento {}, incompleta={})",
+                    answer.items().size(), elapsedMs, kind, answer.incomplete());
+            return answer.items();
+        });
+        items.whenComplete((ignored, error) -> {
+            if (items.isCancelled()) {
+                request.cancel(false);
+            }
+        });
+        return items;
+    }
+
+    /** Fills in the Javadoc of the selected completion item, which JDT LS sends lazily. */
+    public CompletableFuture<AutoCompleteItem> resolveCompletionAsync(AutoCompleteItem item) {
+        if (item == null || !capabilities.completionResolve() || !(item.data() instanceof JsonNode raw)) {
+            return CompletableFuture.completedFuture(item);
+        }
+        return requestAsync("completionItem/resolve", raw, interactiveTimeoutMs(), true)
+                .thenApply(resolved -> LspConversions.withResolvedDocumentation(item, resolved));
+    }
+
+    private void announceLateCompletion(Path filePath, int line, int col, List<AutoCompleteItem> late) {
+        if (late == null || late.isEmpty()) {
             return;
         }
-        CompletionAnswer answer = completionItems(result);
-        if (answer.items().isEmpty()) {
-            return;
-        }
-        completionCache.put(uri, new CompletionCache(requestedText, line, col,
-                linePrefixAtWordStart(requestedText, line, col), answer.incomplete(), answer.items()));
-        log.debug("Completion atrasada chegou com {} item(ns)", answer.items().size());
+        log.debug("Completion atrasada chegou com {} item(ns)", late.size());
         try {
             lateCompletionListener.onLateCompletion(filePath, line, col);
         } catch (Exception e) {
@@ -2397,6 +2484,32 @@ public class JdtLsService {
     public void warmCompletion(Path filePath, String text, int line, int col) {
         if (!isInteractive() || isReady() || filePath == null) return;
         executor.submit(() -> complete(filePath, text, line, col));
+    }
+
+    public CompletableFuture<HoverInfo> hoverAsync(Path filePath, String text, int line, int col) {
+        return requestAtInteractiveAsync("textDocument/hover", filePath, text, line, col)
+                .thenApply(result -> isCurrentText(filePath, text) ? LspConversions.hover(result) : null);
+    }
+
+    public CompletableFuture<SignatureHelp> signatureHelpAsync(Path filePath, String text, int line, int col) {
+        if (!capabilities.signatureHelp()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return requestAtInteractiveAsync("textDocument/signatureHelp", filePath, text, line, col)
+                .thenApply(result -> isCurrentText(filePath, text) ? LspConversions.signatureHelp(result) : null);
+    }
+
+    /** Extend-selection chain for a position, from the innermost range to the whole file. */
+    public CompletableFuture<List<Range>> selectionRangesAsync(Path filePath, String text, int line, int col) {
+        if (!syncBeforeRequest(filePath, text)) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        Map<String, Object> params = Map.of(
+                "textDocument", documentId(filePath),
+                "positions", List.of(Map.of("line", Math.max(0, line), "character", Math.max(0, col))));
+        return requestAsync("textDocument/selectionRange", params, interactiveTimeoutMs(), true)
+                .thenApply(result -> isCurrentText(filePath, text)
+                        ? LspConversions.selectionChain(result) : List.<Range>of());
     }
 
     public HoverInfo hover(Path filePath, String text, int line, int col) {
@@ -2585,6 +2698,14 @@ public class JdtLsService {
                 Map.of("context", Map.of("includeDeclaration", false)));
     }
 
+    public boolean supportsTypeHierarchy() {
+        return capabilities.typeHierarchy();
+    }
+
+    public boolean supportsFoldingRanges() {
+        return capabilities.foldingRange();
+    }
+
     public boolean supportsCallHierarchy() {
         return capabilities.callHierarchy();
     }
@@ -2599,6 +2720,54 @@ public class JdtLsService {
         JsonNode result = request("textDocument/prepareCallHierarchy",
                 positionParams(filePath, line, col), REQUEST_TIMEOUT_MS);
         return callHierarchyItems(result);
+    }
+
+    /** {@code null} when the server cannot answer yet, so the editor keeps its brace-based folding. */
+    public CompletableFuture<List<FoldRange>> foldingRangesAsync(Path filePath, String text) {
+        if (!capabilities.foldingRange() || !isReady() || !syncBeforeRequest(filePath, text)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return requestAsync("textDocument/foldingRange", Map.of("textDocument", documentId(filePath)),
+                REQUEST_TIMEOUT_MS, false)
+                .thenApply(result -> result == null || !isCurrentText(filePath, text)
+                        ? null : LspConversions.foldRanges(result));
+    }
+
+    public List<TypeHierarchyItem> prepareTypeHierarchy(Path filePath, String text, int line, int col) {
+        if (!capabilities.typeHierarchy() || !syncBeforeRequest(filePath, text)) {
+            return List.of();
+        }
+        return LspConversions.typeHierarchyItems(request("textDocument/prepareTypeHierarchy",
+                positionParams(filePath, line, col), REQUEST_TIMEOUT_MS));
+    }
+
+    public List<TypeHierarchyItem> supertypes(TypeHierarchyItem item) {
+        return typeHierarchy("typeHierarchy/supertypes", item);
+    }
+
+    public List<TypeHierarchyItem> subtypes(TypeHierarchyItem item) {
+        return typeHierarchy("typeHierarchy/subtypes", item);
+    }
+
+    private List<TypeHierarchyItem> typeHierarchy(String method, TypeHierarchyItem item) {
+        if (!capabilities.typeHierarchy() || item == null) {
+            return List.of();
+        }
+        Object lspItem = item.data() instanceof JsonNode original ? original : serializeTypeHierarchyItem(item);
+        return LspConversions.typeHierarchyItems(request(method, Map.of("item", lspItem), REQUEST_TIMEOUT_MS));
+    }
+
+    private static Map<String, Object> serializeTypeHierarchyItem(TypeHierarchyItem item) {
+        Map<String, Object> serialized = new LinkedHashMap<>();
+        serialized.put("name", item.name());
+        serialized.put("kind", item.kind());
+        serialized.put("uri", LspConversions.toUri(item.file()));
+        serialized.put("range", LspConversions.toLspRange(item.range()));
+        serialized.put("selectionRange", LspConversions.toLspRange(item.selectionRange()));
+        if (item.detail() != null && !item.detail().isBlank()) {
+            serialized.put("detail", item.detail());
+        }
+        return serialized;
     }
 
     public List<CallHierarchyCall> incomingCalls(CallHierarchyItem item) {
@@ -3435,6 +3604,16 @@ public class JdtLsService {
         }
     }
 
+    public CompletableFuture<List<InlayHint>> inlayHintsAsync(Path filePath, String text,
+                                                               int firstLine, int lastLine) {
+        if (!capabilities.inlayHint() || isWarmingUp() || !syncBeforeRequest(filePath, text)) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        return requestAsync("textDocument/inlayHint", inlayHintParams(filePath, firstLine, lastLine),
+                REQUEST_TIMEOUT_MS, false)
+                .thenApply(result -> isCurrentText(filePath, text) ? inlayHintsOf(result) : List.<InlayHint>of());
+    }
+
     public List<InlayHint> inlayHints(Path filePath, String text, int firstLine, int lastLine) {
         if (!capabilities.inlayHint()) {
             return List.of();
@@ -3442,14 +3621,24 @@ public class JdtLsService {
         if (!syncBeforeRequest(filePath, text)) {
             return List.of();
         }
-        Map<String, Object> params = Map.of(
+        JsonNode result = requestBackground("textDocument/inlayHint",
+                inlayHintParams(filePath, firstLine, lastLine), REQUEST_TIMEOUT_MS);
+        if (!isCurrentText(filePath, text)) {
+            return List.of();
+        }
+        return inlayHintsOf(result);
+    }
+
+    private static Map<String, Object> inlayHintParams(Path filePath, int firstLine, int lastLine) {
+        return Map.of(
                 "textDocument", documentId(filePath),
                 "range", Map.of(
                         "start", Map.of("line", Math.max(0, firstLine), "character", 0),
                         "end", Map.of("line", Math.max(0, lastLine), "character", 0)));
+    }
 
-        JsonNode result = requestBackground("textDocument/inlayHint", params, REQUEST_TIMEOUT_MS);
-        if (result == null || !result.isArray() || !isCurrentText(filePath, text)) {
+    private static List<InlayHint> inlayHintsOf(JsonNode result) {
+        if (result == null || !result.isArray()) {
             return List.of();
         }
         List<InlayHint> hints = new ArrayList<>(result.size());
@@ -3570,6 +3759,16 @@ public class JdtLsService {
                 if (path != null) onCodeLensRefresh.accept(path);
             }
         });
+    }
+
+    public CompletableFuture<List<SemanticToken>> semanticTokensAsync(Path filePath, String text) {
+        if (!capabilities.semanticTokens() || isWarmingUp() || !syncBeforeRequest(filePath, text)) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        return requestAsync("textDocument/semanticTokens/full", Map.of("textDocument", documentId(filePath)),
+                REQUEST_TIMEOUT_MS, false)
+                .thenApply(result -> result == null || !isCurrentText(filePath, text) ? List.<SemanticToken>of()
+                        : SemanticTokenDecoder.decode(result.get("data"), TOKEN_TYPES, TOKEN_MODIFIERS));
     }
 
     public List<SemanticToken> semanticTokens(Path filePath, String text) {
@@ -3751,6 +3950,42 @@ public class JdtLsService {
                 interactiveTimeoutMs());
     }
 
+    private CompletableFuture<JsonNode> requestAtInteractiveAsync(String method, Path filePath, String text,
+                                                                  int line, int col) {
+        if (!syncBeforeRequest(filePath, text)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return requestAsync(method, positionParams(filePath, line, col), interactiveTimeoutMs(), true);
+    }
+
+    /**
+     * Non-blocking request. A timeout cancels the request (which tells JDT LS to drop it) and
+     * completes the future with {@code null}, as do failures and edits to the document for the
+     * methods in {@link #CANCELLED_ON_EDIT}.
+     */
+    private CompletableFuture<JsonNode> requestAsync(String method, Object params, long timeoutMs,
+                                                     boolean interactive) {
+        LspJsonRpcClient rpc = client;
+        if (rpc == null || (interactive ? !isInteractive() : !isReady())) {
+            return CompletableFuture.completedFuture(null);
+        }
+        CompletableFuture<JsonNode> future = rpc.request(method, params);
+        String key = CANCELLED_ON_EDIT.contains(method) ? editScopedKey(method, params) : null;
+        if (key != null) {
+            inFlightRequests.put(key, future);
+            future.whenComplete((result, error) -> inFlightRequests.remove(key, future));
+        }
+        CompletableFuture.delayedExecutor(timeoutMs, TimeUnit.MILLISECONDS)
+                .execute(() -> future.cancel(false));
+        return future.handle((result, error) -> {
+            if (error != null && !future.isCancelled()) {
+                logRequestFailure(method, error instanceof Exception exception
+                        ? exception : new Exception(error));
+            }
+            return error == null ? result : null;
+        });
+    }
+
     private long interactiveTimeoutMs() {
         return isReady() && !isWarmingUp() ? INTERACTIVE_TIMEOUT_MS : INDEXING_INTERACTIVE_TIMEOUT_MS;
     }
@@ -3801,6 +4036,11 @@ public class JdtLsService {
             return null;
         }
         CompletableFuture<JsonNode> future = rpc.request(method, params);
+        String key = CANCELLED_ON_EDIT.contains(method) ? editScopedKey(method, params) : null;
+        if (key != null) {
+            inFlightRequests.put(key, future);
+            future.whenComplete((result, error) -> inFlightRequests.remove(key, future));
+        }
         try {
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
@@ -3811,7 +4051,30 @@ public class JdtLsService {
             future.cancel(false);
             logRequestFailure(method, e);
             return null;
+        } finally {
+            if (key != null) {
+                inFlightRequests.remove(key, future);
+            }
         }
+    }
+
+    /**
+     * Read-only requests whose answer is tied to the document version: once the user edits the
+     * file the answer is stale, so the request is cancelled instead of keeping JDT LS busy.
+     */
+    private static final Set<String> CANCELLED_ON_EDIT = Set.of(
+            "textDocument/hover", "textDocument/signatureHelp", "textDocument/semanticTokens/full",
+            "textDocument/inlayHint", "textDocument/codeLens", "textDocument/documentHighlight",
+            "textDocument/foldingRange", "textDocument/selectionRange");
+
+    private final AtomicLong editScopedSequence = new AtomicLong();
+
+    private String editScopedKey(String method, Object params) {
+        if (!(params instanceof Map<?, ?> map) || !(map.get("textDocument") instanceof Map<?, ?> document)
+                || !(document.get("uri") instanceof String uri)) {
+            return null;
+        }
+        return method + "|" + uri + "|#" + editScopedSequence.incrementAndGet();
     }
 
     private JsonNode requestCoalesced(String method, Object params, long timeoutMs, String key) {

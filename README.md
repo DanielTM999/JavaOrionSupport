@@ -100,6 +100,23 @@ pesquisa no projeto, e **Ir para implementação** procura implementações de t
 CodeLens de usos e implementações executam essas respectivas buscas e mantêm ocorrências distintas
 na mesma linha.
 
+Outros atalhos do editor:
+
+| Atalho | Ação |
+|---|---|
+| **Ctrl+W** / **Ctrl+Shift+W** | Expande / reduz a seleção pela estrutura do código (palavra, expressão, bloco, método, classe). |
+| **Ctrl+B** / **Ctrl+Alt+B** | Ir para a declaração / implementação. |
+| **Alt+F7** | Encontrar usos. |
+| **Alt+Insert** | Gerar construtores, getters/setters, `toString`, `equals`/`hashCode`. |
+
+A completion não trava o editor enquanto o JDT LS responde: sugestões locais aparecem na hora e as
+semânticas completam a lista quando chegam. O Javadoc do item selecionado é carregado sob demanda.
+Templates *postfix* transformam a expressão antes do ponto: `lista.for`, `valor.nn`, `valor.null`,
+`expr.var`, `expr.sout`, `expr.return`, `cond.if`, `cond.not`, `n.fori`, `expr.par` e `chamada.try`.
+A **hierarquia de tipos** (supertipos e subtipos da classe ou interface sob o cursor) fica
+disponível na mesma interface da hierarquia de chamadas da Orion. O código é dobrado pela
+estrutura informada pelo JDT LS, com o bloco de imports dobrado ao abrir.
+
 As buscas consideram o texto ainda não salvo e descartam respostas de versões antigas. Durante a
 indexação ou uma falha do servidor, o status informa a situação; a navegação local pode atender
 variáveis e parâmetros com escopo identificável. Um resultado semântico vazio não é substituído
@@ -156,11 +173,14 @@ a aplicação por limitação da JVM.
 Nas preferências do plugin é possível ajustar:
 
 - modo e memória do IntelliSense;
+- dicas inline (*inlay hints*): desligadas, nomes de parâmetros para literais, ou todos os
+  parâmetros com tipos inferidos;
 - JDK padrão e suporte a Lombok;
 - formatação e organização de imports ao salvar;
 - marcação de cobertura na barra lateral do editor;
 - build offline e execução de testes antes do Run;
 - modo de hot reload;
+- parar o depurador também em exceções capturadas;
 - marcadores do painel TODO;
 - suporte Spring, CodeLens, Actuator e URL da aplicação.
 

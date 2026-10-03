@@ -50,7 +50,26 @@ public final class JpaQueryCompletionProvider {
     private static final Pattern SQL_SOURCE = Pattern.compile(
             "(?i)\\b(?:from|join|update|into)\\s+([A-Za-z_][\\w.$]*)(?:\\s+(?:as\\s+)?([A-Za-z_]\\w*))?");
 
+    private record CachedScan(String source, JpaQueryLiteralScanner.Scan scan) {
+    }
+
+    private static volatile CachedScan lastScan;
+
     private JpaQueryCompletionProvider() {
+    }
+
+    /** Completion and trigger checks scan the same buffer repeatedly; most files have no @Query. */
+    private static JpaQueryLiteralScanner.Scan scanOf(String source) {
+        if (source.indexOf("Query") < 0) {
+            return JpaQueryLiteralScanner.EMPTY;
+        }
+        CachedScan cached = lastScan;
+        if (cached != null && (cached.source() == source || cached.source().equals(source))) {
+            return cached.scan();
+        }
+        JpaQueryLiteralScanner.Scan scan = JpaQueryLiteralScanner.scan(source);
+        lastScan = new CachedScan(source, scan);
+        return scan;
     }
 
     public static List<AutoCompleteItem> suggestions(SpringIndexSnapshot snapshot, Path file,
@@ -59,7 +78,7 @@ public final class JpaQueryCompletionProvider {
             return null;
         }
         int caret = Math.max(0, Math.min(caretOffset, source.length()));
-        JpaQueryLiteralScanner.Scan scan = JpaQueryLiteralScanner.scan(source);
+        JpaQueryLiteralScanner.Scan scan = scanOf(source);
         JpaQueryLiteralScanner.QueryLiteral literal = scan.literalContaining(caret);
         if (literal == null) {
             return null;
@@ -110,7 +129,7 @@ public final class JpaQueryCompletionProvider {
             return false;
         }
         int caret = Math.max(0, Math.min(caretOffset, source.length()));
-        return JpaQueryLiteralScanner.scan(source).literalContaining(caret) != null;
+        return scanOf(source).literalContaining(caret) != null;
     }
 
     private static JpaQueryMethod methodContext(SpringIndexSnapshot snapshot, Path file,

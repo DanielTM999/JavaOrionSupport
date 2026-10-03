@@ -24,6 +24,7 @@ import dtm.ide.api.project.editor.IdeCodeActionContext;
 import dtm.ide.api.extension.NotificationContext;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
+import dtm.ide.api.hierarchy.TypeHierarchyItem;
 import dtm.ide.api.project.editor.IdeCallHierarchyContext;
 import dtm.ide.api.extension.editor.EmbeddedCodeEditorSettings;
 import dtm.ide.api.project.editor.IdeCodeLensContext;
@@ -246,6 +247,10 @@ import dtm.stools.component.panels.editor.code.api.Command;
 import dtm.stools.component.panels.editor.code.api.CommandHandler;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
+import dtm.ide.api.project.editor.IdeSelectionRangeContext;
+import dtm.ide.api.project.editor.SelectionRangeContext;
+import dtm.ide.editor.PostfixCompletionProvider;
+import dtm.ide.editor.TextOffsets;
 import dtm.stools.component.panels.editor.code.api.Position;
 import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.api.SymbolKind;
@@ -264,6 +269,7 @@ import dtm.stools.component.panels.editor.code.hover.HoverInfo;
 import dtm.stools.component.popup.ModernDialog;
 import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
+import dtm.stools.component.panels.editor.code.prototype.folding.FoldRange;
 import dtm.stools.component.panels.editor.code.prototype.folding.FoldRule;
 import dtm.stools.component.panels.editor.code.provider.TokenizerCodeEditorProvider;
 import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenClassifierProvider;
@@ -346,11 +352,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 150;
+    private static final long RUN_BUTTONS_REFRESH_DELAY_MS = 300;
+    private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
     private static final long DELETE_REFERENCES_TIMEOUT_MS = 30_000;
     private static final int DELETE_SEARCH_PARALLELISM = 4;
     private static final Set<Character> JAVA_COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$');
-    private static final Set<Character> BUILD_FILE_ONLY_TRIGGERS = Set.of('<', '/');
-    private static final Set<Character> COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$', '<', '/');
+    private static final Set<Character> BUILD_FILE_TRIGGER_CHARACTERS = Set.of('.', ':', '$', '<', '/', '\'', '"');
     private static final long COVERAGE_POLL_INTERVAL_MS = 400L;
     private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
@@ -457,6 +464,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private static final Color DELETE_ACCENT = new Color(220, 53, 69);
     
+    private final AtomicLong runButtonsTicket = new AtomicLong();
+    private final Object lifecycleLock = new Object();
+    private final Object fileWatcherLock = new Object();
+    private final Object debugSessionLock = new Object();
+    private volatile Path fileWatcherRoot;
+    private volatile MainClassMemo mainClassMemo;
     private volatile Path projectRoot;
     private volatile JavaProjectDescriptor descriptor;
     private final JavaPathTransferRefactoring pathTransfers = new JavaPathTransferRefactoring(new PathTransferHost());
@@ -590,17 +603,45 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onProjectClosed(IdeProjectContext context) {
-        lifecycle.incrementAndGet();
+        teardownProject(false);
+        projectContext = null;
+    }
+
+    @Override
+    public void onProjectSwitched(IdeProjectContext oldContext, IdeProjectContext newContext) {
+        teardownProject(true);
+        projectContext = null;
+        if (newContext != null) {
+            onProjectOpened(newContext);
+        }
+    }
+
+    /**
+     * Releases everything bound to the current project. Used when the project is closed and
+     * when {@link #bind} receives a different root without a close in between. When switching,
+     * only a language server still bound to the old root is stopped, so the start requested
+     * for the new root is never cancelled by this teardown.
+     */
+    private void teardownProject(boolean switching) {
+        Path closingRoot;
+        synchronized (lifecycleLock) {
+            lifecycle.incrementAndGet();
+            closingRoot = projectRoot;
+            descriptor = null;
+            projectRoot = null;
+            staticRunConfigurations = List.of();
+        }
         background.cancelPending();
         JdtLsService lsp = jdtLs;
         if (lsp != null) {
             lsp.resetProjectState();
-            lsp.stopAsync();
+            if (switching && closingRoot != null) {
+                lsp.stopAsyncIfBoundTo(closingRoot);
+            } else {
+                lsp.stopAsync();
+            }
         }
-
-        descriptor = null;
-        projectRoot = null;
-        projectContext = null;
+        dtm.ide.run.OwnedRunProcesses.shutdownAll();
         projectJdk = null;
         buildSystem = null;
         dependencyService = null;
@@ -611,7 +652,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         closeDebugSession();
         activeJavaEditor = null;
         selectedRunConfig = null;
-        staticRunConfigurations = List.of();
+        mainClassMemo = null;
         unregisterFileWatcher();
         DependencyManagerCoordinator coordinator = dependencyCoordinator;
         if (coordinator != null) {
@@ -696,9 +737,41 @@ public class JavaIdeAdapter extends IdeAdapter {
             coordinator.close();
         }
         autoCompleteIdle.cancel();
+        for (ConditionEditorSession conditionSession : List.copyOf(conditionSessions.values())) {
+            try {
+                conditionSession.close();
+            } catch (RuntimeException error) {
+                log.debug("Falha ao fechar editor de condicao no unload: {}", error.getMessage());
+            }
+        }
+        conditionSessions.clear();
+        JavaDebugValuePopup popup = debugValuePopup;
+        if (popup != null) {
+            SwingUtilities.invokeLater(popup::hide);
+        }
+        unregisterToolPanels();
         springIndex.shutdown();
         lexicalIndex.shutdown();
         dtm.ide.build.JavacDaemons.shutdownAll();
+    }
+
+    private void unregisterToolPanels() {
+        for (String panelId : java.util.Arrays.asList(
+                debugPanelId, testPanelId, todoPanelId, buildToolsPanelId, springPanelId)) {
+            if (panelId == null) {
+                continue;
+            }
+            try {
+                unregisterToolPanel(panelId);
+            } catch (RuntimeException error) {
+                log.debug("Falha ao remover painel {} no unload: {}", panelId, error.getMessage());
+            }
+        }
+        debugPanelId = null;
+        testPanelId = null;
+        todoPanelId = null;
+        buildToolsPanelId = null;
+        springPanelId = null;
     }
 
     @Override
@@ -708,7 +781,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (root == null) {
             return;
         }
-        long ticket = lifecycle.incrementAndGet();
+        long ticket;
+        synchronized (lifecycleLock) {
+            ticket = lifecycle.incrementAndGet();
+        }
         buildSystem = null;
         dependencyService = null;
         problems.clearAll();
@@ -719,11 +795,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         background.submit(() -> {
             JavaProjectDescriptor described = timed("describe(clearCaches)",
                     () -> JavaProjectConventions.describe(root));
-            if (!current(ticket, root)) {
+            if (!publishDescriptor(ticket, root, described)) {
                 return;
             }
-            descriptor = described;
-            staticRunConfigurations = buildStaticRunConfigurations(described);
             JdkService jdks = jdkService;
             if (jdks != null) {
                 jdks.refresh();
@@ -751,18 +825,27 @@ public class JavaIdeAdapter extends IdeAdapter {
         log.info("bind iniciado na thread {}", callerThread);
         Path nextRoot = context == null ? null
                 : context.getProjectPath().map(JavaProjectConventions::normalize).orElse(null);
-        this.projectContext = context;
         if (nextRoot != null && nextRoot.equals(projectRoot) && descriptor != null) {
+            this.projectContext = context;
             refreshRunButtonsForCurrentFile();
             logSlowBind(started, callerThread);
             return;
         }
-        this.projectRoot = nextRoot;
-        this.descriptor = null;
-        this.staticRunConfigurations = List.of();
+        Path previousRoot = projectRoot;
+        if (previousRoot != null && !previousRoot.equals(nextRoot)) {
+            log.info("Projeto trocado sem fechamento: {} -> {}", previousRoot, nextRoot);
+            teardownProject(true);
+        }
+        this.projectContext = context;
+        long ticket;
+        synchronized (lifecycleLock) {
+            this.projectRoot = nextRoot;
+            this.descriptor = null;
+            this.staticRunConfigurations = List.of();
+            ticket = lifecycle.incrementAndGet();
+        }
         problems.clearAll();
         refreshProblemsPanel();
-        long ticket = lifecycle.incrementAndGet();
         Path root = nextRoot;
         if (root == null) {
             refreshRunButtonsForCurrentFile();
@@ -783,11 +866,9 @@ public class JavaIdeAdapter extends IdeAdapter {
             try {
                 JavaProjectDescriptor described = timed("describe(bind)",
                         () -> JavaProjectConventions.describe(root));
-                if (!current(ticket, root)) {
+                if (!publishDescriptor(ticket, root, described)) {
                     return;
                 }
-                descriptor = described;
-                staticRunConfigurations = buildStaticRunConfigurations(described);
                 if (described == null) {
                     SwingUtilities.invokeLater(() -> {
                         if (current(ticket, root)) {
@@ -1085,6 +1166,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         JdtLsService created = new JdtLsService(jdks, provisioner, extensionBundles,
                 this::onLspDiagnosticsPublished);
         created.setMaxHeap(settings().getLanguageServerMemory());
+        created.setInlayHintsMode(settings().getInlayHints());
         created.setStatusListener(this::publishLanguageServerStatus);
         created.setWorkListener(this::publishLanguageServerWork);
         created.setCodeLensRefreshListener(path -> {
@@ -1337,6 +1419,20 @@ public class JavaIdeAdapter extends IdeAdapter {
         return lifecycle.get() == ticket && root != null && root.equals(projectRoot);
     }
 
+    /** Publishes the descriptor only if the project did not change while it was computed. */
+    private boolean publishDescriptor(long ticket, Path root, JavaProjectDescriptor described) {
+        List<RunConfigurationData> configurations = buildStaticRunConfigurations(described);
+        synchronized (lifecycleLock) {
+            if (!current(ticket, root)) {
+                return false;
+            }
+            descriptor = described;
+            staticRunConfigurations = configurations;
+            mainClassMemo = null;
+            return true;
+        }
+    }
+
     @Override
     public Collection<FileAssociated> getFileAssociations() {
         if (!settings().isBuildFileCompletion()) {
@@ -1350,6 +1446,15 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public TokenizerCodeEditorProvider resolveSyntaxHighlightTokenizer(Path filePath) {
         return editors.tokenizerFor(filePath);
+    }
+
+    @Override
+    public CompletableFuture<List<FoldRange>> resolveFoldRanges(Path filePath, String text, long documentVersion) {
+        JdtLsService lsp = jdtLs;
+        if (lsp == null || !JavaProjectConventions.isJava(filePath) || !lsp.supportsFoldingRanges()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return lsp.foldingRangesAsync(filePath, text);
     }
 
     @Override
@@ -1382,7 +1487,14 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public Set<Character> getCompletionTriggerCharacters() {
-        return COMPLETION_TRIGGER_CHARACTERS;
+        return JAVA_COMPLETION_TRIGGER_CHARACTERS;
+    }
+
+    @Override
+    public Set<Character> getCompletionTriggerCharacters(Path filePath) {
+        return BuildFileCompletionProvider.handles(filePath) && settings().isBuildFileCompletion()
+                ? BUILD_FILE_TRIGGER_CHARACTERS
+                : JAVA_COMPLETION_TRIGGER_CHARACTERS;
     }
 
     @Override
@@ -1392,9 +1504,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         if (BuildFileCompletionProvider.handles(context.filePath())) {
             return settings().isBuildFileCompletion();
-        }
-        if (typedBuildFileOnlyTrigger(context)) {
-            return false;
         }
         if (SpringConfigSupport.isConfigFile(context.filePath())) {
             return settings().isSpringSupport();
@@ -1412,13 +1521,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             return isJpaQueryLiteral(context) || isSpringAnnotationLiteral(line, col);
         }
         return JavaTypingContext.allowsTriggerCharacter(context.text(), context.caretOffset(), previous);
-    }
-
-    private static boolean typedBuildFileOnlyTrigger(IdeCompletionContext context) {
-        String line = context.currentLine();
-        int col = context.caretCol();
-        return line != null && col > 0 && col <= line.length()
-                && BUILD_FILE_ONLY_TRIGGERS.contains(line.charAt(col - 1));
     }
 
     private boolean isIdleCompletionEligible(Path filePath) {
@@ -1451,20 +1553,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     JavaProjectConventions.normalize(filePath))) {
                 return;
             }
-            String text = editor.getText();
-            int offset = editor.getCaretOffset();
-            if (text == null || offset < 0 || offset > text.length()) {
-                return;
-            }
-            int caretLine = 0;
-            int lineStart = 0;
-            for (int index = 0; index < offset; index++) {
-                if (text.charAt(index) == '\n') {
-                    caretLine++;
-                    lineStart = index + 1;
-                }
-            }
-            if (caretLine == line && offset - lineStart == col) {
+            if (editor.getCaretLine() == line && editor.getCaretCol() == col) {
                 requestCodeEditorAutocomplete();
             }
         });
@@ -1517,44 +1606,21 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!JavaProjectConventions.isJava(context.filePath())) {
             return null;
         }
-        boolean memberAccess = JavaFastCompletionProvider.isMemberAccess(context);
-        JavaProjectDescriptor current = descriptor;
-        List<AutoCompleteItem> snippetsLocal = memberAccess ? List.of() : snippets.suggestions(
-                context.prefix(), current != null && current.spring());
+        List<AutoCompleteItem> snippetsLocal = javaSnippets(context);
 
         JdtLsService lsp = jdtLs;
         if (lsp != null && lsp.isInteractive() && lsp.isReady()) {
             long started = System.nanoTime();
-            List<AutoCompleteItem> semantic = filterCompletionSuggestions(lsp.reusableCompletions(
-                    context.filePath(), context.text(), context.caretLine(), context.caretCol()),
-                    context.prefix());
+            List<AutoCompleteItem> semantic = reusableJavaCompletions(lsp, context);
             boolean reused = !semantic.isEmpty();
             if (!reused) {
-                Character triggerCharacter = completionTriggerCharacter(context.currentLine(),
-                        context.caretCol(), JAVA_COMPLETION_TRIGGER_CHARACTERS);
-                JdtLsService.CompletionTrigger trigger =
-                        context.triggerKind() == IdeCompletionTriggerKind.TYPING && triggerCharacter != null
-                                ? JdtLsService.CompletionTrigger.TRIGGER_CHARACTER
-                                : JdtLsService.CompletionTrigger.INVOKED;
+                JdtLsService.CompletionTrigger trigger = javaCompletionTrigger(context);
                 semantic = lsp.complete(context.filePath(), context.text(),
-                        context.caretLine(), context.caretCol(), trigger, triggerCharacter,
+                        context.caretLine(), context.caretCol(), trigger, javaTriggerCharacter(context),
                         lsp.documentVersion(context.filePath()), true);
             }
-            if (semantic.isEmpty()) {
-                semantic = filterCompletionSuggestions(lsp.cachedCompletions(context.filePath(),
-                        context.text(), context.caretLine(), context.caretCol()), context.prefix());
-            }
-            if (semantic.isEmpty()) {
-                semantic = fastCompletion.suggestions(context);
-            }
-            long fetched = System.nanoTime();
-            List<AutoCompleteItem> result = javaCompletion(
-                    mergeCompletionSuggestions(semantic, snippetsLocal), context);
-            log.debug("Autocomplete: {} item(ns) em {} ms (origem {}, pos-processamento {} ms)",
-                    result.size(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
-                    reused ? "cache" : "jdtls",
-                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - fetched));
-            return result;
+            return finishSemanticCompletion(lsp, context, semantic, snippetsLocal, started,
+                    reused ? "cache" : "jdtls");
         }
 
         List<AutoCompleteItem> lexical = fastCompletion.suggestions(context);
@@ -1567,6 +1633,93 @@ public class JavaIdeAdapter extends IdeAdapter {
                     context.caretLine(), context.caretCol());
         }
         return javaCompletion(mergeCompletionSuggestions(contextual, local), context);
+    }
+
+    /**
+     * Java completion that never blocks the caller on JDT LS: local sources answer immediately
+     * and the semantic request completes the future when the server replies.
+     */
+    @Override
+    public CompletableFuture<List<AutoCompleteItem>> getCompletionSuggestionsAsync(
+            IdeCompletionContext context) {
+        JdtLsService lsp = jdtLs;
+        if (debugActive.get() || context == null || !JavaProjectConventions.isJava(context.filePath())
+                || lsp == null || !lsp.isInteractive() || !lsp.isReady()) {
+            return CompletableFuture.completedFuture(getCompletionSuggestions(context));
+        }
+        List<AutoCompleteItem> query = jpaQueryCompletion(context);
+        if (query != null) {
+            return CompletableFuture.completedFuture(query);
+        }
+        List<AutoCompleteItem> springAnnotation = springAnnotationCompletion(context);
+        if (springAnnotation != null) {
+            return CompletableFuture.completedFuture(springAnnotation);
+        }
+        long started = System.nanoTime();
+        List<AutoCompleteItem> snippetsLocal = javaSnippets(context);
+        List<AutoCompleteItem> reusable = reusableJavaCompletions(lsp, context);
+        if (!reusable.isEmpty()) {
+            return CompletableFuture.completedFuture(
+                    finishSemanticCompletion(lsp, context, reusable, snippetsLocal, started, "cache"));
+        }
+        return lsp.completeAsync(context.filePath(), context.text(), context.caretLine(),
+                        context.caretCol(), javaCompletionTrigger(context), javaTriggerCharacter(context),
+                        lsp.documentVersion(context.filePath()))
+                .thenApply(semantic -> finishSemanticCompletion(lsp, context, semantic, snippetsLocal,
+                        started, "jdtls"));
+    }
+
+    @Override
+    public CompletableFuture<AutoCompleteItem> resolveCompletionItem(AutoCompleteItem item) {
+        JdtLsService lsp = jdtLs;
+        return lsp == null || !lsp.isInteractive() ? CompletableFuture.completedFuture(item)
+                : lsp.resolveCompletionAsync(item);
+    }
+
+    private List<AutoCompleteItem> javaSnippets(IdeCompletionContext context) {
+        if (JavaFastCompletionProvider.isMemberAccess(context)) {
+            return PostfixCompletionProvider.suggestions(context.text(), context.caretOffset());
+        }
+        JavaProjectDescriptor current = descriptor;
+        return snippets.suggestions(context.prefix(), current != null && current.spring());
+    }
+
+    private static List<AutoCompleteItem> reusableJavaCompletions(JdtLsService lsp,
+                                                                  IdeCompletionContext context) {
+        return filterCompletionSuggestions(lsp.reusableCompletions(context.filePath(), context.text(),
+                context.caretLine(), context.caretCol()), context.prefix());
+    }
+
+    private static Character javaTriggerCharacter(IdeCompletionContext context) {
+        return completionTriggerCharacter(context.currentLine(), context.caretCol(),
+                JAVA_COMPLETION_TRIGGER_CHARACTERS);
+    }
+
+    private static JdtLsService.CompletionTrigger javaCompletionTrigger(IdeCompletionContext context) {
+        return context.triggerKind() == IdeCompletionTriggerKind.TYPING && javaTriggerCharacter(context) != null
+                ? JdtLsService.CompletionTrigger.TRIGGER_CHARACTER
+                : JdtLsService.CompletionTrigger.INVOKED;
+    }
+
+    private List<AutoCompleteItem> finishSemanticCompletion(JdtLsService lsp, IdeCompletionContext context,
+                                                            List<AutoCompleteItem> semantic,
+                                                            List<AutoCompleteItem> snippetsLocal,
+                                                            long started, String origin) {
+        List<AutoCompleteItem> items = semantic == null ? List.of() : semantic;
+        if (items.isEmpty()) {
+            items = filterCompletionSuggestions(lsp.cachedCompletions(context.filePath(),
+                    context.text(), context.caretLine(), context.caretCol()), context.prefix());
+        }
+        if (items.isEmpty()) {
+            items = fastCompletion.suggestions(context);
+        }
+        long fetched = System.nanoTime();
+        List<AutoCompleteItem> result = javaCompletion(
+                mergeCompletionSuggestions(items, snippetsLocal), context);
+        log.debug("Autocomplete: {} item(ns) em {} ms (origem {}, pos-processamento {} ms)",
+                result.size(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), origin,
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - fetched));
+        return result;
     }
 
     private List<AutoCompleteItem> javaCompletion(List<AutoCompleteItem> items,
@@ -1953,7 +2106,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (text == null || text.isBlank() || !DiagnosticTags.isSupported()) {
             return List.of();
         }
-        List<JavaLexicalSource.Declared> methods = JavaLexicalSource.declarations(text).stream()
+        List<JavaLexicalSource.Declared> methods = declarationsOf(text).stream()
                 .filter(declared -> declared.kind() == kind)
                 .toList();
         if (methods.isEmpty()) {
@@ -1981,6 +2134,22 @@ public class JavaIdeAdapter extends IdeAdapter {
             diagnostics.add(hint);
         }
         return List.copyOf(diagnostics);
+    }
+
+    private record DeclarationsMemo(String text, List<JavaLexicalSource.Declared> declarations) {
+    }
+
+    private static volatile DeclarationsMemo declarationsMemo;
+
+    /** Unused-method and unused-field passes run on the same buffer back to back. */
+    private static List<JavaLexicalSource.Declared> declarationsOf(String text) {
+        DeclarationsMemo memo = declarationsMemo;
+        if (memo != null && (memo.text() == text || memo.text().equals(text))) {
+            return memo.declarations();
+        }
+        List<JavaLexicalSource.Declared> declarations = JavaLexicalSource.declarations(text);
+        declarationsMemo = new DeclarationsMemo(text, declarations);
+        return declarations;
     }
 
     private static boolean alreadyMarkedUnnecessary(Collection<Diagnostic> existing, Range range) {
@@ -2025,6 +2194,56 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         return DiagnosticRanges.clamp(InspectionSuppressions.filter(plugin, text,
                 settings().getDisabledInspections(), occurrenceFilterFor(filePath)), text);
+    }
+
+    @Override
+    public List<Range> getSelectionRanges(IdeSelectionRangeContext context) {
+        if (context == null) {
+            return null;
+        }
+        try {
+            List<Range> chain = selectionChain(context.filePath(), context.text(), context.offset())
+                    .get(SELECTION_RANGE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            return chain.isEmpty() ? null : chain;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Exception failure) {
+            log.debug("Extend selection indisponivel: {}", failure.getMessage());
+            return null;
+        }
+    }
+
+    @Override
+    public CompletableFuture<List<int[]>> getSelectionRanges(SelectionRangeContext context) {
+        if (context == null) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        return selectionChain(context.filePath(), context.text(), context.offset())
+                .thenApply(chain -> TextOffsets.offsets(context.text(), chain));
+    }
+
+    private CompletableFuture<List<Range>> selectionChain(Path filePath, String text, int offset) {
+        JdtLsService lsp = interactiveServerFor(filePath);
+        if (lsp == null || !JavaProjectConventions.isJava(filePath)) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        Position position = TextOffsets.position(text, offset);
+        return lsp.selectionRangesAsync(filePath, text, position.line(), position.col());
+    }
+
+    @Override
+    public CompletableFuture<HoverInfo> getHoverAsync(IdeHoverContext context) {
+        if (context == null || isDebugPaused() || SpringConfigSupport.isConfigFile(context.filePath())) {
+            return CompletableFuture.completedFuture(getHover(context));
+        }
+        JdtLsService lsp = interactiveServerFor(context.filePath());
+        if (lsp == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        HoverInfo diagnostic = lsp.diagnosticHover(context.filePath(), context.line(), context.col());
+        return diagnostic != null ? CompletableFuture.completedFuture(diagnostic)
+                : lsp.hoverAsync(context.filePath(), context.text(), context.line(), context.col());
     }
 
     @Override
@@ -2211,9 +2430,16 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void registerFileWatcher() {
-        if (fileWatcherListenerId != null) {
-            return;
+        synchronized (fileWatcherLock) {
+            if (fileWatcherListenerId != null && Objects.equals(fileWatcherRoot, projectRoot)) {
+                return;
+            }
+            unregisterFileWatcher();
+            registerFileWatcherLocked();
         }
+    }
+
+    private void registerFileWatcherLocked() {
         IdeProjectFileWatcher watcher;
         try {
             watcher = getProjectFileWatcher();
@@ -2229,15 +2455,21 @@ public class JavaIdeAdapter extends IdeAdapter {
                 path -> javaEditors.containsKey(JavaProjectConventions.normalize(path)), projectRoot);
         projectFileWatcher = watcher;
         fileChangeRouter = router;
+        fileWatcherRoot = projectRoot;
         fileWatcherListenerId = watcher.addFileWatcherListener(router::accept);
         log.info("Observador de arquivos do Java registrado: {}", fileWatcherListenerId);
     }
 
     private void unregisterFileWatcher() {
-        String listenerId = fileWatcherListenerId;
-        IdeProjectFileWatcher watcher = projectFileWatcher;
-        fileWatcherListenerId = null;
-        projectFileWatcher = null;
+        String listenerId;
+        IdeProjectFileWatcher watcher;
+        synchronized (fileWatcherLock) {
+            listenerId = fileWatcherListenerId;
+            watcher = projectFileWatcher;
+            fileWatcherListenerId = null;
+            projectFileWatcher = null;
+            fileWatcherRoot = null;
+        }
         if (listenerId != null && watcher != null) {
             try {
                 watcher.removeFileWatcherListener(listenerId);
@@ -3464,6 +3696,17 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     @Override
+    public CompletableFuture<SignatureHelp> provideSignatureHelpAsync(IdeSignatureHelpContext context) {
+        if (debugActive.get()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        JdtLsService lsp = interactiveServerFor(context == null ? null : context.filePath());
+        return lsp == null ? CompletableFuture.completedFuture(null)
+                : lsp.signatureHelpAsync(context.filePath(), context.text(),
+                context.caretLine(), context.caretCol());
+    }
+
+    @Override
     public SignatureHelp provideSignatureHelp(IdeSignatureHelpContext context) {
         if (debugActive.get()) {
             return null;
@@ -4066,6 +4309,13 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     @Override
+    public CompletableFuture<List<InlayHint>> getInlayHintsAsync(IdeInlayHintContext context) {
+        JdtLsService lsp = runningServerFor(context == null ? null : context.filePath());
+        return lsp == null ? CompletableFuture.completedFuture(null)
+                : lsp.inlayHintsAsync(context.filePath(), context.text(), context.firstLine(), context.lastLine());
+    }
+
+    @Override
     public List<InlayHint> getInlayHints(IdeInlayHintContext context) {
         JdtLsService lsp = runningServerFor(context == null ? null : context.filePath());
         return lsp == null ? null : lsp.inlayHints(context.filePath(), context.text(),
@@ -4075,6 +4325,17 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public boolean isSemanticTokensEnabled() {
         return true;
+    }
+
+    @Override
+    public CompletableFuture<List<SemanticToken>> getSemanticTokensAsync(IdeSemanticTokensContext context) {
+        JdtLsService lsp = jdtLs;
+        if (context == null || lsp == null || !lsp.isReady()
+                || !JavaProjectConventions.isJava(context.filePath())
+                || !settings().getLanguageServerMode().startsServer()) {
+            return CompletableFuture.completedFuture(getSemanticTokens(context));
+        }
+        return lsp.semanticTokensAsync(context.filePath(), context.text());
     }
 
     @Override
@@ -4343,6 +4604,31 @@ public class JavaIdeAdapter extends IdeAdapter {
     public boolean isCallHierarchyEnabled() {
         JdtLsService lsp = jdtLs;
         return lsp != null && lsp.isInteractive() && lsp.supportsCallHierarchy();
+    }
+
+    @Override
+    public boolean isTypeHierarchyEnabled() {
+        JdtLsService lsp = jdtLs;
+        return lsp != null && lsp.isInteractive() && lsp.supportsTypeHierarchy();
+    }
+
+    @Override
+    public List<TypeHierarchyItem> prepareTypeHierarchy(IdeCallHierarchyContext context) {
+        JdtLsService lsp = context == null ? null : interactiveServerFor(context.filePath());
+        return lsp == null ? List.of()
+                : lsp.prepareTypeHierarchy(context.filePath(), context.text(), context.line(), context.col());
+    }
+
+    @Override
+    public List<TypeHierarchyItem> getSupertypes(TypeHierarchyItem item) {
+        JdtLsService lsp = jdtLs;
+        return lsp == null || !lsp.isInteractive() ? List.of() : lsp.supertypes(item);
+    }
+
+    @Override
+    public List<TypeHierarchyItem> getSubtypes(TypeHierarchyItem item) {
+        JdtLsService lsp = jdtLs;
+        return lsp == null || !lsp.isInteractive() ? List.of() : lsp.subtypes(item);
     }
 
     @Override
@@ -5565,7 +5851,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 requestRefreshDiagnostics(edited);
                 refreshProblemsPanel();
             }
-            refreshRunButtonsForCurrentFile();
+            scheduleRunButtonsRefresh();
         }
     }
 
@@ -6286,6 +6572,12 @@ public class JavaIdeAdapter extends IdeAdapter {
                         .tooltip(text("menu.reanalyzeDiagnostics.tip",
                                 "Descartar os diagnosticos atuais e reiniciar a analise Java"))
                         .onClick(event -> reanalyzeDiagnostics()))
+                .add(MenuNode.item("javaRestartLanguageServer",
+                                text("menu.restartLsp", "Reiniciar Java Language Server"))
+                        .icon(JavaIcons.refresh(JavaIcons.SMALL))
+                        .tooltip(text("menu.restartLsp.tip",
+                                "Encerrar o JDT LS e inicia-lo novamente, mesmo apos falhas repetidas"))
+                        .onClick(event -> restartLanguageServer()))
                 .add(MenuNode.item("javaProjectStructure",
                                 text("menu.projectStructure", "Estrutura do projeto..."))
                         .icon(JavaIcons.module(JavaIcons.SMALL))
@@ -6762,6 +7054,16 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
+    /** Typing only needs the run/coverage buttons to settle once the user pauses. */
+    private void scheduleRunButtonsRefresh() {
+        long ticket = runButtonsTicket.incrementAndGet();
+        background.schedule(() -> {
+            if (runButtonsTicket.get() == ticket) {
+                refreshRunButtonsForCurrentFile();
+            }
+        }, RUN_BUTTONS_REFRESH_DELAY_MS, TimeUnit.MILLISECONDS);
+    }
+
     private void refreshRunButtonsForCurrentFile() {
         refreshCoverageButton();
         if (!JavaRunSupport.isCurrentFileType(selectedRunConfig)) {
@@ -6830,11 +7132,25 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (module == null) {
             return Optional.empty();
         }
-        String source = editor.getText();
-        if (!MainClassScanner.hasValidMain(source)) {
-            return Optional.empty();
+        String source = Objects.toString(editor.getText(), "");
+        MainClassMemo memo = mainClassMemo;
+        if (memo != null && memo.matches(file, module, test, source)) {
+            return memo.result();
         }
-        return MainClassScanner.inspect(file, source, module, test);
+        Optional<MainClassScanner.MainClass> result = MainClassScanner.hasValidMain(source)
+                ? MainClassScanner.inspect(file, source, module, test)
+                : Optional.empty();
+        mainClassMemo = new MainClassMemo(file, module, test, source, result);
+        return result;
+    }
+
+    private record MainClassMemo(Path file, JavaModule module, boolean test, String source,
+                                 Optional<MainClassScanner.MainClass> result) {
+
+        boolean matches(Path otherFile, JavaModule otherModule, boolean otherTest, String otherSource) {
+            return test == otherTest && file.equals(otherFile) && Objects.equals(module, otherModule)
+                    && (source == otherSource || source.equals(otherSource));
+        }
     }
 
     static JavaModule mostSpecificModule(Collection<JavaModule> modules, Path file) {
@@ -6910,7 +7226,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         debugActive.set(true);
         requestSetRunButtonRunning(true);
         debugEdtWatchdog.start();
-        debuggeeTerminator = terminateDebuggee;
+        setDebuggeeTerminator(terminateDebuggee);
         debugProcessHandle = processHandle;
         debugSteppedFiles.clear();
         setDebugEditorAssistEnabled(false);
@@ -6939,8 +7255,20 @@ public class JavaIdeAdapter extends IdeAdapter {
                 JavaDebugSession session = new JavaDebugSession(adapterPort, attachTarget,
                         projectRoot, context.getBreakpoints(), this::publishDebugSnapshot,
                         background)
-                        .projectName(debugProjectName(targetModule));
-                debugSession = session;
+                        .projectName(debugProjectName(targetModule))
+                        .breakOnCaughtExceptions(settings().isBreakOnCaughtExceptions());
+                boolean installed;
+                synchronized (debugSessionLock) {
+                    installed = generation == debugStartGeneration.get();
+                    if (installed) {
+                        debugSession = session;
+                    }
+                }
+                if (!installed) {
+                    log.info("Sessao de debug descartada: o debug foi encerrado durante a inicializacao");
+                    closeQuietly(session);
+                    return;
+                }
                 session.start();
             } catch (Exception error) {
                 log.warn("Falha ao iniciar a sessao de debug Java", error);
@@ -7101,10 +7429,13 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void closeDebugSession() {
-        debugStartGeneration.incrementAndGet();
+        JavaDebugSession session;
+        synchronized (debugSessionLock) {
+            debugStartGeneration.incrementAndGet();
+            session = debugSession;
+            debugSession = null;
+        }
         closeDebugRelay();
-        JavaDebugSession session = debugSession;
-        debugSession = null;
         debugActive.set(false);
         debugEdtWatchdog.stop();
         debugModule = null;
@@ -7128,6 +7459,18 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void terminateDebuggee() {
         runDebuggeeTerminator(takeDebuggeeTerminator());
+    }
+
+    private static void closeQuietly(JavaDebugSession session) {
+        try {
+            session.close();
+        } catch (RuntimeException error) {
+            log.debug("Falha ao fechar sessao de debug descartada: {}", error.getMessage());
+        }
+    }
+
+    private synchronized void setDebuggeeTerminator(Runnable terminator) {
+        debuggeeTerminator = terminator;
     }
 
     private synchronized Runnable takeDebuggeeTerminator() {
@@ -9229,6 +9572,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         springBaseUrl = current.getSpringBaseUrl();
         applyDependencySearchSettings(current);
+        JdtLsService lsp = jdtLs;
+        if (lsp != null) {
+            lsp.setInlayHintsMode(current.getInlayHints());
+        }
         Path root = projectRoot;
         if (root != null) {
             requestRefreshCodeLenses(root);
@@ -9271,6 +9618,15 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         background.submit(() -> restartWhenLombokAgentChanged(lsp, descriptor));
+    }
+
+    private void restartLanguageServer() {
+        JdtLsService lsp = jdtLs;
+        if (lsp != null) {
+            lsp.resetCrashHistory();
+        }
+        setStatusBarText(text("status.restartingLsp", "Java: reiniciando o IntelliSense..."));
+        clearCaches();
     }
 
     private void restartWhenLombokAgentChanged(JdtLsService lsp, JavaProjectDescriptor current) {

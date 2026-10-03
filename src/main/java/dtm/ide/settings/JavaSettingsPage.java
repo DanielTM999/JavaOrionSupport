@@ -45,6 +45,11 @@ public final class JavaSettingsPage implements PluginSettingsPage {
             new JComboBox<>(JDK_OPTIONS.toArray(Integer[]::new));
     private final JComboBox<HotReloadMode> hotReloadMode =
             new JComboBox<>(HotReloadMode.values());
+    private final JComboBox<InlayHintsMode> inlayHints =
+            new JComboBox<>(InlayHintsMode.values());
+    private final JCheckBox breakOnCaughtExceptions =
+            new JCheckBox(text("field.breakOnCaughtExceptions",
+                    "Depurador: parar tambem em excecoes capturadas"));
     private final JComboBox<JdtBuildMode> jdtBuildMode =
             new JComboBox<>(JdtBuildMode.values());
 
@@ -148,6 +153,8 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         settings.setIncrementalBuild(incrementalBuild.isSelected());
         settings.setBuildOnProjectOpen(buildOnOpen.isSelected());
         settings.setHotReloadMode((HotReloadMode) hotReloadMode.getSelectedItem());
+        settings.setInlayHints((InlayHintsMode) inlayHints.getSelectedItem());
+        settings.setBreakOnCaughtExceptions(breakOnCaughtExceptions.isSelected());
         settings.setJdtBuildMode((JdtBuildMode) jdtBuildMode.getSelectedItem());
 
         settings.setLombokSupport(lombokSupport.isSelected());
@@ -196,6 +203,7 @@ public final class JavaSettingsPage implements PluginSettingsPage {
                 labeled(text("field.languageServerMode", "Modo:"), languageServerMode),
                 labeled(text("field.languageServerMemory", "Memoria do servidor:"),
                         languageServerMemory),
+                labeled(text("field.inlayHints", "Dicas inline (inlay hints):"), inlayHints),
                 formatOnSave,
                 organizeImportsOnSave));
 
@@ -212,6 +220,7 @@ public final class JavaSettingsPage implements PluginSettingsPage {
                 buildOnOpen,
                 coverageGutter,
                 labeled(text("field.hotReload", "Hot reload:"), hotReloadMode),
+                breakOnCaughtExceptions,
                 labeled(text("field.jdtBuildMode", "Erros do projeto:"), jdtBuildMode)));
 
         content.add(section(text("section.dependencies", "Dependencias"),
@@ -333,6 +342,8 @@ public final class JavaSettingsPage implements PluginSettingsPage {
         incrementalBuild.setSelected(settings.isIncrementalBuild());
         buildOnOpen.setSelected(settings.isBuildOnProjectOpen());
         hotReloadMode.setSelectedItem(settings.getHotReloadMode());
+        inlayHints.setSelectedItem(settings.getInlayHints());
+        breakOnCaughtExceptions.setSelected(settings.isBreakOnCaughtExceptions());
         jdtBuildMode.setSelectedItem(settings.getJdtBuildMode());
 
         springSupport.setSelected(settings.isSpringSupport());

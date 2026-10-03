@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
+import dtm.ide.api.hierarchy.TypeHierarchyItem;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.ide.inspection.DiagnosticTags;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
@@ -20,6 +21,7 @@ import dtm.stools.component.panels.editor.code.diagnostics.DiagnosticSeverity;
 import dtm.stools.component.panels.editor.code.hover.HoverInfo;
 import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.inlay.InlayHintKind;
+import dtm.stools.component.panels.editor.code.prototype.folding.FoldRange;
 import dtm.stools.component.panels.editor.code.signature.ParameterInformation;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
 import dtm.stools.component.panels.editor.code.signature.SignatureInformation;
@@ -52,6 +54,20 @@ final class LspConversions {
             return Range.point(0, 0);
         }
         return new Range(position(node.get("start")), position(node.get("end")));
+    }
+
+    /** Flattens an LSP SelectionRange (range + parent chain) into ranges from inner to outer. */
+    static List<Range> selectionChain(JsonNode result) {
+        JsonNode node = result != null && result.isArray() && !result.isEmpty() ? result.get(0) : result;
+        List<Range> chain = new ArrayList<>();
+        for (int depth = 0; node != null && node.isObject() && node.hasNonNull("range") && depth < 256; depth++) {
+            Range range = range(node.get("range"));
+            if (chain.isEmpty() || !chain.getLast().equals(range)) {
+                chain.add(range);
+            }
+            node = node.get("parent");
+        }
+        return List.copyOf(chain);
     }
 
     static Location location(JsonNode node) {
@@ -187,6 +203,7 @@ final class LspConversions {
 
         String detail = node.path("detail").asText(null);
         String docs = documentation(node.get("documentation"));
+        boolean resolvable = docs == null && node.has("data");
         return new AutoCompleteItem(
                 insert,
                 label,
@@ -194,7 +211,9 @@ final class LspConversions {
                 completionDescription(detail, docs),
                 null,
                 kind,
-                textEdits(node.get("additionalTextEdits")));
+                textEdits(node.get("additionalTextEdits")),
+                false,
+                resolvable ? node.deepCopy() : null);
     }
 
     static String labelDetails(JsonNode node) {
@@ -256,6 +275,21 @@ final class LspConversions {
         }
         String expanded = value.replaceAll("\\$\\{\\d+:([^}]*)}", "$1");
         return expanded.replaceAll("\\$\\{?\\d+}?", "");
+    }
+
+    /** Copies the documentation of a {@code completionItem/resolve} answer into the item. */
+    static AutoCompleteItem withResolvedDocumentation(AutoCompleteItem item, JsonNode resolved) {
+        if (item == null || resolved == null || !resolved.isObject()) {
+            return item;
+        }
+        String docs = documentation(resolved.get("documentation"));
+        if (docs == null || docs.isBlank()) {
+            return item;
+        }
+        String detail = resolved.path("detail").asText(null);
+        return new AutoCompleteItem(item.insertText(), item.label(), item.detail(),
+                completionDescription(detail, docs), item.icon(), item.kind(), item.additionalTextEdits(),
+                item.unused(), null);
     }
 
     static String completionDescription(String detail, String documentation) {
@@ -420,6 +454,54 @@ final class LspConversions {
                 range,
                 selection,
                 Map.of("uri", uri, "data", rawData(node.get("data"))));
+    }
+
+    /** LSP folding ranges; the import block starts collapsed, like in IntelliJ. */
+    static List<FoldRange> foldRanges(JsonNode result) {
+        if (result == null || !result.isArray()) {
+            return List.of();
+        }
+        List<FoldRange> ranges = new ArrayList<>(result.size());
+        for (JsonNode node : result) {
+            int start = node.path("startLine").asInt(-1);
+            int end = node.path("endLine").asInt(-1);
+            if (start < 0 || end <= start) {
+                continue;
+            }
+            String kind = node.hasNonNull("kind") ? node.get("kind").asText() : null;
+            ranges.add(new FoldRange(start, end, kind, "imports".equals(kind)));
+        }
+        return List.copyOf(ranges);
+    }
+
+    /** Keeps the original LSP item in {@code data} so it can be sent back unchanged. */
+    static TypeHierarchyItem typeHierarchyItem(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        String name = node.path("name").asText("");
+        String uri = node.path("uri").asText("");
+        if (name.isBlank() || uri.isBlank()) {
+            return null;
+        }
+        Range range = range(node.get("range"));
+        JsonNode selectionNode = node.get("selectionRange");
+        return new TypeHierarchyItem(name, node.path("detail").asText(null), node.path("kind").asInt(0),
+                toPath(uri), range, selectionNode == null ? range : range(selectionNode), node.deepCopy());
+    }
+
+    static List<TypeHierarchyItem> typeHierarchyItems(JsonNode result) {
+        if (result == null || !result.isArray()) {
+            return List.of();
+        }
+        List<TypeHierarchyItem> items = new ArrayList<>(result.size());
+        for (JsonNode node : result) {
+            TypeHierarchyItem item = typeHierarchyItem(node);
+            if (item != null) {
+                items.add(item);
+            }
+        }
+        return List.copyOf(items);
     }
 
     private static Object rawData(JsonNode data) {

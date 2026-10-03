@@ -28,6 +28,8 @@ public final class JavaPluginSettings {
     private static final String KEY_TODO_MARKERS = "todoMarkers";
     private static final String KEY_BUILD_FILE_COMPLETION = "buildFileCompletion";
     private static final String KEY_COVERAGE_GUTTER = "coverageGutter";
+    private static final String KEY_INLAY_HINTS = "inlayHints";
+    private static final String KEY_BREAK_ON_CAUGHT_EXCEPTIONS = "breakOnCaughtExceptions";
     private static final String KEY_SPRING_SUPPORT = "springSupport";
     private static final String KEY_SPRING_CODE_LENS = "springCodeLens";
     private static final String KEY_SPRING_LIVE = "springLive";
@@ -65,6 +67,8 @@ public final class JavaPluginSettings {
     private List<String> todoMarkers = TodoScanner.DEFAULT_MARKERS;
     private boolean buildFileCompletion = true;
     private boolean coverageGutter = true;
+    private InlayHintsMode inlayHints = InlayHintsMode.LITERALS;
+    private boolean breakOnCaughtExceptions;
     private boolean springSupport = true;
     private boolean springCodeLens = true;
     private boolean springLive = true;
@@ -156,6 +160,22 @@ public final class JavaPluginSettings {
 
     public void setBuildOnProjectOpen(boolean value) {
         this.buildOnProjectOpen = value;
+    }
+
+    public InlayHintsMode getInlayHints() {
+        return inlayHints;
+    }
+
+    public void setInlayHints(InlayHintsMode mode) {
+        inlayHints = mode == null ? InlayHintsMode.LITERALS : mode;
+    }
+
+    public boolean isBreakOnCaughtExceptions() {
+        return breakOnCaughtExceptions;
+    }
+
+    public void setBreakOnCaughtExceptions(boolean value) {
+        breakOnCaughtExceptions = value;
     }
 
     public HotReloadMode getHotReloadMode() {
@@ -365,6 +385,8 @@ public final class JavaPluginSettings {
         todoMarkers = TodoScanner.DEFAULT_MARKERS;
         buildFileCompletion = true;
         coverageGutter = true;
+        inlayHints = InlayHintsMode.LITERALS;
+        breakOnCaughtExceptions = false;
         springSupport = true;
         springCodeLens = true;
         springLive = true;
@@ -413,6 +435,9 @@ public final class JavaPluginSettings {
         todoMarkers = splitMarkers(properties.getProperty(KEY_TODO_MARKERS, ""));
         buildFileCompletion = bool(properties, KEY_BUILD_FILE_COMPLETION, true);
         coverageGutter = bool(properties, KEY_COVERAGE_GUTTER, true);
+        inlayHints = InlayHintsMode.fromKey(properties.getProperty(KEY_INLAY_HINTS,
+                InlayHintsMode.LITERALS.key()));
+        breakOnCaughtExceptions = bool(properties, KEY_BREAK_ON_CAUGHT_EXCEPTIONS, false);
         springCodeLens = bool(properties, KEY_SPRING_CODE_LENS, true);
         springLive = bool(properties, KEY_SPRING_LIVE, true);
         springNavigation = bool(properties, KEY_SPRING_NAVIGATION, true);
@@ -449,6 +474,8 @@ public final class JavaPluginSettings {
         properties.setProperty(KEY_TODO_MARKERS, String.join(",", todoMarkers));
         properties.setProperty(KEY_BUILD_FILE_COMPLETION, Boolean.toString(buildFileCompletion));
         properties.setProperty(KEY_COVERAGE_GUTTER, Boolean.toString(coverageGutter));
+        properties.setProperty(KEY_INLAY_HINTS, inlayHints.key());
+        properties.setProperty(KEY_BREAK_ON_CAUGHT_EXCEPTIONS, Boolean.toString(breakOnCaughtExceptions));
         properties.setProperty(KEY_SPRING_CODE_LENS, Boolean.toString(springCodeLens));
         properties.setProperty(KEY_SPRING_LIVE, Boolean.toString(springLive));
         properties.setProperty(KEY_SPRING_NAVIGATION, Boolean.toString(springNavigation));

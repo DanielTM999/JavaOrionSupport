@@ -110,6 +110,29 @@ class BuildProblemsCoordinatorTest {
         assertEquals(2, coordinator.diagnostics(file).getFirst().startLine());
     }
 
+    @Test
+    void movesEveryProblemOfTheFileInOrderAndLeavesOtherFilesAlone() {
+        BuildProblemsCoordinator coordinator = new BuildProblemsCoordinator();
+        Path file = root.resolve("App.java");
+        Path other = root.resolve("Other.java");
+        coordinator.replaceBuild(List.of(
+                new BuildDiagnostic(file, 1, 7, DiagnosticSeverity.ERROR, "first", "javac"),
+                new BuildDiagnostic(other, 2, 1, DiagnosticSeverity.ERROR, "other", "javac"),
+                new BuildDiagnostic(file, 3, 5, DiagnosticSeverity.WARNING, "second", "javac"),
+                new BuildDiagnostic(file, 0, 0, DiagnosticSeverity.ERROR, "no location", "javac")));
+
+        assertTrue(coordinator.move(file, "class App {\n    int a;\n    int b;\n}",
+                "class App {\n\n    int a;\n    int b;\n}"));
+
+        List<BuildDiagnostic> problems = coordinator.buildProblems();
+        assertEquals(List.of("first", "other", "second", "no location"),
+                problems.stream().map(BuildDiagnostic::message).toList());
+        assertEquals(1, problems.get(0).line());
+        assertEquals(2, problems.get(1).line());
+        assertEquals(4, problems.get(2).line());
+        assertEquals(0, problems.get(3).line());
+    }
+
     private static BuildDiagnostic problem(Path file, String message) {
         return new BuildDiagnostic(file, 1, 1, DiagnosticSeverity.ERROR, message, "test");
     }

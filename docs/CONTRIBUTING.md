@@ -147,6 +147,16 @@ Execute a suíte completa antes de enviar a contribuição:
 mvn test
 ```
 
+Antes de abrir um pull request, rode também a verificação de qualidade. Ela executa o SpotBugs
+(achados de prioridade alta) e exige pelo menos 50% de cobertura de linhas:
+
+```powershell
+mvn -Pquality verify "-Dmaven.antrun.skip=true"
+```
+
+Um falso positivo do SpotBugs vai para `spotbugs-exclude.xml`, restrito à classe e ao método,
+com um comentário explicando por que o código está correto.
+
 Para mudanças visuais, os testes automatizados não substituem a inspeção manual. Confira estados
 vazio, carregando, sucesso e erro, além de filtro, atualização e navegação por teclado quando esses
 comportamentos existirem.

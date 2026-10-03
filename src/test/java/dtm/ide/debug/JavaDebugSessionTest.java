@@ -472,4 +472,12 @@ class JavaDebugSessionTest {
         output.write(body);
         output.flush();
     }
+
+    @org.junit.jupiter.api.Test
+    void caughtExceptionsAreOptIn() {
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("uncaught"),
+                JavaDebugSession.exceptionFilters(false));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("caught", "uncaught"),
+                JavaDebugSession.exceptionFilters(true));
+    }
 }

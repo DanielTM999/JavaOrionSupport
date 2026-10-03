@@ -127,6 +127,17 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
         seedBreakpoints(initialBreakpoints);
     }
 
+    private volatile boolean breakOnCaughtExceptions;
+
+    static List<String> exceptionFilters(boolean caught) {
+        return caught ? List.of("caught", "uncaught") : List.of("uncaught");
+    }
+
+    public JavaDebugSession breakOnCaughtExceptions(boolean value) {
+        breakOnCaughtExceptions = value;
+        return this;
+    }
+
     public JavaDebugSession projectName(String name) {
         projectName = name == null || name.isBlank() ? null : name.trim();
         return this;
@@ -311,7 +322,7 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
             sendBreakpoints(entry.getKey(), entry.getValue()).get(
                     SETUP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         }
-        client.request("setExceptionBreakpoints", Map.of("filters", List.of("uncaught")))
+        client.request("setExceptionBreakpoints", Map.of("filters", exceptionFilters(breakOnCaughtExceptions)))
                 .get(SETUP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         client.request("configurationDone", Map.of()).get(SETUP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         configured.set(true);

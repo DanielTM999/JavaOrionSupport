@@ -31,4 +31,18 @@ class JavaPluginSettingsTest {
         assertEquals(HotReloadMode.AUTOMATIC,
                 new JavaPluginSettings(directory).getHotReloadMode());
     }
+
+    @Test
+    void inlayHintsAndCaughtExceptionBreakpointsPersist() {
+        JavaPluginSettings settings = new JavaPluginSettings(directory);
+        assertEquals(InlayHintsMode.LITERALS, settings.getInlayHints());
+        assertFalse(settings.isBreakOnCaughtExceptions());
+        settings.setInlayHints(InlayHintsMode.ALL);
+        settings.setBreakOnCaughtExceptions(true);
+        settings.save();
+
+        JavaPluginSettings reloaded = new JavaPluginSettings(directory);
+        assertEquals(InlayHintsMode.ALL, reloaded.getInlayHints());
+        assertTrue(reloaded.isBreakOnCaughtExceptions());
+    }
 }

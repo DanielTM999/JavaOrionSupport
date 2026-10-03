@@ -44,6 +44,11 @@ public final class PluginTaskExecutor implements Executor, AutoCloseable {
             Future<?> future = workers.submit(() -> {
                 try {
                     task.run();
+                } catch (VirtualMachineError fatal) {
+                    log.error("Erro fatal da JVM em tarefa em segundo plano", fatal);
+                    throw fatal;
+                } catch (Error error) {
+                    log.error("Tarefa em segundo plano falhou com erro", error);
                 } catch (Throwable error) {
                     log.warn("Tarefa em segundo plano falhou", error);
                 } finally {

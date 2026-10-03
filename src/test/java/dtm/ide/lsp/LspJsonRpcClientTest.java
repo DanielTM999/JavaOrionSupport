@@ -52,6 +52,42 @@ class LspJsonRpcClientTest {
     }
 
     @Test
+    void aBrokenStreamNotifiesTheDisconnectListenerOnce() throws Exception {
+        PipedInputStream clientInput = new PipedInputStream();
+        PipedOutputStream serverOutput = new PipedOutputStream(clientInput);
+        LspJsonRpcClient client = new LspJsonRpcClient(clientInput, new ByteArrayOutputStream(),
+                "lsp-disconnect-test");
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        CountDownLatch disconnected = new CountDownLatch(1);
+        client.onUnexpectedDisconnect(() -> {
+            calls.incrementAndGet();
+            disconnected.countDown();
+        });
+        var pendingRequest = client.request("test/never", Map.of());
+
+        serverOutput.close();
+
+        assertTrue(disconnected.await(2, TimeUnit.SECONDS));
+        assertTrue(pendingRequest.isCompletedExceptionally());
+        client.onUnexpectedDisconnect(calls::incrementAndGet);
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void closingTheClientIsNotAnUnexpectedDisconnect() throws Exception {
+        PipedInputStream clientInput = new PipedInputStream();
+        new PipedOutputStream(clientInput);
+        LspJsonRpcClient client = new LspJsonRpcClient(clientInput, new ByteArrayOutputStream(),
+                "lsp-close-test");
+        CountDownLatch disconnected = new CountDownLatch(1);
+        client.onUnexpectedDisconnect(disconnected::countDown);
+
+        client.close();
+
+        assertFalse(disconnected.await(300, TimeUnit.MILLISECONDS));
+    }
+
+    @Test
     void cancellingARequestNotifiesTheLanguageServer() throws Exception {
         PipedInputStream clientInput = new PipedInputStream();
         PipedOutputStream serverOutput = new PipedOutputStream(clientInput);

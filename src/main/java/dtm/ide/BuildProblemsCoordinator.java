@@ -85,15 +85,13 @@ final class BuildProblemsCoordinator {
     synchronized boolean move(Path file, String before, String after) {
         boolean changed = false;
         for (Map.Entry<Channel, List<BuildDiagnostic>> entry : channels.entrySet()) {
-            List<BuildDiagnostic> shifted = entry.getValue().stream()
-                    .map(problem -> file.equals(problem.file()) ? moved(problem, before, after) : problem)
-                    .toList();
+            List<BuildDiagnostic> shifted = moved(entry.getValue(), file, before, after);
             changed |= !shifted.equals(entry.getValue());
             entry.setValue(shifted);
         }
         List<BuildDiagnostic> live = liveProblems.get(file);
         if (live != null) {
-            List<BuildDiagnostic> shifted = live.stream().map(problem -> moved(problem, before, after)).toList();
+            List<BuildDiagnostic> shifted = moved(live, file, before, after);
             changed |= !shifted.equals(live);
             liveProblems.put(file, shifted);
         }
@@ -101,14 +99,31 @@ final class BuildProblemsCoordinator {
         return changed;
     }
 
-    private static BuildDiagnostic moved(BuildDiagnostic problem, String before, String after) {
-        if (!problem.hasLocation()) return problem;
-        Diagnostic shifted = JavaDiagnosticEdits.move(List.of(problem.toEditorDiagnostic()),
-                before, after).getFirst();
-        if (shifted.startLine() == problem.line() - 1
-                && shifted.startCol() == Math.max(0, problem.column() - 1)) return problem;
-        return new BuildDiagnostic(problem.file(), shifted.startLine() + 1,
-                shifted.startCol() + 1, problem.severity(), problem.message(), problem.source());
+    /** Shifts every located problem of {@code file} with a single pass over both texts. */
+    private static List<BuildDiagnostic> moved(List<BuildDiagnostic> problems, Path file,
+                                               String before, String after) {
+        List<Integer> indexes = new ArrayList<>();
+        List<Diagnostic> located = new ArrayList<>();
+        for (int i = 0; i < problems.size(); i++) {
+            BuildDiagnostic problem = problems.get(i);
+            if (file.equals(problem.file()) && problem.hasLocation()) {
+                indexes.add(i);
+                located.add(problem.toEditorDiagnostic());
+            }
+        }
+        if (located.isEmpty()) return problems;
+        List<Diagnostic> shifted = JavaDiagnosticEdits.move(located, before, after);
+        List<BuildDiagnostic> result = new ArrayList<>(problems);
+        for (int k = 0; k < indexes.size(); k++) {
+            BuildDiagnostic problem = problems.get(indexes.get(k));
+            Diagnostic moved = shifted.get(k);
+            if (moved.startLine() != problem.line() - 1
+                    || moved.startCol() != Math.max(0, problem.column() - 1)) {
+                result.set(indexes.get(k), new BuildDiagnostic(problem.file(), moved.startLine() + 1,
+                        moved.startCol() + 1, problem.severity(), problem.message(), problem.source()));
+            }
+        }
+        return List.copyOf(result);
     }
 
     static boolean isCompilerProblem(BuildDiagnostic problem) {

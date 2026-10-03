@@ -17,6 +17,8 @@ import java.util.function.Consumer;
 @Slf4j
 public final class ProcessRunner {
 
+    private static final long EXIT_AFTER_OUTPUT_TIMEOUT_SECONDS = 60;
+
     private final AtomicReference<Process> current = new AtomicReference<>();
     private volatile boolean cancelled;
 
@@ -57,13 +59,20 @@ public final class ProcessRunner {
             while ((line = reader.readLine()) != null) {
                 emit(output, line);
             }
-            return process.waitFor();
+            if (!process.waitFor(EXIT_AFTER_OUTPUT_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                log.warn("Processo de build fechou a saida mas nao terminou em {} s; encerrando",
+                        EXIT_AFTER_OUTPUT_TIMEOUT_SECONDS);
+                terminate(process);
+                return -1;
+            }
+            return process.exitValue();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             terminate(process);
             return -1;
         } catch (Exception e) {
-            log.debug("Falha ao ler a saida do build: {}", e.getMessage());
+            log.warn("Falha ao ler a saida do build: {}", e.getMessage());
+            terminate(process);
             return -1;
         } finally {
             current.compareAndSet(process, null);

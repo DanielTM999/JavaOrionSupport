@@ -58,6 +58,7 @@ final class LspClientCapabilities {
                 "tagSupport", Map.of("valueSet", List.of(1, 2))));
         textDocument.put("inlayHint", Map.of("dynamicRegistration", false));
         textDocument.put("callHierarchy", Map.of("dynamicRegistration", false));
+        textDocument.put("typeHierarchy", Map.of("dynamicRegistration", false));
         textDocument.put("selectionRange", Map.of("dynamicRegistration", false));
         textDocument.put("foldingRange", Map.of("dynamicRegistration", false, "lineFoldingOnly", true));
 
@@ -128,6 +129,8 @@ final class LspClientCapabilities {
                 provided(caps, "callHierarchyProvider"),
                 provided(caps, "executeCommandProvider"),
                 provided(caps, "workspaceSymbolProvider"),
+                provided(caps, "typeHierarchyProvider"),
+                provided(caps, "foldingRangeProvider"),
                 caps.path("completionProvider").path("resolveProvider").asBoolean(false),
                 syncKind(caps) == 2,
                 triggerCharacters(caps.get("completionProvider")),

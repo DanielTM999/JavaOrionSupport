@@ -67,6 +67,39 @@ class IncrementalTokenizerProviderTest {
     }
 
     @Test
+    void anEditNearTheTopReusesTheTokensAfterTheStreamsResynchronize() {
+        JavaTokenizerProvider tokenizer = new JavaTokenizerProvider();
+        StringBuilder source = new StringBuilder("package demo;\n\nclass Demo {\n");
+        for (int i = 0; i < 200; i++) {
+            source.append("    int field").append(i).append(" = ").append(i).append(";\n");
+        }
+        String oldText = source.append("}\n").toString();
+        int offset = oldText.indexOf("field3 ") + "field3".length();
+        List<Token> previous = List.copyOf(tokenizer.tokenize(oldText, null));
+
+        assertIncrementalEdit(tokenizer, oldText, offset, 0, "x", true);
+
+        String sameLength = oldText.substring(0, offset - 1) + "9" + oldText.substring(offset);
+        List<Token> incremental = List.copyOf(tokenizer.tokenize(new TokenizeChange(
+                oldText, sameLength, offset - 1, 1, "9", previous), null));
+        assertSame(previous.getLast(), incremental.getLast(),
+                "tokens depois da janela sao reaproveitados sem nova tokenizacao");
+    }
+
+    @Test
+    void openingABlockCommentRetokenizesUntilTheStreamsAgree() {
+        JavaTokenizerProvider tokenizer = new JavaTokenizerProvider();
+        StringBuilder source = new StringBuilder("class Demo {\n");
+        for (int i = 0; i < 60; i++) {
+            source.append("    int field").append(i).append(";\n");
+        }
+        String oldText = source.append("}\n").toString();
+
+        assertIncrementalEdit(tokenizer, oldText, oldText.indexOf("    int field2;"), 0, "/*", true);
+        assertIncrementalEdit(tokenizer, oldText, oldText.indexOf("    int field2;"), 0, "\"\"\"\n", true);
+    }
+
+    @Test
     void inconsistentChangeFallsBackToAFullTokenization() {
         JavaTokenizerProvider tokenizer = new JavaTokenizerProvider();
         String oldText = "class Old {}";

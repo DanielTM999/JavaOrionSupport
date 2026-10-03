@@ -71,7 +71,7 @@ public final class CallParentheses {
             return item;
         }
         return new AutoCompleteItem(replacement, item.label(), item.detail(), item.description(),
-                item.icon(), item.kind(), item.additionalTextEdits(), item.unused());
+                item.icon(), item.kind(), item.additionalTextEdits(), item.unused(), item.data());
     }
 
     private static Boolean parametersOf(String value) {

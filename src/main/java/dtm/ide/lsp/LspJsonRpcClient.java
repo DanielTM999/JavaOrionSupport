@@ -41,6 +41,10 @@ public final class LspJsonRpcClient {
     private final Object writeLock = new Object();
 
     private volatile boolean closed;
+    private volatile boolean disconnected;
+    private volatile Runnable disconnectListener;
+    private final java.util.concurrent.atomic.AtomicBoolean disconnectNotified =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     public LspJsonRpcClient(InputStream input, OutputStream output, String threadName) {
         this.input = new BufferedInputStream(input, 1 << 16);
@@ -163,14 +167,38 @@ public final class LspJsonRpcClient {
             }
         } catch (Exception e) {
             if (!closed) {
-                log.debug("Leitor do language server encerrado: {}", e.getMessage());
+                log.warn("Leitor do language server encerrado: {}", e.getMessage());
             }
         } finally {
             IOException reason = new IOException("Language server encerrou a conexao");
             pending.values().forEach(future -> future.completeExceptionally(reason));
             pending.clear();
             if (!closed) {
+                disconnected = true;
                 close();
+                notifyDisconnect();
+            }
+        }
+    }
+
+    /**
+     * Runs {@code listener} once if the connection is lost without {@link #close()} being called
+     * first, e.g. when the server stops answering on its stream while the process is still alive.
+     */
+    public void onUnexpectedDisconnect(Runnable listener) {
+        disconnectListener = listener;
+        if (disconnected) {
+            notifyDisconnect();
+        }
+    }
+
+    private void notifyDisconnect() {
+        Runnable listener = disconnectListener;
+        if (listener != null && disconnectNotified.compareAndSet(false, true)) {
+            try {
+                listener.run();
+            } catch (RuntimeException error) {
+                log.warn("Falha ao tratar a desconexao do language server", error);
             }
         }
     }

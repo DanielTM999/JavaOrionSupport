@@ -38,8 +38,12 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
             "Comparable", "CharSequence", "StringBuilder", "StringBuffer", "Void"
     );
 
-    private volatile String lastScanSource;
-    private volatile JpaQueryLiteralScanner.Scan lastScan;
+    /** Old and new text of an edit are scanned alternately, so two entries avoid thrashing. */
+    private record CachedScan(String source, JpaQueryLiteralScanner.Scan scan) {
+    }
+
+    private volatile CachedScan recentScan;
+    private volatile CachedScan olderScan;
 
     @Override
     public boolean supportsIncremental() {
@@ -52,7 +56,8 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
         if (change != null && queryAnnotationChanged(change)) {
             return tokenize(change.newText(), classifier);
         }
-        return IncrementalTokenization.retokenizeFromSafeLine(change, classifier, this::tokenize);
+        return IncrementalTokenization.retokenizeFromSafeLine(change, classifier, this::tokenize,
+                JavaTokenizerProvider::withoutQueryLiterals);
     }
 
     @Override
@@ -146,22 +151,29 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
                 || scanOf(newText).intersects(start, newEnd);
     }
 
+    private static boolean withoutQueryLiterals(String text, int from, int to) {
+        int found = text.indexOf("Query", from);
+        return found < 0 || found >= to;
+    }
+
     private static boolean mentionsQuery(String text) {
         return text != null && text.indexOf("Query") >= 0;
     }
 
     private JpaQueryLiteralScanner.Scan scanOf(String source) {
-        String cachedSource = lastScanSource;
-        JpaQueryLiteralScanner.Scan cached = lastScan;
-
-        if (cached != null && source.equals(cachedSource)) {
-            return cached;
+        CachedScan recent = recentScan;
+        if (recent != null && recent.source().equals(source)) {
+            return recent.scan();
         }
-
+        CachedScan older = olderScan;
+        if (older != null && older.source().equals(source)) {
+            olderScan = recent;
+            recentScan = older;
+            return older.scan();
+        }
         JpaQueryLiteralScanner.Scan scan = JpaQueryLiteralScanner.scan(source);
-        lastScanSource = source;
-        lastScan = scan;
-
+        olderScan = recent;
+        recentScan = new CachedScan(source, scan);
         return scan;
     }
 
