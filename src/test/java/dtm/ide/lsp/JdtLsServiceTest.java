@@ -99,6 +99,23 @@ class JdtLsServiceTest {
         assertEquals("    void m() { ", JdtLsService.linePrefixAtWordStart(text, 1, 20));
     }
 
+    @Test
+    void reusesTheCachedCompletionOnlyWhenTheWordWasExtendedAtTheCaret() {
+        String cached = "class A {\n    void m() { Str }\n}";
+        String typed = "class A {\n    void m() { Strin }\n}";
+
+        assertTrue(JdtLsService.extendsCachedWord(cached, 1, 18, typed, 20));
+        assertTrue(JdtLsService.extendsCachedWord(cached, 1, 18, cached, 18));
+        assertFalse(JdtLsService.extendsCachedWord(cached, 1, 18,
+                "class A {\n    void m() { Str. }\n}", 19));
+        assertFalse(JdtLsService.extendsCachedWord(cached, 1, 18,
+                "import x.Y;\nclass A {\n    void m() { Strin }\n}", 20));
+        assertFalse(JdtLsService.extendsCachedWord(cached, 1, 18,
+                "class A {\n    void m() { St }\n}", 17));
+        assertFalse(JdtLsService.extendsCachedWord(cached, 1, 18,
+                "class A {\n    void m() { Strin }\n}\n", 20));
+    }
+
     public static class IdleServer {
         public static void main(String[] args) throws Exception {
             System.out.print("R");

@@ -1,5 +1,7 @@
 package dtm.ide;
 
+import dtm.stools.component.panels.editor.code.api.Position;
+import dtm.stools.component.panels.editor.code.api.TextEdit;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import org.junit.jupiter.api.Test;
 
@@ -40,6 +42,19 @@ class JavaIdeAdapterCompletionTest {
                 List.of(new AutoCompleteItem("System")), "Sy"));
         assertEquals("stem", JavaIdeAdapter.ghostTextSuffix(
                 List.of(new AutoCompleteItem("System")), "sy"));
+    }
+
+    @Test
+    void ghostKeepsTheImportOfTheChosenItem() {
+        TextEdit importEdit = TextEdit.insert(new Position(1, 0), "import java.time.LocalDate;\n");
+        AutoCompleteItem localDate = new AutoCompleteItem("LocalDate", "LocalDate", "java.time",
+                null, null, AutoCompleteItem.Kind.CLASS, List.of(importEdit));
+
+        JavaIdeAdapter.GhostChoice choice = JavaIdeAdapter.ghostTextChoice(
+                List.of(localDate), "LocalDa", false);
+
+        assertEquals("te", choice.suffix());
+        assertEquals(List.of(importEdit), choice.item().additionalTextEdits());
     }
 
     @Test

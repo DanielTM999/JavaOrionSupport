@@ -68,6 +68,18 @@ class JdtLsSettingsTest {
         assertTrue(filtered.stream().noneMatch(pattern -> pattern.startsWith("java.")));
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void editingOneBufferDoesNotRevalidateEveryOpenBuffer() throws Exception {
+        JdkInstallation jdk = jdk(21);
+
+        Map<String, Object> java = (Map<String, Object>) JdtLsSettings.build(jdk, List.of(jdk),
+                JdtBuildMode.PROJECT_BUILD).get("java");
+
+        assertEquals(false, ((Map<String, Object>) java.get("edit"))
+                .get("validateAllOpenBuffersOnChanges"));
+    }
+
     @SuppressWarnings("unchecked")
     private Object autobuildEnabled(Map<String, Object> settings) {
         Map<String, Object> java = (Map<String, Object>) settings.get("java");

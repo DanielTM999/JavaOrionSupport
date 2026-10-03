@@ -53,6 +53,8 @@ final class JdtLsSettings {
                         "org.springframework.test.web.servlet.result.MockMvcResultMatchers.*",
                         "java.util.Objects.requireNonNull")));
 
+        java.put("edit", Map.of("validateAllOpenBuffersOnChanges", false));
+
         java.put("referencesCodeLens", Map.of("enabled", true));
         java.put("implementationCodeLens", "all");
 

@@ -52,6 +52,9 @@ import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointDialogView;
 import dtm.ide.api.project.editor.NativeEditorType;
+import dtm.ide.api.project.tree.PathRenameDecision;
+import dtm.ide.api.project.tree.PathTransferDecision;
+import dtm.ide.api.project.tree.PathTransferRequest;
 import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
 import dtm.ide.api.theme.EditorTheme;
 import dtm.ide.api.project.diagnostics.IdeProblem;
@@ -96,6 +99,7 @@ import dtm.ide.deps.MavenLocalRepositoryResolver;
 import dtm.ide.editor.AutoCompleteIdleTrigger;
 import dtm.stools.configs.UiTokens;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
+import dtm.stools.component.panels.editor.code.ghost.GhostTextSuggestion;
 import dtm.ide.editor.CallParentheses;
 import dtm.ide.editor.CompletionRanking;
 import dtm.ide.editor.JavaTypingContext;
@@ -186,6 +190,9 @@ import dtm.ide.project.ProjectLayout;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.project.JavaProjectSources;
 import dtm.ide.project.JdtOutputIsolation;
+import dtm.ide.refactor.JavaPathTransferPlan;
+import dtm.ide.refactor.MavenModuleRename;
+import dtm.ide.refactor.JavaPathTransferRefactoring;
 import dtm.ide.refactor.JavaSafeDeleteScanner;
 import dtm.ide.sdk.BuildToolProvisioner;
 import dtm.ide.sdk.DownloadProgressListener;
@@ -209,7 +216,10 @@ import dtm.ide.ui.JavaCoveragePanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaTestGutterLayer;
 import dtm.ide.ui.JavaDebugPanel;
+import dtm.ide.ui.JavaCopyDialogPanel;
+import dtm.ide.ui.JavaModuleRenameDialogPanel;
 import dtm.ide.ui.JavaDeleteDialogPanel;
+import dtm.ide.ui.JavaMoveDialogPanel;
 import dtm.ide.todo.TodoItem;
 import dtm.ide.todo.TodoScanner;
 import dtm.ide.ui.JavaBuildToolsPanel;
@@ -273,6 +283,8 @@ import java.awt.Graphics2D;
 import java.awt.MouseInfo;
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.awt.SecondaryLoop;
+import java.awt.Toolkit;
 import java.awt.RenderingHints;
 import java.awt.Window;
 import java.awt.event.MouseAdapter;
@@ -333,7 +345,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String HIDE_OCCURRENCE_COMMAND = "java.orion.hideInspectionOccurrence";
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
-    private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 800;
+    private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 150;
     private static final long DELETE_REFERENCES_TIMEOUT_MS = 30_000;
     private static final int DELETE_SEARCH_PARALLELISM = 4;
     private static final Set<Character> COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$');
@@ -445,6 +457,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     
     private volatile Path projectRoot;
     private volatile JavaProjectDescriptor descriptor;
+    private final JavaPathTransferRefactoring pathTransfers = new JavaPathTransferRefactoring(new PathTransferHost());
     private volatile IdeProjectContext projectContext;
     private volatile JdkService jdkService;
     private volatile JdkInstallation projectJdk;
@@ -500,6 +513,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile CoverageProvisioner coverageProvisioner;
     private volatile String testPanelId;
     private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
+    private final Set<Path> pendingModuleDirectoryRenames = ConcurrentHashMap.newKeySet();
     private final AtomicLong syncGeneration = new AtomicLong();
     private final AtomicReference<SyncWork> syncWork = new AtomicReference<>();
     private final MavenPluginGoals pluginGoals = new MavenPluginGoals(this::pluginRepository);
@@ -1498,15 +1512,22 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         JdtLsService lsp = jdtLs;
         if (lsp != null && lsp.isInteractive() && lsp.isReady()) {
-            Character triggerCharacter = completionTriggerCharacter(context.currentLine(),
-                    context.caretCol(), getCompletionTriggerCharacters());
-            JdtLsService.CompletionTrigger trigger =
-                    context.triggerKind() == IdeCompletionTriggerKind.TYPING && triggerCharacter != null
-                            ? JdtLsService.CompletionTrigger.TRIGGER_CHARACTER
-                            : JdtLsService.CompletionTrigger.INVOKED;
-            List<AutoCompleteItem> semantic = lsp.complete(context.filePath(), context.text(),
-                    context.caretLine(), context.caretCol(), trigger, triggerCharacter,
-                    lsp.documentVersion(context.filePath()), true);
+            long started = System.nanoTime();
+            List<AutoCompleteItem> semantic = filterCompletionSuggestions(lsp.reusableCompletions(
+                    context.filePath(), context.text(), context.caretLine(), context.caretCol()),
+                    context.prefix());
+            boolean reused = !semantic.isEmpty();
+            if (!reused) {
+                Character triggerCharacter = completionTriggerCharacter(context.currentLine(),
+                        context.caretCol(), getCompletionTriggerCharacters());
+                JdtLsService.CompletionTrigger trigger =
+                        context.triggerKind() == IdeCompletionTriggerKind.TYPING && triggerCharacter != null
+                                ? JdtLsService.CompletionTrigger.TRIGGER_CHARACTER
+                                : JdtLsService.CompletionTrigger.INVOKED;
+                semantic = lsp.complete(context.filePath(), context.text(),
+                        context.caretLine(), context.caretCol(), trigger, triggerCharacter,
+                        lsp.documentVersion(context.filePath()), true);
+            }
             if (semantic.isEmpty()) {
                 semantic = filterCompletionSuggestions(lsp.cachedCompletions(context.filePath(),
                         context.text(), context.caretLine(), context.caretCol()), context.prefix());
@@ -1514,7 +1535,14 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (semantic.isEmpty()) {
                 semantic = fastCompletion.suggestions(context);
             }
-            return javaCompletion(mergeCompletionSuggestions(semantic, snippetsLocal), context);
+            long fetched = System.nanoTime();
+            List<AutoCompleteItem> result = javaCompletion(
+                    mergeCompletionSuggestions(semantic, snippetsLocal), context);
+            log.debug("Autocomplete: {} item(ns) em {} ms (origem {}, pos-processamento {} ms)",
+                    result.size(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+                    reused ? "cache" : "jdtls",
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - fetched));
+            return result;
         }
 
         List<AutoCompleteItem> lexical = fastCompletion.suggestions(context);
@@ -1655,6 +1683,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public String getGhostText(IdeGhostTextContext context) {
+        GhostTextSuggestion suggestion = getGhostSuggestion(context);
+        return suggestion == null ? null : suggestion.text();
+    }
+
+    @Override
+    public GhostTextSuggestion getGhostSuggestion(IdeGhostTextContext context) {
         if (debugActive.get() || context == null) {
             return null;
         }
@@ -1669,21 +1703,29 @@ public class JavaIdeAdapter extends IdeAdapter {
         JdtLsService lsp = interactiveServerFor(context.filePath());
         List<AutoCompleteItem> contextual = List.of();
         if (lsp != null) {
-            contextual = lsp.complete(context.filePath(), context.text(),
-                    context.caretLine(), context.caretCol(),
-                    JdtLsService.CompletionTrigger.INVOKED, null,
-                    lsp.documentVersion(context.filePath()));
+            contextual = lsp.reusableCompletions(context.filePath(), context.text(),
+                    context.caretLine(), context.caretCol());
+            if (contextual.isEmpty()) {
+                contextual = lsp.complete(context.filePath(), context.text(),
+                        context.caretLine(), context.caretCol(),
+                        JdtLsService.CompletionTrigger.INVOKED, null,
+                        lsp.documentVersion(context.filePath()));
+            }
         }
         JavaProjectDescriptor current = descriptor;
         List<AutoCompleteItem> local = memberAccess ? List.of() : snippets.suggestions(prefix,
                 current != null && current.spring());
         List<AutoCompleteItem> ghostCandidates = new ArrayList<>(contextual);
         ghostCandidates.addAll(local);
-        String suffix = ghostTextSuffix(ghostCandidates, prefix, memberAccess);
-        if (suffix != null) {
-            return indentMultilineGhostText(suffix, context.currentLine());
+        GhostChoice choice = ghostTextChoice(ghostCandidates, prefix, memberAccess);
+        if (choice != null) {
+            return new GhostTextSuggestion(indentMultilineGhostText(choice.suffix(), context.currentLine()),
+                    choice.item().additionalTextEdits());
         }
-        return lexicalGhostTextSuffix(context.text(), prefix);
+        return GhostTextSuggestion.of(lexicalGhostTextSuffix(context.text(), prefix));
+    }
+
+    record GhostChoice(String suffix, AutoCompleteItem item) {
     }
 
     static String ghostTextSuffix(List<AutoCompleteItem> items, String prefix) {
@@ -1692,10 +1734,16 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     static String ghostTextSuffix(List<AutoCompleteItem> items, String prefix,
                                   boolean allowEmptyPrefix) {
+        GhostChoice choice = ghostTextChoice(items, prefix, allowEmptyPrefix);
+        return choice == null ? null : choice.suffix();
+    }
+
+    static GhostChoice ghostTextChoice(List<AutoCompleteItem> items, String prefix,
+                                       boolean allowEmptyPrefix) {
         if (items == null || prefix == null || (prefix.isEmpty() && !allowEmptyPrefix)) {
             return null;
         }
-        String insensitive = null;
+        GhostChoice insensitive = null;
         for (AutoCompleteItem item : items) {
             if (item == null) {
                 continue;
@@ -1706,11 +1754,11 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             insert = limitGhostText(insert);
             if (insert.startsWith(prefix)) {
-                return insert.substring(prefix.length());
+                return new GhostChoice(insert.substring(prefix.length()), item);
             }
             if (insensitive == null && insert.regionMatches(true, 0, prefix, 0,
                     prefix.length())) {
-                insensitive = insert.substring(prefix.length());
+                insensitive = new GhostChoice(insert.substring(prefix.length()), item);
             }
         }
         return insensitive;
@@ -2355,9 +2403,77 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     @Override
+    public PathRenameDecision beforePathRename(Path path) {
+        JavaProjectDescriptor current = descriptor;
+        if (current == null) {
+            return PathRenameDecision.useDefault();
+        }
+        Optional<MavenModuleRename.Target> target = MavenModuleRename.of(current, path, this::readCurrentText);
+        if (target.isEmpty()) {
+            return PathRenameDecision.useDefault();
+        }
+        JavaModuleRenameDialogPanel.Result result = askModuleRename(target.get());
+        if (result == null) {
+            return PathRenameDecision.cancel();
+        }
+        IdeWorkspaceEdit edit = MavenModuleRename.plan(target.get(), result.scope(), result.name(),
+                this::readCurrentText);
+        if (edit.isEmpty()) {
+            return PathRenameDecision.cancel();
+        }
+        boolean movesDirectory = edit.operations().stream()
+                .anyMatch(operation -> operation instanceof IdeWorkspaceEdit.RenameFile);
+        if (movesDirectory) {
+            pendingModuleDirectoryRenames.add(target.get().directory());
+        }
+        SwingUtilities.invokeLater(this::syncProject);
+        String label = text("moduleRename.label", "Rename module \"{module}\" to \"{name}\"")
+                .replace("{module}", target.get().artifactId())
+                .replace("{name}", result.name());
+        return PathRenameDecision.apply(label, edit);
+    }
+
+    private JavaModuleRenameDialogPanel.Result askModuleRename(MavenModuleRename.Target target) {
+        CompletableFuture<JavaModuleRenameDialogPanel.Result> answer = new CompletableFuture<>();
+        Runnable open = () -> {
+            JavaModuleRenameDialogPanel panel = new JavaModuleRenameDialogPanel(target, answer::complete);
+            showPopup(PlatformPopupBuilder.builder()
+                    .component(panel)
+                    .title(text("moduleRename.title", "Rename"))
+                    .size(500, 320)
+                    .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
+                    .onLoad(component -> panel.focusInput())
+                    .onClose(component -> panel.closed())
+                    .build());
+        };
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(open);
+            try {
+                return answer.get(30, TimeUnit.MINUTES);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        SecondaryLoop loop = Toolkit.getDefaultToolkit().getSystemEventQueue().createSecondaryLoop();
+        answer.whenComplete((result, error) -> loop.exit());
+        open.run();
+        if (!answer.isDone()) {
+            loop.enter();
+        }
+        return answer.getNow(null);
+    }
+
+    @Override
     public void onPathRenamed(Path oldPath, Path newPath) {
         Path movedFrom = JavaProjectConventions.normalize(oldPath);
         Path movedTo = JavaProjectConventions.normalize(newPath);
+        if (movedFrom != null && movedTo != null && !pendingModuleDirectoryRenames.remove(movedFrom)
+                && isModuleRoot(movedFrom)) {
+            onBuildFileChanged(movedTo.resolve(JavaProjectConventions.POM_FILE));
+        }
         Set<Path> editorsBeforeMove = movedFrom == null ? Set.of() : javaEditors.keySet().stream()
                 .filter(path -> path.startsWith(movedFrom))
                 .map(path -> movedTo == null ? path : movedTo.resolve(movedFrom.relativize(path)))
@@ -2417,6 +2533,122 @@ public class JavaIdeAdapter extends IdeAdapter {
             lsp.pathDeleted(deleted);
         }
         refreshProblemsPanel();
+    }
+
+    private boolean isModuleRoot(Path directory) {
+        JavaProjectDescriptor current = descriptor;
+        return current != null && current.modules().stream()
+                .anyMatch(module -> module.root().equals(directory));
+    }
+
+    private String readCurrentText(Path file) {
+        IdeEditorContext editor = editorContextFor(file);
+        if (editor != null) {
+            String text = onUi(editor::getText);
+            if (text != null) {
+                return text;
+            }
+        }
+        try {
+            return Files.readString(file, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            log.debug("Falha ao ler {}: {}", file, e.getMessage());
+            return null;
+        }
+    }
+
+    @Override
+    public PathTransferDecision beforePathTransfer(PathTransferRequest request) {
+        return pathTransfers.before(request);
+    }
+
+    @Override
+    public IdeWorkspaceEdit afterPathTransfer(PathTransferRequest request) {
+        return pathTransfers.after(request);
+    }
+
+    private final class PathTransferHost implements JavaPathTransferRefactoring.Host {
+
+        private static final long DIALOG_TIMEOUT_MINUTES = 30;
+
+        @Override
+        public JavaProjectDescriptor descriptor() {
+            return descriptor;
+        }
+
+        @Override
+        public JdtLsService readyServer() {
+            JdtLsService lsp = jdtLs;
+            return lsp != null && lsp.isReady() ? lsp : null;
+        }
+
+        @Override
+        public JavaMoveDialogPanel.Choice askMove(JavaPathTransferPlan plan) {
+            if (SwingUtilities.isEventDispatchThread()) {
+                return JavaMoveDialogPanel.Choice.MOVE_ONLY;
+            }
+            CompletableFuture<JavaMoveDialogPanel.Choice> answer = new CompletableFuture<>();
+            SwingUtilities.invokeLater(() -> {
+                JavaMoveDialogPanel panel = new JavaMoveDialogPanel(plan, answer::complete);
+                showPopup(PlatformPopupBuilder.builder()
+                        .component(panel)
+                        .title(text("move.title", "Move"))
+                        .size(520, 240 + Math.min(6, plan.files().size() + plan.folders().size()) * 26)
+                        .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
+                        .onLoad(component -> panel.focusConfirm())
+                        .onClose(component -> panel.closed())
+                        .build());
+            });
+            return await(answer, JavaMoveDialogPanel.Choice.CANCEL);
+        }
+
+        @Override
+        public JavaCopyDialogPanel.Result askCopy(JavaPathTransferPlan plan, Map<Path, String> defaultNames) {
+            if (SwingUtilities.isEventDispatchThread()) {
+                return new JavaCopyDialogPanel.Result(false, Map.of());
+            }
+            CompletableFuture<JavaCopyDialogPanel.Result> answer = new CompletableFuture<>();
+            SwingUtilities.invokeLater(() -> {
+                JavaCopyDialogPanel panel = new JavaCopyDialogPanel(plan, defaultNames, answer::complete);
+                showPopup(PlatformPopupBuilder.builder()
+                        .component(panel)
+                        .title(text("copy.title", "Copy"))
+                        .size(520, 250 + Math.min(6, plan.files().size() + plan.folders().size()) * 22)
+                        .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
+                        .onLoad(component -> panel.focusInput())
+                        .onClose(component -> panel.closed())
+                        .build());
+            });
+            return await(answer, null);
+        }
+
+        @Override
+        public String readText(Path file) {
+            return readCurrentText(file);
+        }
+
+        @Override
+        public void warn(String message) {
+            if (message == null || message.isBlank()) {
+                return;
+            }
+            createNotification(NotificationContext.builder()
+                    .title(text("transfer.title", "Move/copy of Java files"))
+                    .message(message)
+                    .icon(JavaIcons.java(JavaIcons.SMALL))
+                    .build());
+        }
+
+        private <T> T await(CompletableFuture<T> answer, T fallback) {
+            try {
+                return answer.get(DIALOG_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return fallback;
+            } catch (Exception e) {
+                return fallback;
+            }
+        }
     }
 
     static List<Range> typeDeclarationRanges(List<DocumentSymbol> symbols) {

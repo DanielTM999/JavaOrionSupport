@@ -139,6 +139,7 @@ public class JdtLsService {
     private static final long RENAME_TIMEOUT_MS = 60_000;
 
     private volatile String lastRenameProblem;
+    private volatile String lastMoveProblem;
     private static final long INDEXING_COMPLETION_TIMEOUT_MS = 750;
     private static final long READY_COMPLETION_TIMEOUT_MS = 1_500;
     private static final long INITIALIZE_CEILING_MS = 900_000;
@@ -2360,6 +2361,39 @@ public class JdtLsService {
                 && cached.linePrefix().equals(linePrefixAtWordStart(text, line, col));
     }
 
+    public List<AutoCompleteItem> reusableCompletions(Path filePath, String text, int line, int col) {
+        if (filePath == null || text == null) return List.of();
+        CompletionCache cached = completionCache.get(LspConversions.toUri(filePath));
+        if (cached == null || cached.incomplete() || cached.line() != line) return List.of();
+        return extendsCachedWord(cached.text(), line, cached.col(), text, col)
+                ? cached.items()
+                : List.of();
+    }
+
+    static boolean extendsCachedWord(String cachedText, int line, int cachedCol, String text, int col) {
+        if (cachedText == null || text == null || col < cachedCol) {
+            return false;
+        }
+        int cachedOffset = offsetIn(cachedText, new Position(line, cachedCol));
+        int offset = offsetIn(text, new Position(line, col));
+        if (cachedOffset < 0 || offset < 0) {
+            return false;
+        }
+        int typed = offset - cachedOffset;
+        if (typed != col - cachedCol || text.length() - cachedText.length() != typed) {
+            return false;
+        }
+        if (!text.regionMatches(0, cachedText, 0, cachedOffset)) {
+            return false;
+        }
+        for (int index = cachedOffset; index < offset; index++) {
+            if (!Character.isJavaIdentifierPart(text.charAt(index))) {
+                return false;
+            }
+        }
+        return text.regionMatches(offset, cachedText, cachedOffset, cachedText.length() - cachedOffset);
+    }
+
     public void warmCompletion(Path filePath, String text, int line, int col) {
         if (!isInteractive() || isReady() || filePath == null) return;
         executor.submit(() -> complete(filePath, text, line, col));
@@ -2763,6 +2797,114 @@ public class JdtLsService {
 
     public String lastRenameProblem() {
         return lastRenameProblem;
+    }
+
+    public IdeWorkspaceEdit moveTypesWorkspace(List<Path> sources, Path targetDirectory) {
+        lastMoveProblem = null;
+        if (sources == null || sources.isEmpty() || targetDirectory == null) {
+            return IdeWorkspaceEdit.empty();
+        }
+        LspJsonRpcClient rpc = readyClientForMove();
+        if (rpc == null) {
+            return IdeWorkspaceEdit.empty();
+        }
+        List<String> sourceUris = sources.stream().map(LspConversions::toUri).toList();
+        Map<String, Object> query = new LinkedHashMap<>();
+        query.put("moveKind", "moveResource");
+        query.put("sourceUris", sourceUris);
+        query.put("params", null);
+        JsonNode destinations = moveRequest(rpc, "java/getMoveDestinations", query);
+        if (destinations == null) {
+            return IdeWorkspaceEdit.empty();
+        }
+        JsonNode destination = moveDestinationFor(destinations.path("destinations"), targetDirectory);
+        if (destination == null) {
+            String error = destinations.path("errorMessage").asText(null);
+            lastMoveProblem = error != null && !error.isBlank()
+                    ? error : "o destino nao e um pacote Java conhecido pelo servidor";
+            return IdeWorkspaceEdit.empty();
+        }
+        Map<String, Object> params = new LinkedHashMap<>(query);
+        params.put("destination", destination);
+        params.put("updateReferences", true);
+        JsonNode result = moveRequest(rpc, "java/move", params);
+        if (result == null) {
+            return IdeWorkspaceEdit.empty();
+        }
+        String error = result.path("errorMessage").asText(null);
+        if (error != null && !error.isBlank()) {
+            lastMoveProblem = error;
+            return IdeWorkspaceEdit.empty();
+        }
+        return LspConversions.workspaceEdit(result.path("edit"));
+    }
+
+    public IdeWorkspaceEdit willRenameFilesWorkspace(Map<Path, Path> renames) {
+        lastMoveProblem = null;
+        if (renames == null || renames.isEmpty()) {
+            return IdeWorkspaceEdit.empty();
+        }
+        LspJsonRpcClient rpc = readyClientForMove();
+        if (rpc == null) {
+            return IdeWorkspaceEdit.empty();
+        }
+        List<Map<String, Object>> files = new ArrayList<>();
+        renames.forEach((oldPath, newPath) -> files.add(Map.of(
+                "oldUri", LspConversions.toUri(oldPath),
+                "newUri", LspConversions.toUri(newPath))));
+        JsonNode result = moveRequest(rpc, "workspace/willRenameFiles", Map.of("files", files));
+        return result == null ? IdeWorkspaceEdit.empty() : LspConversions.workspaceEdit(result);
+    }
+
+    public String lastMoveProblem() {
+        return lastMoveProblem;
+    }
+
+    private LspJsonRpcClient readyClientForMove() {
+        drainPendingWatchedFiles();
+        LspJsonRpcClient rpc = client;
+        if (rpc == null || !isReady()) {
+            lastMoveProblem = "o servidor Java nao esta pronto";
+            return null;
+        }
+        return rpc;
+    }
+
+    private JsonNode moveRequest(LspJsonRpcClient rpc, String method, Object params) {
+        CompletableFuture<JsonNode> future = rpc.request(method, params);
+        try {
+            JsonNode result = future.get(RENAME_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            if (result == null || result.isNull() || result.isMissingNode()) {
+                lastMoveProblem = "o servidor Java nao devolveu nada para " + method;
+                return null;
+            }
+            return result;
+        } catch (InterruptedException e) {
+            future.cancel(false);
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Exception e) {
+            future.cancel(false);
+            logRequestFailure(method, e);
+            String message = LspConversions.errorMessage(e);
+            lastMoveProblem = message == null ? "o servidor Java recusou " + method : message;
+            return null;
+        }
+    }
+
+    static JsonNode moveDestinationFor(JsonNode destinations, Path targetDirectory) {
+        if (destinations == null || !destinations.isArray() || targetDirectory == null) {
+            return null;
+        }
+        Path target = normalizePath(targetDirectory);
+        for (JsonNode destination : destinations) {
+            String uri = destination.path("uri").asText(null);
+            Path path = uri == null ? null : LspConversions.toPath(uri);
+            if (path != null && normalizePath(path).equals(target)) {
+                return destination;
+            }
+        }
+        return null;
     }
 
     private String renamedName(Path filePath, String text, int line, int col) {
