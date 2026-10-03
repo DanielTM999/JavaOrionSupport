@@ -214,19 +214,19 @@ final class SpringMultiModuleScaffolder {
                 """.formatted(escapeXml(project.groupId()), escapeXml(project.artifactId()),
                 escapeXml(project.version()), escapeXml(module), escapeXml(module)));
 
-        String packageSegment = packageSegment(module);
+        String modulePackage = project.modulePackageName(module);
         String typeName = typeName(module) + "Module";
         Path source = moduleRoot.resolve("src/main/java")
-                .resolve(project.packagePath()).resolve(packageSegment).resolve(typeName + ".java");
+                .resolve(project.modulePackagePath(module)).resolve(typeName + ".java");
         write(source, """
-                package %s.%s;
+                package %s;
 
                 public final class %s {
 
                     private %s() {
                     }
                 }
-                """.formatted(project.packageName(), packageSegment, typeName, typeName));
+                """.formatted(modulePackage, typeName, typeName));
     }
 
     private static void copyGeneratedFiles(Path generated, Path target, String applicationModule)
@@ -313,11 +313,6 @@ final class SpringMultiModuleScaffolder {
         if (child != null) {
             parent.removeChild(child);
         }
-    }
-
-    private static String packageSegment(String module) {
-        String value = module.replaceAll("[^A-Za-z0-9_$]", "_").toLowerCase(Locale.ROOT);
-        return Character.isJavaIdentifierStart(value.charAt(0)) ? value : "_" + value;
     }
 
     private static String typeName(String module) {

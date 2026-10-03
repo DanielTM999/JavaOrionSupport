@@ -25,6 +25,7 @@ import javax.swing.Box;
 import javax.swing.DefaultComboBoxModel;
 import javax.swing.DefaultListCellRenderer;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JList;
@@ -89,6 +90,7 @@ final class JavaProjectWizardView extends JPanel {
             WizardUi.sized(new DropdownFieldListener<SpringInitializrClient.Option>());
     private final SegmentedField<String> packaging = WizardUi.sized(new SegmentedField<String>());
     private final TagInputField modules = new TagInputField();
+    private final JCheckBox appendModuleToPackage = new JCheckBox();
     private final DualListField<SpringInitializrClient.Starter> starterSelector = new DualListField<>();
 
     private final List<String> stepIds = new ArrayList<>();
@@ -124,10 +126,9 @@ final class JavaProjectWizardView extends JPanel {
         this.cancelButton = WizardUi.ghost(text("action.cancel", "Cancelar"), WizardIcons.cancel(15));
 
         setOpaque(false);
+        putClientProperty("orion.wizard.fitViewportHeight", true);
         setBorder(BorderFactory.createEmptyBorder(UiTokens.space(5), UiTokens.space(5),
                 UiTokens.space(4), UiTokens.space(5)));
-        setPreferredSize(new Dimension(UiTokens.scale(720), UiTokens.scale(560)));
-
         buildSteps();
         applyDefaults();
 
@@ -276,7 +277,12 @@ final class JavaProjectWizardView extends JPanel {
                             ? text("helper.springModules",
                                     "O primeiro modulo sera o executavel Spring Boot")
                             : text("helper.modules",
-                                    "Enter adiciona um modulo; ao menos um e necessario")));
+                                    "Enter adiciona um modulo; ao menos um e necessario")))
+                    .addWide(field("appendModuleToPackage",
+                            text("field.modulePackages", "Pacotes dos modulos"),
+                            appendModuleToPackage)
+                            .setHelperText(text("helper.modulePackages",
+                                    "Desativado: todos usam o pacote base")));
         }
 
         return stepCard(text("section.coordinates", "Coordenadas do artefato"),
@@ -384,6 +390,10 @@ final class JavaProjectWizardView extends JPanel {
                 .setSelectedIndex(0, false);
         modules.setPlaceholder(text("placeholder.modules", "core, app"));
         modules.setTags(isSpringMultiModule() ? List.of("web", "core") : List.of("core", "app"));
+        appendModuleToPackage.setOpaque(false);
+        appendModuleToPackage.setText(text("option.appendModuleToPackage",
+                "Acrescentar nome do modulo ao pacote"));
+        appendModuleToPackage.setSelected(false);
     }
 
     private void wireDerivedFields() {
@@ -545,6 +555,10 @@ final class JavaProjectWizardView extends JPanel {
         if (template == JavaTemplate.MAVEN_MULTIMODULE) {
             line = summaryRow(line, text("review.modules", "Modulos"),
                     String.join(", ", modules.getTags()));
+            line = summaryRow(line, text("review.modulePackages", "Pacotes dos modulos"),
+                    modules.getTags().stream()
+                            .map(module -> module + " → " + modulePackageName(module))
+                            .reduce((left, right) -> left + ", " + right).orElse("-"));
         }
         if (springBoot) {
             summaryChips(line, text("review.dependencies", "Dependencias"),
@@ -706,26 +720,30 @@ final class JavaProjectWizardView extends JPanel {
         return JavaProjectScaffolder.create(new JavaProjectScaffolder.ProjectRequest(directory,
                 template, groupId.getText().trim(), artifactId.getText().trim(), effectiveVersion(),
                 descriptionField.getText().trim(), packageName.getText().trim(),
-                selectedJavaVersion(), selectedModules()));
+                selectedJavaVersion(), selectedModules(), appendModuleToPackage.isSelected()));
     }
 
     private Path generateWithInitializr(Path directory) throws Exception {
         List<String> selected = starterSelector.getSelected().stream()
                 .map(SpringInitializrClient.Starter::id).toList();
         SpringInitializrClient.Option boot = bootVersion.getValue(SpringInitializrClient.Option.class);
+        JavaProjectScaffolder.ProjectRequest projectRequest = isSpringMultiModule()
+                ? new JavaProjectScaffolder.ProjectRequest(directory, template,
+                        groupId.getText().trim(), artifactId.getText().trim(), effectiveVersion(),
+                        descriptionField.getText().trim(), packageName.getText().trim(),
+                        selectedJavaVersion(), selectedModules(), appendModuleToPackage.isSelected())
+                : null;
+        String initializrPackage = projectRequest == null || projectRequest.modules().isEmpty()
+                ? packageName.getText().trim()
+                : projectRequest.modulePackageName(projectRequest.modules().getFirst());
         SpringInitializrClient.GenerateRequest initializrRequest =
                 new SpringInitializrClient.GenerateRequest(
                 SpringInitializrClient.projectTypeOf(template.isGradle()), "java",
                 boot == null ? "" : boot.id(), groupId.getText().trim(), artifactId.getText().trim(),
                 effectiveVersion(), projectName.getText().trim(), descriptionField.getText().trim(),
-                packageName.getText().trim(), String.valueOf(selectedJavaVersion()),
+                initializrPackage, String.valueOf(selectedJavaVersion()),
                 String.valueOf(packaging.getSelectedValue()), selected);
         if (isSpringMultiModule()) {
-            JavaProjectScaffolder.ProjectRequest projectRequest =
-                    new JavaProjectScaffolder.ProjectRequest(directory, template,
-                            groupId.getText().trim(), artifactId.getText().trim(), effectiveVersion(),
-                            descriptionField.getText().trim(), packageName.getText().trim(),
-                            selectedJavaVersion(), selectedModules());
             return SpringMultiModuleScaffolder.create(projectRequest, initializrRequest, initializr);
         }
         return initializr.generate(initializrRequest, directory);
@@ -787,6 +805,12 @@ final class JavaProjectWizardView extends JPanel {
 
     private List<String> selectedModules() {
         return template == JavaTemplate.MAVEN_MULTIMODULE ? modules.getTags() : List.of();
+    }
+
+    private String modulePackageName(String module) {
+        String base = packageName.getText().trim();
+        return appendModuleToPackage.isSelected()
+                ? base + "." + JavaProjectScaffolder.modulePackageSegment(module) : base;
     }
 
     private String effectiveVersion() {

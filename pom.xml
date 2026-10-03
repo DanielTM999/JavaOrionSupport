@@ -18,6 +18,7 @@
         <apache.compress.version>1.26.2</apache.compress.version>
         <lombok.version>1.18.42</lombok.version>
         <jacoco.version>0.8.15</jacoco.version>
+        <maven.model.version>3.9.9</maven.model.version>
     </properties>
 
     <repositories>
@@ -28,6 +29,11 @@
     </repositories>
 
     <dependencies>
+        <dependency>
+            <groupId>org.apache.maven</groupId>
+            <artifactId>maven-model-builder</artifactId>
+            <version>${maven.model.version}</version>
+        </dependency>
         <dependency>
             <groupId>dtm.ide</groupId>
             <artifactId>OrionApi</artifactId>

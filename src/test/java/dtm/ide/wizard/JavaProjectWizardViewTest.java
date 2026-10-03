@@ -9,6 +9,7 @@ import dtm.stools.component.inputfields.textfield.MaskedTextField;
 import org.junit.jupiter.api.Test;
 
 import javax.swing.JList;
+import javax.swing.JCheckBox;
 import javax.swing.JPanel;
 import java.awt.Component;
 import java.awt.Container;
@@ -50,8 +51,8 @@ class JavaProjectWizardViewTest {
         JPanel view = view(JavaTemplate.MAVEN_APPLICATION, false);
 
         assertTrue(contains(view, MaskedTextField.class));
-        assertTrue(view.getPreferredSize().width >= 600);
-        assertTrue(view.getPreferredSize().height >= 480);
+        assertEquals(Boolean.TRUE, view.getClientProperty("orion.wizard.fitViewportHeight"));
+        assertFalse(view.isPreferredSizeSet());
     }
 
     @Test
@@ -90,6 +91,9 @@ class JavaProjectWizardViewTest {
         FormField modules = field(view, "modules").orElseThrow();
         assertTrue(modules.getControl() instanceof TagInputField);
         assertEquals(List.of("core", "app"), ((TagInputField) modules.getControl()).getTags());
+        JCheckBox appendModule = (JCheckBox) field(view, "appendModuleToPackage")
+                .orElseThrow().getControl();
+        assertFalse(appendModule.isSelected());
     }
 
     @Test
@@ -110,6 +114,7 @@ class JavaProjectWizardViewTest {
 
         FormField modules = field(view, "modules").orElseThrow();
         assertEquals(List.of("web", "core"), ((TagInputField) modules.getControl()).getTags());
+        assertTrue(field(view, "appendModuleToPackage").isPresent());
         assertTrue(contains(view, DualListField.class));
         assertEquals(4, steps(view).getSteps().size(),
                 "projeto, coordenadas, dependencias e revisao");

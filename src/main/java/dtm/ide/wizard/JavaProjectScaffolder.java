@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import javax.lang.model.SourceVersion;
 import java.util.List;
 import java.util.Locale;
 
@@ -22,7 +23,8 @@ public final class JavaProjectScaffolder {
             String description,
             String packageName,
             int javaVersion,
-            List<String> modules
+            List<String> modules,
+            boolean appendModuleToPackage
     ) {
 
         public ProjectRequest {
@@ -38,7 +40,15 @@ public final class JavaProjectScaffolder {
 
         public ProjectRequest(Path directory, JavaTemplate template, String groupId, String artifactId,
                               String packageName, int javaVersion, List<String> modules) {
-            this(directory, template, groupId, artifactId, "", "", packageName, javaVersion, modules);
+            this(directory, template, groupId, artifactId, "", "", packageName, javaVersion,
+                    modules, false);
+        }
+
+        public ProjectRequest(Path directory, JavaTemplate template, String groupId, String artifactId,
+                              String version, String description, String packageName,
+                              int javaVersion, List<String> modules) {
+            this(directory, template, groupId, artifactId, version, description, packageName,
+                    javaVersion, modules, false);
         }
 
         private static String blankTo(String value, String fallback) {
@@ -47,6 +57,15 @@ public final class JavaProjectScaffolder {
 
         String packagePath() {
             return packageName.replace('.', '/');
+        }
+
+        String modulePackageName(String module) {
+            return appendModuleToPackage ? packageName + "." + modulePackageSegment(module)
+                    : packageName;
+        }
+
+        String modulePackagePath(String module) {
+            return modulePackageName(module).replace('.', '/');
         }
 
         String mainClassName() {
@@ -61,6 +80,14 @@ public final class JavaProjectScaffolder {
     }
 
     private JavaProjectScaffolder() {
+    }
+
+    static String modulePackageSegment(String module) {
+        String segment = module.replaceAll("[^A-Za-z0-9_$]", "_").toLowerCase(Locale.ROOT);
+        if (segment.isEmpty() || !Character.isJavaIdentifierStart(segment.charAt(0))) {
+            segment = "_" + segment;
+        }
+        return SourceVersion.isKeyword(segment) ? "_" + segment : segment;
     }
 
     public static Path create(ProjectRequest request) throws IOException {
@@ -200,14 +227,15 @@ public final class JavaProjectScaffolder {
                     </project>
                     """.formatted(request.groupId(), request.artifactId(), request.version(), module));
 
+            String modulePackage = request.modulePackageName(module);
             Path packageDir = moduleRoot.resolve("src/main/java")
-                    .resolve(request.packagePath()).resolve(module);
+                    .resolve(request.modulePackagePath(module));
             write(packageDir.resolve(capitalize(module) + ".java"), """
-                    package %s.%s;
+                    package %s;
 
                     public class %s {
                     }
-                    """.formatted(request.packageName(), module, capitalize(module)));
+                    """.formatted(modulePackage, capitalize(module)));
         }
         write(request.directory().resolve(".gitignore"), gitignore(true));
     }

@@ -7,6 +7,7 @@ import dtm.ide.run.MainClassScanner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.tools.ToolProvider;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -105,6 +106,39 @@ class JavaProjectScaffolderTest {
     }
 
     @Test
+    void multiModuleSourcesUseTheBasePackageByDefault() throws IOException {
+        Path project = workspace.resolve("base-package");
+        JavaProjectScaffolder.create(new JavaProjectScaffolder.ProjectRequest(
+                project, JavaTemplate.MAVEN_MULTIMODULE, "com.br", "projeto",
+                "com.br.projeto", 21, List.of("TEsteModulo")));
+
+        Path source = project.resolve("TEsteModulo/src/main/java/com/br/projeto/TEsteModulo.java");
+        assertTrue(Files.isRegularFile(source));
+        assertTrue(Files.readString(source).startsWith("package com.br.projeto;"));
+        assertCompiles(source);
+        assertFalse(Files.exists(project.resolve(
+                "TEsteModulo/src/main/java/com/br/projeto/testemodulo/TEsteModulo.java")));
+        assertTrue(Files.readString(project.resolve("pom.xml"))
+                .contains("<module>TEsteModulo</module>"));
+    }
+
+    @Test
+    void multiModuleSourcesCanAppendALowercaseModuleName() throws IOException {
+        Path project = workspace.resolve("module-package");
+        JavaProjectScaffolder.create(new JavaProjectScaffolder.ProjectRequest(
+                project, JavaTemplate.MAVEN_MULTIMODULE, "com.br", "projeto",
+                "1.0.0", "", "com.br.projeto", 21, List.of("TEsteModulo"), true));
+
+        Path source = project.resolve(
+                "TEsteModulo/src/main/java/com/br/projeto/testemodulo/TEsteModulo.java");
+        assertTrue(Files.isRegularFile(source));
+        assertTrue(Files.readString(source).startsWith("package com.br.projeto.testemodulo;"));
+        assertCompiles(source);
+        assertTrue(Files.readString(project.resolve("TEsteModulo/pom.xml"))
+                .contains("<artifactId>TEsteModulo</artifactId>"));
+    }
+
+    @Test
     void createsAGradleProjectWithKotlinDsl() throws IOException {
         Path project = create(JavaTemplate.GRADLE_APPLICATION, "gradle-app");
 
@@ -177,12 +211,52 @@ class JavaProjectScaffolderTest {
         assertTrue(Files.isRegularFile(project.resolve(
                 "web/src/main/java/com/example/plataforma/PlataformaApplication.java")));
         assertTrue(Files.isRegularFile(project.resolve(
-                "core/src/main/java/com/example/plataforma/core/CoreModule.java")));
+                "core/src/main/java/com/example/plataforma/CoreModule.java")));
         assertTrue(Files.isRegularFile(project.resolve("mvnw.cmd")));
 
         JavaProjectDescriptor descriptor = JavaProjectConventions.describe(project);
         assertEquals(JavaProjectKind.MAVEN_MULTIMODULE, descriptor.kind());
         assertEquals(4, descriptor.modules().size());
+    }
+
+    @Test
+    void springMultiModuleCanAppendTheModuleToEveryPackage() throws Exception {
+        Path generated = workspace.resolve("spring-with-module-package");
+        Path applicationSource = generated.resolve(
+                "src/main/java/com/br/projeto/web/ProjetoApplication.java");
+        Files.createDirectories(applicationSource.getParent());
+        Files.writeString(generated.resolve("pom.xml"), """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                    <modelVersion>4.0.0</modelVersion>
+                    <parent>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-starter-parent</artifactId>
+                        <version>4.1.1</version>
+                    </parent>
+                    <groupId>com.br</groupId>
+                    <artifactId>projeto</artifactId>
+                    <version>1.0.0</version>
+                </project>
+                """);
+        Files.writeString(applicationSource,
+                "package com.br.projeto.web; public class ProjetoApplication {}\n");
+
+        Path project = workspace.resolve("spring-output");
+        JavaProjectScaffolder.ProjectRequest request = new JavaProjectScaffolder.ProjectRequest(
+                project, JavaTemplate.MAVEN_MULTIMODULE, "com.br", "projeto", "1.0.0",
+                "", "com.br.projeto", 21, List.of("web", "TEsteModulo"), true);
+        assertEquals("com.br.projeto.web", request.modulePackageName("web"));
+        SpringMultiModuleScaffolder.assemble(request, generated);
+
+        Path main = project.resolve("web/src/main/java/com/br/projeto/web/ProjetoApplication.java");
+        Path library = project.resolve(
+                "TEsteModulo/src/main/java/com/br/projeto/testemodulo/TEsteModuloModule.java");
+        assertTrue(Files.isRegularFile(main));
+        assertTrue(Files.isRegularFile(library));
+        assertTrue(Files.readString(library).startsWith("package com.br.projeto.testemodulo;"));
+        assertCompiles(main, library);
+        assertFalse(Files.exists(project.resolve(
+                "TEsteModulo/src/main/java/com/br/projeto/TEsteModuloModule.java")));
     }
 
     @Test
@@ -306,5 +380,18 @@ class JavaProjectScaffolderTest {
         return new JavaProjectScaffolder.ProjectRequest(workspace.resolve(artifactId),
                 JavaTemplate.MAVEN_APPLICATION, "com.example", artifactId,
                 "com.example", 21, List.of());
+    }
+
+    private void assertCompiles(Path... sources) throws IOException {
+        Path classes = Files.createDirectories(workspace.resolve("compiled-classes"));
+        String[] arguments = new String[4 + sources.length];
+        arguments[0] = "--release";
+        arguments[1] = "21";
+        arguments[2] = "-d";
+        arguments[3] = classes.toString();
+        for (int index = 0; index < sources.length; index++) {
+            arguments[4 + index] = sources[index].toString();
+        }
+        assertEquals(0, ToolProvider.getSystemJavaCompiler().run(null, null, null, arguments));
     }
 }

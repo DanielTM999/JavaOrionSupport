@@ -186,6 +186,7 @@ import dtm.ide.run.MainClassScanner;
 import dtm.ide.api.project.IdeProjectFileWatcher;
 import dtm.ide.project.JavaFileChangeRouter;
 import dtm.ide.project.JavaProjectConventions;
+import dtm.ide.project.PomDiagnostics;
 import dtm.ide.project.LanguageLevelEditor;
 import dtm.ide.project.ProjectLayout;
 import dtm.ide.project.JavaProjectDescriptor;
@@ -2059,6 +2060,9 @@ public class JavaIdeAdapter extends IdeAdapter {
             return null;
         }
         Path filePath = context.getFilePath();
+        if (JavaProjectConventions.isMavenPom(filePath)) {
+            return PomDiagnostics.validate(context.getText());
+        }
         if (SpringConfigSupport.isConfigFile(filePath)) {
             return pluginDiagnostics(filePath, context.getText());
         }
@@ -2982,7 +2986,8 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public IdeDiagnosticHoverPolicy getDiagnosticHoverPolicy(Path filePath) {
-        if (SpringConfigSupport.isConfigFile(filePath) || JavaProjectConventions.isJava(filePath)) {
+        if (JavaProjectConventions.isMavenPom(filePath)
+                || SpringConfigSupport.isConfigFile(filePath) || JavaProjectConventions.isJava(filePath)) {
             return IdeDiagnosticHoverPolicy.diagnosticFirst();
         }
         return IdeDiagnosticHoverPolicy.disabled();
