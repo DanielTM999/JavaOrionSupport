@@ -31,6 +31,21 @@ class DependencyManagerCoordinatorTest {
     @TempDir
     Path workspace;
 
+    @Test void editorFindsLocalArtifactOnItsFirstRequestWithoutNetwork() throws Exception {
+        Path repository = workspace.resolve("MavenRepository");
+        artifact(repository, "com.acme", "widget", "1.0.0");
+        Path project = projectUsing(repository);
+        CountingCentralClient central = new CountingCentralClient();
+        try (PluginTaskExecutor tasks = new PluginTaskExecutor("editor-catalog-test");
+             DependencyManagerCoordinator coordinator = coordinator(tasks, central, project)) {
+            var catalog = coordinator.editorCatalog();
+            assertTrue(catalog.search("com.acme:wid*").stream().anyMatch(result -> result.local()));
+            assertTrue(catalog.versions("com.acme", "widget").stream().anyMatch(choice -> choice.version().equals("1.0.0")));
+            assertEquals(0, central.searches.get());
+            assertEquals(0, central.versionLookups.get());
+        }
+    }
+
     @Test
     void repositoryEventsRefreshTheSearchWithoutQueryingTheWebAgain() throws Exception {
         Path repository = workspace.resolve("MavenRepository");

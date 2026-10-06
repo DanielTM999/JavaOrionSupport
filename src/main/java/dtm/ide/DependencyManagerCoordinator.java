@@ -64,6 +64,16 @@ final class DependencyManagerCoordinator implements DependencyManagerPanel.Host,
     private volatile RepositoryLocation repositoryLocation;
     private final AtomicBoolean warmingLocalCatalog = new AtomicBoolean();
     private volatile Runnable localChangeListener = () -> { };
+    private volatile Runnable repositoryInvalidated = () -> { };
+
+    public void onRepositoryInvalidated(Runnable listener) {
+        repositoryInvalidated = listener == null ? () -> { } : listener;
+    }
+
+    private void notifyRepositoryChanged() {
+        repositoryInvalidated.run();
+        localChangeListener.run();
+    }
     private volatile boolean localOnly;
 
     DependencyManagerCoordinator(PluginTaskExecutor tasks, MavenCentralClient central,
@@ -316,18 +326,18 @@ final class DependencyManagerCoordinator implements DependencyManagerPanel.Host,
                 if (bare.isEmpty()) {
                     return List.of();
                 }
-                List<MavenLocalRepositoryCatalog.LocalArtifact> local = localCatalogReady()
-                        ? localCatalog.search(bare, true) : List.of();
-                List<MavenCentralClient.SearchResult> remote = skipRemote(bare)
+                ensureLocalCatalog(false);
+                List<MavenLocalRepositoryCatalog.LocalArtifact> local = localCatalog.search(bare, true);
+                List<MavenCentralClient.SearchResult> remote = !local.isEmpty() || skipRemote(bare)
                         ? List.of() : remoteSearch(query).orElseGet(List::of);
                 return DependencySearchMerger.merge(bare, local, remote, true);
             }
 
             @Override
             public List<DependencyVersionChoice> versions(String groupId, String artifactId) {
-                List<String> local = localCatalogReady()
-                        ? localCatalog.versions(groupId + ":" + artifactId, true) : List.of();
-                List<String> remote = localOnly || central.isCoolingDown()
+                ensureLocalCatalog(false);
+                List<String> local = localCatalog.versions(groupId + ":" + artifactId, true);
+                List<String> remote = !local.isEmpty() || localOnly || central.isCoolingDown()
                         ? List.of() : central.versions(groupId, artifactId);
                 return DependencySearchMerger.mergeVersions(local, remote);
             }
@@ -377,6 +387,7 @@ final class DependencyManagerCoordinator implements DependencyManagerPanel.Host,
         localCatalog.close();
         remoteSearchCache.clear();
         localChangeListener = () -> { };
+        repositoryInvalidated = () -> { };
     }
 
     private synchronized void ensureLocalCatalog(boolean force) {
@@ -397,10 +408,10 @@ final class DependencyManagerCoordinator implements DependencyManagerPanel.Host,
                     localCatalog.reset();
                     configuredProject = null;
                     ensureLocalCatalog(true);
-                    localChangeListener.run();
+                    notifyRepositoryChanged();
                 });
             } else {
-                localChangeListener.run();
+                notifyRepositoryChanged();
             }
         });
     }

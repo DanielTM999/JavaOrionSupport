@@ -9,6 +9,15 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class JavaDiagnosticEditsTest {
+    @org.junit.jupiter.api.Test void editingOneErrorKeepsAnother() {
+        var first = new dtm.stools.component.panels.editor.code.diagnostics.Diagnostic(0, 0, 3,
+                dtm.stools.component.panels.editor.code.diagnostics.DiagnosticSeverity.ERROR, "first");
+        var second = new dtm.stools.component.panels.editor.code.diagnostics.Diagnostic(1, 0, 3,
+                dtm.stools.component.panels.editor.code.diagnostics.DiagnosticSeverity.ERROR, "second");
+        var result = JavaDiagnosticEdits.retainUnaffected(java.util.List.of(first, second), "bad\nbad", "good\nbad");
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(second), result);
+    }
+
 
     @Test
     void formattingAndCommentsPreserveCodeButChangedTokensDoNot() {

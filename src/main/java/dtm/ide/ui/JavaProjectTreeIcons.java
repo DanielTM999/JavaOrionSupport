@@ -20,6 +20,18 @@ public final class JavaProjectTreeIcons {
     private static final Pattern ABSTRACT = Pattern.compile("\\babstract\\b");
     private static final Pattern EXTENDS = Pattern.compile("\\G\\s*(?:<[^{]*?>\\s*)?extends\\s+([\\w.]+)");
     private static final Pattern THROWABLE_NAME = Pattern.compile("\\w*Exception|\\w*Error|Throwable");
+    private static final Map<Path, Kind> OPEN_KINDS = new ConcurrentHashMap<>();
+
+    public static void updateOpenSource(Path file, String source) {
+        if (!isJava(file)) return;
+        Kind kind = kindFor(file.getFileName().toString(), source);
+        if (kind != Kind.NONE) OPEN_KINDS.put(file.toAbsolutePath().normalize(), kind);
+    }
+
+    public static void closeSource(Path file) {
+        if (file != null) OPEN_KINDS.remove(file.toAbsolutePath().normalize());
+    }
+
     private static final Map<Path, CachedKind> CACHE = new ConcurrentHashMap<>();
 
     enum Kind {
@@ -37,6 +49,8 @@ public final class JavaProjectTreeIcons {
     }
 
     static Kind kindOf(Path file) {
+        Kind open = file == null ? null : OPEN_KINDS.get(file.toAbsolutePath().normalize());
+        if (open != null) return open;
         if (!isJava(file) || !Files.isRegularFile(file)) {
             return Kind.NONE;
         }

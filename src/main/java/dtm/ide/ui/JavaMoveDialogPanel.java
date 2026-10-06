@@ -8,7 +8,6 @@ import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
-import javax.swing.JCheckBox;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -28,12 +27,13 @@ import java.util.function.Consumer;
 
 public final class JavaMoveDialogPanel extends JPanel {
 
-    public enum Choice { REFACTOR, MOVE_ONLY, CANCEL }
+    public enum Choice { REFACTOR, PACKAGE_ONLY, MOVE_ONLY, CANCEL }
 
     private static final int MAX_LISTED = 6;
 
     private final Consumer<Choice> onChosen;
-    private final JCheckBox updateReferences = new JCheckBox();
+    private final javax.swing.JComboBox<String> mode = new javax.swing.JComboBox<>(new String[] {
+            text("mode.references", "Package + imports/references"), text("mode.package", "Package only"), text("mode.move", "Move without adjustments") });
     private final JButton confirmButton = new JButton();
     private boolean answered;
 
@@ -75,12 +75,10 @@ public final class JavaMoveDialogPanel extends JPanel {
         }
 
         body.add(Box.createVerticalStrut(12));
-        updateReferences.setText(text("updateReferences", "Update package, imports and references"));
-        updateReferences.setOpaque(false);
-        updateReferences.setSelected(!plan.hasConflicts());
-        updateReferences.setEnabled(!plan.hasConflicts());
-        updateReferences.addActionListener(event -> refreshConfirmText());
-        body.add(left(updateReferences));
+        mode.setSelectedIndex(plan.hasConflicts() ? 2 : 0);
+        mode.setEnabled(!plan.hasConflicts());
+        mode.addActionListener(event -> refreshConfirmText());
+        body.add(left(mode));
 
         if (plan.hasConflicts()) {
             body.add(Box.createVerticalStrut(8));
@@ -93,7 +91,8 @@ public final class JavaMoveDialogPanel extends JPanel {
 
         JButton cancelButton = new JButton(text("cancel", "Cancel"));
         cancelButton.addActionListener(event -> answer(Choice.CANCEL));
-        confirmButton.addActionListener(event -> answer(updateReferences.isSelected() ? Choice.REFACTOR : Choice.MOVE_ONLY));
+        confirmButton.addActionListener(event -> answer(mode.getSelectedIndex() == 0 ? Choice.REFACTOR
+                : mode.getSelectedIndex() == 1 ? Choice.PACKAGE_ONLY : Choice.MOVE_ONLY));
         confirmButton.putClientProperty("JButton.buttonType", "default");
         refreshConfirmText();
 
@@ -137,7 +136,7 @@ public final class JavaMoveDialogPanel extends JPanel {
     }
 
     private void refreshConfirmText() {
-        confirmButton.setText(updateReferences.isSelected()
+        confirmButton.setText(mode.getSelectedIndex() != 2
                 ? text("refactor", "Refactor")
                 : text("moveOnly", "Move"));
     }

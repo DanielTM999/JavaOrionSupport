@@ -123,6 +123,21 @@ public final class JavaDiagnosticEdits {
         return "+-*/%=&|^!<>?:~.".indexOf(c) >= 0;
     }
 
+    public static List<Diagnostic> retainUnaffected(Collection<Diagnostic> previous, String before, String after) {
+        if (previous == null || previous.isEmpty()) return List.of();
+        if (before == null || after == null || before.equals(after)) return List.copyOf(previous);
+        Change change = Change.of(before, after);
+        int[] lines = lineStarts(before);
+        List<Diagnostic> retained = previous.stream().filter(d -> {
+            int start = offset(before, lines, d.startLine(), d.startCol());
+            int end = offset(before, lines, d.endLine(), d.endCol());
+            return change.prefix() == change.oldEnd()
+                    ? !(start <= change.prefix() && change.prefix() < Math.max(start + 1, end))
+                    : !(start < change.oldEnd() && Math.max(start + 1, end) > change.prefix());
+        }).toList();
+        return move(retained, before, after);
+    }
+
     public static List<Diagnostic> move(Collection<Diagnostic> previous, String before, String after) {
         if (previous == null || previous.isEmpty()) return List.of();
         if (before == null || after == null) return List.copyOf(previous);

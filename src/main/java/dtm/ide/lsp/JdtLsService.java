@@ -227,6 +227,7 @@ public class JdtLsService {
     private volatile String lastError;
     private volatile String startupFailure;
     private volatile Path projectRoot;
+    private volatile Path launchedMavenRepository;
     private volatile Process process;
     private volatile LspJsonRpcClient client;
     private volatile JdtLsWorkspaceLease workspaceLease;
@@ -910,6 +911,13 @@ public class JdtLsService {
         }
     }
 
+    private Path resolveMavenRepository() {
+        if (projectRoot == null) return null;
+        var project = dtm.ide.project.JavaProjectConventions.describe(projectRoot);
+        return project == null || !project.isMaven() ? null
+                : new dtm.ide.deps.MavenLocalRepositoryResolver().resolve(project, null).repository();
+    }
+
     List<String> buildCommand(JdkInstallation runtime,
                               JdtLsProvisioner.JdtLsInstallation installation,
                               Path workspace) {
@@ -920,6 +928,8 @@ public class JdtLsService {
         command.add("-Declipse.product=org.eclipse.jdt.ls.core.product");
         command.add("-Dlog.level=WARNING");
         command.add("-Dfile.encoding=UTF-8");
+        launchedMavenRepository = resolveMavenRepository();
+        if (launchedMavenRepository != null) command.add("-Dmaven.repo.local=" + launchedMavenRepository);
         command.add("-Djava.import.generatesMetadataFilesAtProjectRoot=false");
         command.add("-DDetectVMInstallationsJob.disabled=true");
         command.add("-Dsun.zip.disableMemoryMapping=true");
@@ -1265,6 +1275,7 @@ public class JdtLsService {
         JdkInstallation configuredJdk = preferredProjectJdk == null ? runtime : preferredProjectJdk;
         effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode,
                 inlayHintsMode);
+        effectiveSettings = JdtLsSettings.withMavenSettings(effectiveSettings, root);
         params.put("initializationOptions", initializationOptions(effectiveSettings, bundlePaths));
 
         JsonNode result = awaitWhileAlive(rpc.request("initialize", params),
@@ -1363,10 +1374,17 @@ public class JdtLsService {
         if (rpc == null) {
             return false;
         }
+        if (!java.util.Objects.equals(launchedMavenRepository, resolveMavenRepository())) return false;
+        effectiveSettings = JdtLsSettings.withMavenSettings(effectiveSettings, projectRoot);
+        rpc.notify("workspace/didChangeConfiguration", Map.of("settings", effectiveSettings));
         clearNavigationCache(null);
         rpc.notify("java/projectConfigurationUpdate",
                 Map.of("uri", LspConversions.toUri(projectRoot)));
         return true;
+    }
+
+    public void resynchronizeAfterProjectUpdate() {
+        resynchronizeOpenDocuments(resyncMode(), false, "Java: documentos sincronizados com o projeto");
     }
 
     public String buildWorkspace(boolean fullBuild) {
@@ -2135,9 +2153,8 @@ public class JdtLsService {
         cancelInFlightForUri(uri);
         Path key = normalizePath(filePath);
         List<Diagnostic> oldDiagnostics = diagnosticsByPath.get(key);
-        boolean sameCode = JavaDiagnosticEdits.sameCode(previous, content);
-        List<Diagnostic> nextDiagnostics = sameCode && oldDiagnostics != null
-                ? JavaDiagnosticEdits.move(oldDiagnostics, previous, content) : null;
+        List<Diagnostic> nextDiagnostics = oldDiagnostics != null
+                ? JavaDiagnosticEdits.retainUnaffected(oldDiagnostics, previous, content) : null;
         if (nextDiagnostics == null) {
             diagnosticsByPath.remove(key);
         } else {
@@ -2444,8 +2461,8 @@ public class JdtLsService {
         if (cached.text().equals(text) && cached.col() == col) {
             return true;
         }
-        return !cached.incomplete()
-                && cached.linePrefix().equals(linePrefixAtWordStart(text, line, col));
+        return !cached.incomplete() && extendsCachedWord(cached.text(), line, cached.col(), text, col)
+                && cached.items().stream().allMatch(item -> item.replacementRange() == null && !item.hasAdditionalTextEdits());
     }
 
     public List<AutoCompleteItem> reusableCompletions(Path filePath, String text, int line, int col) {
@@ -2453,6 +2470,7 @@ public class JdtLsService {
         CompletionCache cached = completionCache.get(LspConversions.toUri(filePath));
         if (cached == null || cached.incomplete() || cached.line() != line) return List.of();
         return extendsCachedWord(cached.text(), line, cached.col(), text, col)
+                && cached.items().stream().allMatch(item -> item.replacementRange() == null && !item.hasAdditionalTextEdits())
                 ? cached.items()
                 : List.of();
     }
@@ -3403,7 +3421,8 @@ public class JdtLsService {
     public List<TextEdit> generateConstructors(Path filePath, String text, int line, int col,
                                                 List<SourceItem> constructors,
                                                 List<SourceItem> fields) {
-        return generatedEdits("java/generateConstructors", filePath, text, line, col,
+        var insertion = dtm.ide.editor.ConstructorPlacement.afterFields(text, line, col);
+        return generatedEdits("java/generateConstructors", filePath, text, insertion.line(), insertion.col(),
                 Map.of("constructors", rawValues(constructors), "fields", rawValues(fields)));
     }
 

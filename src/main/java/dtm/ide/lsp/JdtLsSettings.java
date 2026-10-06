@@ -4,6 +4,7 @@ import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.settings.InlayHintsMode;
 import dtm.ide.settings.JdtBuildMode;
 
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -77,6 +78,21 @@ final class JdtLsSettings {
         java.put("maxConcurrentBuilds", Math.max(1, Runtime.getRuntime().availableProcessors() / 2));
         java.put("errors", Map.of("incompleteClasspath", Map.of("severity", "warning")));
 
+        return Map.of("java", java);
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> withMavenSettings(Map<String, Object> settings, java.nio.file.Path root) {
+        var resolver = new dtm.ide.deps.MavenLocalRepositoryResolver();
+        Map<String, Object> java = new LinkedHashMap<>((Map<String, Object>) settings.getOrDefault("java", Map.of()));
+        Map<String, Object> configuration = new LinkedHashMap<>((Map<String, Object>) java.getOrDefault("configuration", Map.of()));
+        Map<String, Object> maven = new LinkedHashMap<>();
+        var user = resolver.userSettings(root);
+        var global = resolver.globalSettings();
+        if (user != null && Files.isRegularFile(user)) maven.put("userSettings", user.toString());
+        if (global != null && Files.isRegularFile(global)) maven.put("globalSettings", global.toString());
+        configuration.put("maven", maven);
+        java.put("configuration", configuration);
         return Map.of("java", java);
     }
 

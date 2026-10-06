@@ -19,6 +19,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BuildFileCompletionProviderTest {
+    @Test void indentsEveryDependencySnippetLine() {
+        var items = complete("pom.xml", "<project>\n    <dependencies>\n        <dep");
+        var item = items.stream().filter(i -> i.label().equals("dependency")).findFirst().orElseThrow();
+        assertTrue(item.insertText().contains("\n            <groupId>"));
+        assertTrue(item.insertText().contains("\n        </dependency>"));
+    }
+
 
     private static final class FakeClient implements BuildFileCompletionProvider.Catalog {
 

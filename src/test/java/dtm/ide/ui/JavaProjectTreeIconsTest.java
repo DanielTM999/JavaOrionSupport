@@ -16,6 +16,17 @@ class JavaProjectTreeIconsTest {
     @TempDir
     Path directory;
 
+    @Test void unsavedRecordAndIncompleteDeclarationKeepJavaIcon() throws IOException {
+        Path file = directory.resolve("State.java");
+        Files.writeString(file, "class State {}");
+        JavaProjectTreeIcons.updateOpenSource(file, "record State() {}");
+        assertSame(JavaIcons.javaRecord(16), JavaProjectTreeIcons.iconOf(file, 16));
+        JavaProjectTreeIcons.updateOpenSource(file, "rec State() {}");
+        assertSame(JavaIcons.javaRecord(16), JavaProjectTreeIcons.iconOf(file, 16));
+        JavaProjectTreeIcons.closeSource(file);
+        assertSame(JavaIcons.javaClass(16), JavaProjectTreeIcons.iconOf(file, 16));
+    }
+
     @Test
     void identifiesMainJavaDeclarationAndIgnoresCommentsAndStrings() {
         assertEquals(JavaProjectTreeIcons.Kind.CLASS, JavaProjectTreeIcons.kindFor("Pedido.java",

@@ -102,24 +102,17 @@ final class BuildProblemsCoordinator {
     /** Shifts every located problem of {@code file} with a single pass over both texts. */
     private static List<BuildDiagnostic> moved(List<BuildDiagnostic> problems, Path file,
                                                String before, String after) {
-        List<Integer> indexes = new ArrayList<>();
-        List<Diagnostic> located = new ArrayList<>();
-        for (int i = 0; i < problems.size(); i++) {
-            BuildDiagnostic problem = problems.get(i);
-            if (file.equals(problem.file()) && problem.hasLocation()) {
-                indexes.add(i);
-                located.add(problem.toEditorDiagnostic());
+        List<BuildDiagnostic> result = new ArrayList<>();
+        for (BuildDiagnostic problem : problems) {
+            if (!file.equals(problem.file()) || !problem.hasLocation()) {
+                result.add(problem);
+                continue;
             }
-        }
-        if (located.isEmpty()) return problems;
-        List<Diagnostic> shifted = JavaDiagnosticEdits.move(located, before, after);
-        List<BuildDiagnostic> result = new ArrayList<>(problems);
-        for (int k = 0; k < indexes.size(); k++) {
-            BuildDiagnostic problem = problems.get(indexes.get(k));
-            Diagnostic moved = shifted.get(k);
-            if (moved.startLine() != problem.line() - 1
-                    || moved.startCol() != Math.max(0, problem.column() - 1)) {
-                result.set(indexes.get(k), new BuildDiagnostic(problem.file(), moved.startLine() + 1,
+            List<Diagnostic> retained = JavaDiagnosticEdits.retainUnaffected(
+                    List.of(problem.toEditorDiagnostic()), before, after);
+            if (!retained.isEmpty()) {
+                Diagnostic moved = retained.getFirst();
+                result.add(new BuildDiagnostic(problem.file(), moved.startLine() + 1,
                         moved.startCol() + 1, problem.severity(), problem.message(), problem.source()));
             }
         }

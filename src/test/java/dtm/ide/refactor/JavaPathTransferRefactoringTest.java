@@ -135,6 +135,21 @@ class JavaPathTransferRefactoringTest {
         assertTrue(copied.contains("public class Foo {"), copied);
     }
 
+    @Test
+    void packageOnlyLeavesReferencesUntouched() throws Exception {
+        Path foo = write("demo/a/Foo.java", "package demo.a;\npublic class Foo {}\n");
+        Path user = write("demo/b/User.java", "package demo.b;\nimport demo.a.Foo;\nclass User { Foo f; }\n");
+        String originalUser = Files.readString(user);
+        Path target = Files.createDirectories(sources.resolve("demo/c"));
+        host.moveChoice = JavaMoveDialogPanel.Choice.PACKAGE_ONLY;
+        var request = move(target, foo, target.resolve("Foo.java"));
+        refactoring.before(request);
+        Files.move(foo, target.resolve("Foo.java"));
+        apply(refactoring.after(request));
+        assertTrue(Files.readString(target.resolve("Foo.java")).startsWith("package demo.c;"));
+        assertEquals(originalUser, Files.readString(user));
+    }
+
     private static void apply(IdeWorkspaceEdit edit) throws Exception {
         for (IdeWorkspaceEdit.Operation operation : edit.operations()) {
             if (operation instanceof IdeWorkspaceEdit.TextEdits textEdits) {

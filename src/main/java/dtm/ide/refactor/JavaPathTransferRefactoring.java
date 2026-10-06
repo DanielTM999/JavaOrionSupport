@@ -86,7 +86,7 @@ public final class JavaPathTransferRefactoring {
             log.warn("Falha ao ajustar os fontes Java depois de {} para {}", request.kind(),
                     request.targetDirectory(), e);
             host.warn(e.getMessage());
-            return IdeWorkspaceEdit.empty();
+            throw e;
         }
     }
 
@@ -95,11 +95,39 @@ public final class JavaPathTransferRefactoring {
         if (choice == null || choice == JavaMoveDialogPanel.Choice.CANCEL) {
             return PathTransferDecision.cancel();
         }
-        if (choice == JavaMoveDialogPanel.Choice.MOVE_ONLY || plan.hasConflicts()) {
+        if (choice == JavaMoveDialogPanel.Choice.MOVE_ONLY) {
             return PathTransferDecision.proceed();
         }
-        pending.put(key(request), new Pending(plan, computeMoveEdit(plan), true));
+        if (plan.hasConflicts()) {
+            host.warn("Conflito no destino: " + String.join(", ", plan.conflicts()));
+            return PathTransferDecision.cancel();
+        }
+        IdeWorkspaceEdit prepared = choice == JavaMoveDialogPanel.Choice.PACKAGE_ONLY
+                ? packageOnlyEdit(plan) : computeMoveEdit(plan);
+        if (prepared == null) {
+            prepared = rewrites(lexicalMove(plan, true));
+            host.warn(text("move.lexicalFallback",
+                    "The Java server was not available: package and imports were adjusted by text; review the references."));
+        }
+        pending.put(key(request), new Pending(plan, prepared, true));
         return PathTransferDecision.proceed();
+    }
+
+    private IdeWorkspaceEdit packageOnlyEdit(JavaPathTransferPlan plan) {
+        Map<Path, String> texts = new LinkedHashMap<>();
+        for (JavaPathTransferPlan.FileTransfer file : plan.files()) {
+            String original = host.readText(file.source());
+            if (original == null) throw new IllegalStateException("Cannot read " + file.source());
+            texts.put(file.source(), JavaSourceRelocator.withPackage(original, file.newPackage()));
+        }
+        for (JavaPathTransferPlan.FolderTransfer folder : plan.folders()) {
+            for (Path file : javaFilesUnder(folder.source())) {
+                String relative = folder.source().relativize(file.getParent()).toString().replace('\\', '.').replace('/', '.');
+                String pkg = folder.newPackage() + (relative.isEmpty() ? "" : "." + relative);
+                texts.put(file, JavaSourceRelocator.withPackage(host.readText(file), pkg));
+            }
+        }
+        return rewrites(texts);
     }
 
     private PathTransferDecision beforeCopy(PathTransferRequest request, JavaPathTransferPlan plan) {
@@ -163,10 +191,14 @@ public final class JavaPathTransferRefactoring {
     }
 
     Map<Path, String> lexicalMove(JavaPathTransferPlan plan) {
+        return lexicalMove(plan, false);
+    }
+
+    private Map<Path, String> lexicalMove(JavaPathTransferPlan plan, boolean beforeMove) {
         Map<Path, String> texts = new LinkedHashMap<>();
         List<Path> projectSources = projectJavaFiles();
         for (JavaPathTransferPlan.FileTransfer file : plan.files()) {
-            Path movedFile = file.target();
+            Path movedFile = beforeMove ? file.source() : file.target();
             String movedText = textOf(texts, movedFile);
             if (movedText != null) {
                 texts.put(movedFile, JavaSourceRelocator.relocateMovedType(movedText, file.newPackage(),

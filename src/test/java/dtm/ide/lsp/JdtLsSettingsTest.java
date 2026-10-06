@@ -21,6 +21,21 @@ class JdtLsSettingsTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void sendsProjectMavenSettingsToTheLanguageServer() throws Exception {
+        Files.createDirectories(root.resolve(".mvn"));
+        Path settingsFile = Files.writeString(root.resolve("team-settings.xml"), "<settings/>");
+        Files.writeString(root.resolve(".mvn/maven.config"), "--settings team-settings.xml");
+        var base = JdtLsSettings.build(null, List.of(), JdtBuildMode.PROJECT_BUILD);
+        var settings = JdtLsSettings.withMavenSettings(base, root);
+        var java = (Map<String, Object>) settings.get("java");
+        var configuration = (Map<String, Object>) java.get("configuration");
+        var maven = (Map<String, Object>) configuration.get("maven");
+        assertEquals(settingsFile.toString(), maven.get("userSettings"));
+        assertEquals("automatic", configuration.get("updateBuildConfiguration"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void enablesCodeLensAndMarksProjectJdkAsDefault() throws Exception {
         JdkInstallation jdk21 = jdk(21);
         JdkInstallation jdk25 = jdk(25);

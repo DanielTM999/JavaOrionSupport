@@ -213,7 +213,8 @@ final class LspConversions {
                 kind,
                 textEdits(node.get("additionalTextEdits")),
                 false,
-                resolvable ? node.deepCopy() : null);
+                resolvable ? node.deepCopy() : null,
+                edit == null ? null : range(edit.has("replace") ? edit.get("replace") : edit.get("range")));
     }
 
     static String labelDetails(JsonNode node) {
@@ -289,7 +290,7 @@ final class LspConversions {
         String detail = resolved.path("detail").asText(null);
         return new AutoCompleteItem(item.insertText(), item.label(), item.detail(),
                 completionDescription(detail, docs), item.icon(), item.kind(), item.additionalTextEdits(),
-                item.unused(), null);
+                item.unused(), null, item.replacementRange());
     }
 
     static String completionDescription(String detail, String documentation) {

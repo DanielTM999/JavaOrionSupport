@@ -283,8 +283,34 @@ final class PomStructureCompletion {
         } else {
             suffix = ">$0</" + name + ">";
         }
+        String head = insertion.head();
+        String line = head.substring(head.lastIndexOf('\n') + 1);
+        String indent = line.substring(0, line.length() - line.stripLeading().length());
+        String unit = indentationUnit(head);
+        String[] lines = suffix.split("\n", -1);
+        for (int i = 1; i < lines.length; i++) {
+            int spaces = 0;
+            while (spaces < lines[i].length() && lines[i].charAt(spaces) == ' ') spaces++;
+            lines[i] = indent + unit.repeat(spaces / 4) + " ".repeat(spaces % 4) + lines[i].substring(spaces);
+        }
+        suffix = String.join("\n", lines);
         return insertion.item(name, typed, suffix, ELEMENT_DETAIL, "<" + name + ">",
                 AutoCompleteItem.Kind.SNIPPET);
+    }
+
+    static String indentationUnit(String text) {
+        int width = 0;
+        for (String line : text.split("\n")) {
+            int count = line.length() - line.stripLeading().length();
+            if (count == 0 || line.isBlank()) continue;
+            if (line.substring(0, count).contains("\t")) return "\t";
+            if (width == 0) width = count;
+            else {
+                int next = count;
+                while (next != 0) { int remainder = width % next; width = next; next = remainder; }
+            }
+        }
+        return " ".repeat(width > 0 && width <= 8 ? width : 4);
     }
 
     private static List<AutoCompleteItem> values(String element, String parent, String typed,

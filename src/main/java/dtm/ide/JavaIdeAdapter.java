@@ -531,6 +531,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
     private final Set<Path> pendingModuleDirectoryRenames = ConcurrentHashMap.newKeySet();
     private final AtomicLong syncGeneration = new AtomicLong();
+    private final AtomicLong automaticSyncTicket = new AtomicLong();
+    private final AtomicBoolean syncRunning = new AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicInteger automaticSyncAttempts = new java.util.concurrent.atomic.AtomicInteger();
     private final AtomicReference<SyncWork> syncWork = new AtomicReference<>();
     private final MavenPluginGoals pluginGoals = new MavenPluginGoals(this::pluginRepository);
     private volatile Path pluginRepositoryRoot;
@@ -683,6 +686,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         lspProgress.set(0);
         hideProgress(LSP_PROGRESS_ID);
         syncGeneration.incrementAndGet();
+        syncRunning.set(false);
+        automaticSyncTicket.incrementAndGet();
         syncWork.set(null);
         hideProgress(SYNC_PROGRESS_ID);
         JavaBuildToolsPanel toolsPanel = buildToolsPanel;
@@ -2832,11 +2837,8 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public JavaMoveDialogPanel.Choice askMove(JavaPathTransferPlan plan) {
-            if (SwingUtilities.isEventDispatchThread()) {
-                return JavaMoveDialogPanel.Choice.MOVE_ONLY;
-            }
             CompletableFuture<JavaMoveDialogPanel.Choice> answer = new CompletableFuture<>();
-            SwingUtilities.invokeLater(() -> {
+            Runnable open = () -> {
                 JavaMoveDialogPanel panel = new JavaMoveDialogPanel(plan, answer::complete);
                 showPopup(PlatformPopupBuilder.builder()
                         .component(panel)
@@ -2846,8 +2848,13 @@ public class JavaIdeAdapter extends IdeAdapter {
                         .onLoad(component -> panel.focusConfirm())
                         .onClose(component -> panel.closed())
                         .build());
-            });
-            return await(answer, JavaMoveDialogPanel.Choice.CANCEL);
+            };
+            if (SwingUtilities.isEventDispatchThread()) open.run();
+            else {
+                SwingUtilities.invokeLater(open);
+                return await(answer, JavaMoveDialogPanel.Choice.CANCEL);
+            }
+            return answer.getNow(JavaMoveDialogPanel.Choice.CANCEL);
         }
 
         @Override
@@ -3826,9 +3833,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                         ? lsp.documentSymbols(filePath, context.text())
                         : lsp.documentSymbolsInteractive(filePath, context.text());
         if (precise != null && !precise.isEmpty()) {
-            return precise;
-        }
-        if (lsp != null && lsp.isReady() && !lsp.isWarmingUp()) {
             return precise;
         }
         List<DocumentSymbol> outline = lexicalIndex.outline(context.text());
@@ -5847,21 +5851,20 @@ public class JavaIdeAdapter extends IdeAdapter {
             Path edited = editorContext.filePath().toAbsolutePath().normalize();
             String currentText = Objects.toString(editorContext.getText(), "");
             String previousText = lastEditorContents.put(edited, currentText);
+            JavaProjectTreeIcons.updateOpenSource(edited, currentText);
+            requestJavaTreeIconRefresh(edited);
             if (lsp != null) {
                 lsp.changeDocument(editorContext.filePath(), currentText);
             }
-            if (JavaDiagnosticEdits.sameCode(previousText, currentText)) {
-                if (problems.move(edited, previousText, currentText)) refreshProblemsPanel();
-            } else if (problems.supersedeAll(edited)) {
-                requestRefreshDiagnostics(edited);
-                refreshProblemsPanel();
-            }
+            if (problems.move(edited, previousText, currentText)) refreshProblemsPanel();
             scheduleRunButtonsRefresh();
         }
     }
 
     @Override
     public void onEditorClose(Path filePath) {
+        JavaProjectTreeIcons.closeSource(filePath);
+        requestJavaTreeIconRefresh(filePath);
         autoCompleteIdle.cancel();
         IdeEditorContext active = activeJavaEditor;
         if (active != null && Objects.equals(JavaProjectConventions.normalize(active.filePath()),
@@ -6257,10 +6260,45 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void addTemplateItems(IdeMenuBuilder target, List<JavaFileTemplates.Kind> kinds,
                                   Path directory) {
+        if (descriptor != null && descriptor.kind().hasBuildTool()) {
+            target.item(text("new.module", "Modulo..."), JavaIcons.module(JavaIcons.SMALL), event -> createJavaModule(directory));
+        }
         for (JavaFileTemplates.Kind kind : kinds) {
             target.item(kind.displayName(), iconFor(kind),
                     event -> createJavaFile(kind, directory));
         }
+    }
+
+    private void createJavaModule(Path directory) {
+        JavaProjectDescriptor project = descriptor;
+        if (project == null) return;
+        String name = createModernInputDialogBuilder().title("Novo modulo")
+                .message("Nome do modulo em " + directory + ":").show();
+        if (name == null || name.isBlank()) return;
+        background.submit(() -> {
+            try {
+                var plan = dtm.ide.wizard.JavaModuleScaffolder.prepare(project, directory, name.trim());
+                String openParent = readCurrentText(plan.parentBuild());
+                if (openParent != null && !Objects.equals(openParent.replace("\r\n", "\n"),
+                        plan.previousParent() == null ? null : plan.previousParent().replace("\r\n", "\n")))
+                    throw new IllegalStateException("Salve as alteracoes do build pai antes de criar o modulo.");
+                boolean accepted = !plan.convertsPackaging() || onUi(() -> JavaSourceActionDialogs.confirm(
+                        createModernComponentDialogBuilder(Boolean.class), "Converter projeto em agregador",
+                        "O POM pai sera convertido para packaging pom. Seus fontes deixarao de ser compilados neste modulo. Continuar?", "Converter e criar"));
+                if (!accepted) return;
+                dtm.ide.wizard.JavaModuleScaffolder.create(plan);
+                SwingUtilities.invokeLater(() -> {
+                    IdeEditorContext editor = editorContextFor(plan.parentBuild());
+                    if (editor != null) editor.setText(plan.updatedParent());
+                    requestProjectTreeViewRefresh();
+                    onBuildFileChanged(plan.parentBuild());
+                    openAt(plan.files().keySet().iterator().next(), 0, 0);
+                });
+            } catch (Exception error) {
+                log.warn("Falha ao criar modulo", error);
+                setStatusBarText("Java: " + error.getMessage());
+            }
+        });
     }
 
     private static Icon iconFor(JavaFileTemplates.Kind kind) {
@@ -9134,6 +9172,13 @@ public class JavaIdeAdapter extends IdeAdapter {
                     lifecycle::get, () -> projectRoot, this::current,
                     this::afterDependencyChange);
             dependencyCoordinator = current;
+            current.onRepositoryInvalidated(() -> {
+                BuildSystem build = buildSystem;
+                if (build != null) build.invalidateClasspathCache();
+                automaticSyncAttempts.set(0);
+                scheduleAutomaticSync();
+            });
+            current.warmLocalCatalog();
             JavaPluginSettings active = settings;
             if (active != null) {
                 current.setLocalOnly(active.isDependencySearchLocalOnly());
@@ -9157,6 +9202,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     public void syncProject() {
         Path root = projectRoot;
         if (root == null) {
+            return;
+        }
+        if (!syncRunning.compareAndSet(false, true)) {
+            buildToolsSyncPending.set(true);
             return;
         }
         long ticket = lifecycle.get();
@@ -9201,7 +9250,15 @@ public class JavaIdeAdapter extends IdeAdapter {
                 waiting = true;
                 work.completion().whenComplete((ignored, error) -> {
                     syncWork.compareAndSet(work, null);
-                    finishSync(generation, ticket, root, true);
+                    boolean recovered = error == null;
+                    try {
+                        if (recovered && current(ticket, root) && syncGeneration.get() == generation) lsp.resynchronizeAfterProjectUpdate();
+                    } catch (Exception failure) {
+                        recovered = false;
+                        log.warn("Falha ao sincronizar documentos apos atualizar o projeto", failure);
+                    } finally {
+                        finishSync(generation, ticket, root, recovered);
+                    }
                 });
             } finally {
                 if (!waiting) {
@@ -9215,6 +9272,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (syncGeneration.get() != generation) {
             return;
         }
+        syncRunning.set(false);
+        if (buildToolsSyncPending.getAndSet(false)) scheduleAutomaticSync();
+        else if (!synced && current(ticket, root) && automaticSyncAttempts.incrementAndGet() <= 3) scheduleAutomaticSync();
         hideProgress(SYNC_PROGRESS_ID);
         JavaBuildToolsPanel panel = buildToolsPanel;
         if (panel != null) {
@@ -9261,28 +9321,41 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void onBuildFileChanged(Path filePath) {
-        if (!buildToolsSyncPending.compareAndSet(false, true)) {
-            return;
-        }
+        buildToolsSyncPending.set(true);
+        automaticSyncAttempts.set(0);
         JavaBuildToolsPanel panel = buildToolsPanel;
-        if (panel != null) {
-            panel.setSyncPending(true);
+        if (panel != null) panel.setSyncPending(true);
+        scheduleAutomaticSync();
+    }
+
+    private void scheduleAutomaticSync() {
+        long ticket = automaticSyncTicket.incrementAndGet();
+        long session = lifecycle.get();
+        background.schedule(() -> {
+            Path root = projectRoot;
+            if (root == null || session != lifecycle.get() || ticket != automaticSyncTicket.get()) return;
+            if (descriptor != null && descriptor.isMaven()) {
+                if (!validMavenReactor(root.resolve("pom.xml"), new java.util.HashSet<>())) {
+                    setStatusBarText("Java: corrija o POM; a sincronizacao sera retomada automaticamente");
+                    return;
+                }
+            }
+            SwingUtilities.invokeLater(this::syncProject);
+        }, 1200, TimeUnit.MILLISECONDS);
+    }
+
+    static boolean validMavenReactor(Path file, Set<Path> visited) {
+        Path normalized = file.toAbsolutePath().normalize();
+        if (!visited.add(normalized)) return true;
+        dtm.ide.project.MavenPom pom = dtm.ide.project.MavenPom.parse(normalized);
+        if (!pom.isValid()) return false;
+        for (String module : pom.values("modules", "module")) {
+            if (module.contains("${")) continue;
+            Path child = normalized.getParent().resolve(module).normalize();
+            if (!child.getFileName().toString().endsWith(".xml")) child = child.resolve("pom.xml");
+            if (!validMavenReactor(child, visited)) return false;
         }
-        setStatusBarText(text("status.syncPending",
-                "Java: o arquivo de build mudou - sincronize o projeto"));
-        Path root = projectRoot;
-        JdtLsService lsp = jdtLs;
-        if (root != null && lsp != null) {
-            background.submit(() -> restartWhenLombokAgentChanged(lsp,
-                    JavaProjectConventions.describe(root)));
-        }
-        createNotification(NotificationContext.builder()
-                .title(text("notification.syncTitle", "Build alterado"))
-                .message(text("notification.syncMessage",
-                        "O arquivo de build mudou. Sincronizar o projeto agora?"))
-                .icon(JavaIcons.sync(JavaIcons.SMALL))
-                .action(this::syncProject)
-                .build());
+        return true;
     }
 
     public void openProjectStructure() {

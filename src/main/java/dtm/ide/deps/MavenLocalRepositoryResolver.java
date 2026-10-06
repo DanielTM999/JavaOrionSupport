@@ -50,6 +50,20 @@ public final class MavenLocalRepositoryResolver {
         this.environment = environment == null ? Map.of() : Map.copyOf(environment);
     }
 
+    public Path userSettings(Path root) {
+        Path projectConfig = root == null ? null : root.resolve(".mvn/maven.config");
+        String arguments = String.join(" ", environment.getOrDefault("MAVEN_OPTS", ""),
+                environment.getOrDefault("MAVEN_ARGS", ""), read(projectConfig));
+        String selected = argument(SETTINGS_ARGUMENT, arguments);
+        return selected.isBlank() ? userHome == null ? null : userHome.resolve(".m2/settings.xml")
+                : resolvePath(expand(selected), root);
+    }
+
+    public Path globalSettings() {
+        String home = environment.getOrDefault("MAVEN_HOME", environment.getOrDefault("M2_HOME", ""));
+        return home.isBlank() ? null : resolvePath(home, userHome).resolve("conf/settings.xml");
+    }
+
     public Resolution resolve(JavaProjectDescriptor descriptor, BuildSystem buildSystem) {
         Path root = descriptor == null ? null : descriptor.root();
         Set<Path> configuration = new LinkedHashSet<>();

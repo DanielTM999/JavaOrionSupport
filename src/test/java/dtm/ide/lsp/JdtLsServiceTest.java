@@ -19,6 +19,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdtLsServiceTest {
 
+    @Test void typingElsewhereKeepsPublishedErrorUntilNewAnalysis() {
+        JdtLsService service = new JdtLsService(null, null, null, null);
+        Path source = root.resolve("A.java");
+        service.openDocument(source, "class A {\n bad value;\n}");
+        service.settleDiagnostics();
+        var params = new ObjectMapper().valueToTree(Map.of("uri", source.toUri().toString(),
+                "diagnostics", List.of(Map.of("range", Map.of(
+                        "start", Map.of("line", 1, "character", 1), "end", Map.of("line", 1, "character", 4)),
+                        "severity", 1, "message", "Unknown type", "source", "Java"))));
+        service.onPublishDiagnostics(params);
+        service.changeDocument(source, "class Another {\n bad value;\n}");
+        assertEquals(1, service.diagnostics(source).size());
+        service.changeDocument(source, "class Another {\n int value;\n}");
+        assertTrue(service.diagnostics(source).isEmpty());
+        service.stop();
+    }
+
     @Test
     void exposesEssentialEditingWhileTheWorkspaceIsIndexing() {
         assertFalse(JdtLsService.isInteractiveState(JdtLsService.State.STARTING));
