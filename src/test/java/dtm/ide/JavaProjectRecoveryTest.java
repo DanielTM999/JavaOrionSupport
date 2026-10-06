@@ -18,4 +18,18 @@ class JavaProjectRecoveryTest {
         Files.writeString(fixture, "<project>");
         assertTrue(JavaIdeAdapter.validMavenReactor(pom, new HashSet<>()));
     }
+    @Test void jdkRequirementChangeIsDetectedWhenPomSwitchesFromSourceToRelease() throws Exception {
+        Path pom = root.resolve("pom.xml");
+        Files.writeString(pom, "<project><properties><maven.compiler.source>21</maven.compiler.source>"
+                + "<maven.compiler.target>21</maven.compiler.target></properties></project>");
+        dtm.ide.project.JavaProjectDescriptor before = dtm.ide.project.JavaProjectConventions.describe(root);
+        Files.writeString(pom, "<project><properties><maven.compiler.release>25</maven.compiler.release>"
+                + "</properties></project>");
+        dtm.ide.project.JavaProjectDescriptor after = dtm.ide.project.JavaProjectConventions.describe(root);
+        assertEquals(java.util.Optional.of(21), before.jdkMajor());
+        assertEquals(java.util.Optional.of(25), after.jdkMajor());
+        assertTrue(JavaIdeAdapter.jdkRequirementChanged(before, after));
+        assertFalse(JavaIdeAdapter.jdkRequirementChanged(after, after));
+        assertFalse(JavaIdeAdapter.jdkRequirementChanged(null, after));
+    }
 }

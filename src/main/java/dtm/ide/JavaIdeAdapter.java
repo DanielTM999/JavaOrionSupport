@@ -9260,6 +9260,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 if (build != null) {
                     build.invalidateClasspathCache();
                 }
+                JavaProjectDescriptor previous = descriptor;
                 JavaProjectDescriptor reloaded = timed("describe(syncProject)",
                         () -> JavaProjectConventions.describe(root));
                 if (!current(ticket, root)) {
@@ -9267,6 +9268,14 @@ public class JavaIdeAdapter extends IdeAdapter {
                 }
                 if (reloaded != null) {
                     descriptor = reloaded;
+                }
+                if (jdkRequirementChanged(previous, reloaded)) {
+                    log.info("JDK pedida pelo projeto mudou de {} para {}; reavaliando a JDK do projeto",
+                            previous.jdkMajor().orElse(null), reloaded.jdkMajor().orElse(null));
+                    setStatusBarText(text("status.jdkRequirementChanged",
+                            "Java: o projeto pede outra JDK - recarregando"));
+                    clearCaches();
+                    return;
                 }
                 JdtLsService lsp = jdtLs;
                 applyLombokAgent(lsp, descriptor);
@@ -9301,6 +9310,11 @@ public class JavaIdeAdapter extends IdeAdapter {
                 }
             }
         });
+    }
+
+    static boolean jdkRequirementChanged(JavaProjectDescriptor previous, JavaProjectDescriptor reloaded) {
+        return previous != null && reloaded != null
+                && !previous.jdkMajor().equals(reloaded.jdkMajor());
     }
 
     private void finishSync(long generation, long ticket, Path root, boolean synced) {

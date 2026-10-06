@@ -406,6 +406,7 @@
   "JavaIdeAdapter.status.syncPending": "Java: o arquivo de build mudou - sincronize o projeto",
   "JavaIdeAdapter.status.pomTargetMissing": "Maven: declaração não encontrada",
   "JavaIdeAdapter.status.synced": "Java: projeto sincronizado",
+  "JavaIdeAdapter.status.jdkRequirementChanged": "Java: o projeto pede outra JDK - recarregando",
   "JavaIdeAdapter.status.codeActionFailed": "Java: nao foi possivel aplicar a correcao",
   "JavaIdeAdapter.status.codeActionPartial": "Java: a correcao nao pode ser aplicada por completo",
   "JavaIdeAdapter.status.syncing": "Java: sincronizando o projeto...",
