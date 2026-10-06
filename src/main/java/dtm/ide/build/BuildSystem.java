@@ -44,6 +44,10 @@ public interface BuildSystem {
 
     void invalidateClasspathCache();
 
+    default Optional<String> lastClasspathFailure(JavaModule module) {
+        return Optional.empty();
+    }
+
     default BuildResult executeToolCommand(JavaModule module, List<String> command,
                                            Consumer<String> output) {
         return BuildResult.failed(name(), "Comando de build nao suportado.");

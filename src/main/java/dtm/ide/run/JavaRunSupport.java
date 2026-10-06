@@ -29,6 +29,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -128,6 +129,9 @@ public class JavaRunSupport {
     }
 
     private final ThreadLocal<String> coverageAgentArgument = new ThreadLocal<>();
+    private final ThreadLocal<List<String>> launchNotices = new ThreadLocal<>();
+    private final AtomicReference<IncrementalJavaBuilder> activeIncrementalBuilder =
+            new AtomicReference<>();
 
     public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context) {
         return launch(configuration, context, 0);
@@ -152,6 +156,38 @@ public class JavaRunSupport {
 
     public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context,
                                    int allocatedDebugPort) {
+        return launch(configuration, context, allocatedDebugPort, () -> false);
+    }
+
+    public RunProcessHandle launchWithCoverage(RunConfigurationData configuration,
+                                               RunExecutionContext context, String agentArgument,
+                                               BooleanSupplier cancelled) {
+        coverageAgentArgument.set(agentArgument);
+        try {
+            return launch(configuration, context, 0, cancelled);
+        } finally {
+            coverageAgentArgument.remove();
+        }
+    }
+
+    /**
+     * Executa a configuracao consultando {@code cancelled} entre as etapas de preparacao, para
+     * que o Stop interrompa o build, a cadeia e a resolucao do classpath antes do processo subir.
+     */
+    public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context,
+                                   int allocatedDebugPort, BooleanSupplier cancelled) {
+        BooleanSupplier stopped = cancelled == null ? () -> false : cancelled;
+        launchNotices.set(new ArrayList<>());
+        try {
+            return launchSteps(configuration, context, allocatedDebugPort, stopped);
+        } finally {
+            launchNotices.remove();
+        }
+    }
+
+    private RunProcessHandle launchSteps(RunConfigurationData configuration,
+                                         RunExecutionContext context, int allocatedDebugPort,
+                                         BooleanSupplier cancelled) {
         JavaProjectDescriptor descriptor = descriptorSupplier.get();
         if (descriptor == null) {
             return failure(text("error.noProject", "Nenhum projeto Java aberto."));
@@ -170,26 +206,75 @@ public class JavaRunSupport {
 
         ProcessSpec spec;
         try {
+            if (cancelled.getAsBoolean()) {
+                return cancelledLaunch();
+            }
             Optional<String> buildFailure = buildBeforeRun(configuration);
+            if (cancelled.getAsBoolean()) {
+                return cancelledLaunch();
+            }
             if (buildFailure.isPresent()) {
                 return failure(buildFailure.get());
             }
             Optional<String> chainFailure = runBeforeLaunchChain(configuration);
+            if (cancelled.getAsBoolean()) {
+                return cancelledLaunch();
+            }
             if (chainFailure.isPresent()) {
                 return failure(chainFailure.get());
             }
             int port = allocatedDebugPort > 0 ? allocatedDebugPort : debugPort(context);
             spec = processSpec(configuration, descriptor, port);
         } catch (Exception e) {
+            if (cancelled.getAsBoolean()) {
+                return cancelledLaunch();
+            }
             return failure(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        }
+        if (cancelled.getAsBoolean()) {
+            return cancelledLaunch();
         }
 
         output.accept("> " + spec.display());
         try {
-            return ProcessLauncher.launch(spec);
+            RunProcessHandle handle = ProcessLauncher.launch(spec, notices());
+            if (cancelled.getAsBoolean()) {
+                handle.terminate();
+                return cancelledLaunch();
+            }
+            return handle;
         } catch (Exception e) {
             log.warn("Falha ao iniciar a configuracao {}", type, e);
             return failure(text("error.launchFailed", "Falha ao iniciar:") + " " + e.getMessage());
+        }
+    }
+
+    /** Interrompe o build ou a resolucao de classpath de um Run que ainda esta se preparando. */
+    public void cancelPreparation() {
+        IncrementalJavaBuilder builder = activeIncrementalBuilder.get();
+        if (builder != null) {
+            builder.cancel();
+        }
+        BuildSystem build = buildSupplier.get();
+        if (build != null) {
+            build.cancel();
+        }
+    }
+
+    private RunProcessHandle cancelledLaunch() {
+        return failure(text("run.cancelled", "Execucao cancelada."));
+    }
+
+    private List<String> notices() {
+        List<String> notices = launchNotices.get();
+        return notices == null ? List.of() : List.copyOf(notices);
+    }
+
+    private void notice(String message) {
+        output.accept(message);
+        List<String> notices = launchNotices.get();
+        if (notices != null) {
+            notices.add(message);
         }
     }
 
@@ -496,7 +581,12 @@ public class JavaRunSupport {
         if (!builder.isApplicable(module)) {
             return Optional.empty();
         }
-        return Optional.of(builder.build(module, test, output));
+        activeIncrementalBuilder.set(builder);
+        try {
+            return Optional.of(builder.build(module, test, output));
+        } finally {
+            activeIncrementalBuilder.compareAndSet(builder, null);
+        }
     }
 
     // --- Auxiliares ----------------------------------------------------------
@@ -517,6 +607,14 @@ public class JavaRunSupport {
 
         if (classpath.isPresent() && !classpath.get().isBlank()) {
             return classpath.get();
+        }
+        if (build != null) {
+            notice(text("warn.classpathUnresolved",
+                    "Aviso: nao foi possivel resolver as dependencias do modulo")
+                    + " " + module.name() + "; "
+                    + text("warn.classpathFallback",
+                    "executando apenas com as classes do workspace (bibliotecas externas ausentes)."));
+            build.lastClasspathFailure(module).ifPresent(this::notice);
         }
         log.info("Classpath nao resolvido; usando apenas as classes compiladas do projeto a partir de {}",
                 module.root());

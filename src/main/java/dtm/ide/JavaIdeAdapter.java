@@ -335,6 +335,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.Consumer;
@@ -450,6 +451,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicBoolean buildRunning = new AtomicBoolean();
     private final AtomicBoolean debugActive = new AtomicBoolean();
     private final Map<RunConfigurationKey, RunProcessHandle> runningProcesses =
+            new ConcurrentHashMap<>();
+    private final Map<RunConfigurationKey, AtomicBoolean> pendingLaunches =
             new ConcurrentHashMap<>();
     private final Set<Path> debugSteppedFiles = ConcurrentHashMap.newKeySet();
     private final PluginTaskExecutor background =
@@ -6810,7 +6813,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     "O arquivo atual nao possui um metodo main Java valido."));
         }
         RunProcessHandle handle = launchWithBuildProgress(resolved,
-                () -> ensureRunSupport().launch(resolved, context));
+                cancelled -> ensureRunSupport().launch(resolved, context, 0, cancelled));
         trackRunningProcess(configuration, handle);
         return handle;
     }
@@ -6829,7 +6832,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                     "Java: cobertura no Run so vale para Aplicacao, Spring Boot e JAR"));
         }
         RunProcessHandle handle = launchWithBuildProgress(resolved,
-                () -> ensureRunSupport().launchWithCoverage(resolved, context, coverageArgument));
+                cancelled -> ensureRunSupport().launchWithCoverage(resolved, context,
+                        coverageArgument, cancelled));
         trackRunningProcess(configuration, handle);
         awaitCoverageRun(handle, CoverageAgent.execFileFor(descriptor.root()), descriptor);
         return handle;
@@ -6888,7 +6892,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         int jdwpPort = DebugPorts.allocate();
         JavaModule targetModule = resolveDebugModule(resolved);
         RunProcessHandle handle = launchWithBuildProgress(resolved,
-                () -> ensureRunSupport().launch(resolved, debugContext, jdwpPort));
+                cancelled -> ensureRunSupport().launch(resolved, debugContext, jdwpPort, cancelled));
         if (handle.isAlive()) {
             trackRunningProcess(configuration, handle);
             startDebugSession(jdwpPort, debugContext, handle::terminate, targetModule, handle);
@@ -6970,7 +6974,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                     "Nao foi possivel abrir a porta de debug:") + " " + rootMessage(error));
         }
         RunProcessHandle handle = launchWithBuildProgress(configuration,
-                () -> ensureRunSupport().launch(configuration, context, listener.listenPort()));
+                cancelled -> ensureRunSupport().launch(configuration, context,
+                        listener.listenPort(), cancelled));
         if (!handle.isAlive()) {
             listener.close();
             return handle;
@@ -7772,6 +7777,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void stop(RunConfigurationData configuration) {
         RunProcessHandle process = runningProcess(configuration);
+        if (process == null) {
+            cancelPendingLaunch(configuration);
+        }
         Runnable pendingTest = process == null ? pendingTestDebug.getAndSet(null) : null;
         if (pendingTest != null) {
             pendingTest.run();
@@ -8005,10 +8013,37 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private RunProcessHandle launchWithBuildProgress(RunConfigurationData configuration,
-                                                     Supplier<RunProcessHandle> launcher) {
+                                                     Function<BooleanSupplier, RunProcessHandle> launcher) {
         if (unloaded) {
             return ProcessLauncher.message("Plugin Java descarregado.");
         }
+        RunConfigurationKey key = RunConfigurationKey.of(configuration);
+        AtomicBoolean cancelled = new AtomicBoolean();
+        pendingLaunches.put(key, cancelled);
+        requestSetRunButtonRunning(true);
+        try {
+            return launchWithBuildProgress(configuration, () -> launcher.apply(cancelled::get));
+        } finally {
+            pendingLaunches.remove(key, cancelled);
+        }
+    }
+
+    private void cancelPendingLaunch(RunConfigurationData configuration) {
+        if (pendingLaunches.isEmpty()) {
+            return;
+        }
+        AtomicBoolean matching = configuration == null ? null
+                : pendingLaunches.get(RunConfigurationKey.of(configuration));
+        if (matching != null) {
+            matching.set(true);
+        } else {
+            pendingLaunches.values().forEach(flag -> flag.set(true));
+        }
+        ensureRunSupport().cancelPreparation();
+    }
+
+    private RunProcessHandle launchWithBuildProgress(RunConfigurationData configuration,
+                                                     Supplier<RunProcessHandle> launcher) {
         Optional<BuildSystem.BuildAction> action =
                 JavaRunSupport.buildBeforeRunAction(configuration);
         if (action.isEmpty()) {

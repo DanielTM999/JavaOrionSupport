@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -20,7 +21,7 @@ public final class ProcessRunner {
     private static final long EXIT_AFTER_OUTPUT_TIMEOUT_SECONDS = 60;
 
     private final AtomicReference<Process> current = new AtomicReference<>();
-    private volatile boolean cancelled;
+    private final AtomicBoolean pendingCancel = new AtomicBoolean();
 
     public int run(List<String> command, Path workingDirectory, Map<String, String> environment,
                    Consumer<String> output) {
@@ -47,7 +48,7 @@ public final class ProcessRunner {
             return -1;
         }
         current.set(process);
-        if (cancelled) {
+        if (pendingCancel.getAndSet(false)) {
             current.compareAndSet(process, null);
             terminate(process);
             return -1;
@@ -80,12 +81,14 @@ public final class ProcessRunner {
     }
 
     public void cancel() {
-        cancelled = true;
         Process process = current.getAndSet(null);
-        if (process == null || !process.isAlive()) {
+        if (process == null) {
+            pendingCancel.set(true);
             return;
         }
-        terminate(process);
+        if (process.isAlive()) {
+            terminate(process);
+        }
     }
 
     private static void terminate(Process process) {

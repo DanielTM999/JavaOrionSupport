@@ -34,11 +34,13 @@ public final class MavenBuildService implements BuildSystem {
     private final ProcessRunner runner = new ProcessRunner();
     private final ProcessRunner classpathRunner = new ProcessRunner();
     private final Map<String, String> classpathCache = new ConcurrentHashMap<>();
+    private final Map<Path, String> lastClasspathFailures = new ConcurrentHashMap<>();
 
     private static final String TEST_OUTPUT_DIR = "target/test-classes";
     private static final String REACTOR_CLASSPATH_FILE = "target/orion-classpath.txt";
     private static final String PERSISTED_CLASSPATH_DIR = ".orion/classpath";
     private static final String PERSISTED_CLASSPATH_FORMAT = "1";
+    private static final int MAX_FAILURE_LINES = 12;
 
     private volatile Supplier<Set<String>> activeProfiles;
 
@@ -101,6 +103,9 @@ public final class MavenBuildService implements BuildSystem {
     @Override
     public void cancel() {
         runner.cancel();
+        if (classpathRunner.isRunning()) {
+            classpathRunner.cancel();
+        }
     }
 
     @Override
@@ -143,6 +148,7 @@ public final class MavenBuildService implements BuildSystem {
             if (resolved.isEmpty()) {
                 return Optional.empty();
             }
+            lastClasspathFailures.remove(module.root());
             persist(module, scope, fingerprint, resolved.get());
         }
         String full = prefixOutputDirs(module, test)
@@ -229,10 +235,12 @@ public final class MavenBuildService implements BuildSystem {
             command.add("-Dmdep.includeScope=" + scope);
             appendActiveProfiles(command);
 
+            List<String> errors = new ArrayList<>();
             int exitCode = classpathRunner.run(command, module.root(),
-                    environmentFor(BuildRequest.of(BuildAction.COMPILE, module)), line -> {
-                    });
+                    environmentFor(BuildRequest.of(BuildAction.COMPILE, module)),
+                    line -> collectError(errors, line));
             if (exitCode != 0) {
+                rememberClasspathFailure(module, errors);
                 return Optional.empty();
             }
             return readClasspath(outputFile);
@@ -250,20 +258,13 @@ public final class MavenBuildService implements BuildSystem {
         }
         Path outputFile = module.root().resolve(REACTOR_CLASSPATH_FILE);
         try {
-            List<String> command = new ArrayList<>(baseCommand());
-            command.add("-q");
-            command.add("dependency:build-classpath");
-            command.add("-Dmdep.outputFile=" + REACTOR_CLASSPATH_FILE);
-            command.add("-Dmdep.includeScope=" + scope);
-            command.add("-pl");
-            command.add(relativeModulePath(module));
-            command.add("-am");
-            appendActiveProfiles(command);
-
-            int exitCode = classpathRunner.run(command, descriptor.root(),
-                    environmentFor(BuildRequest.of(BuildAction.COMPILE, module)), line -> {
-                    });
+            List<String> errors = new ArrayList<>();
+            int exitCode = classpathRunner.run(reactorClasspathCommand(module, scope),
+                    descriptor.root(),
+                    environmentFor(BuildRequest.of(BuildAction.COMPILE, module)),
+                    line -> collectError(errors, line));
             if (exitCode != 0) {
+                rememberClasspathFailure(module, errors);
                 return Optional.empty();
             }
             return readClasspath(outputFile);
@@ -274,6 +275,54 @@ public final class MavenBuildService implements BuildSystem {
         } finally {
             deleteQuietly(outputFile);
         }
+    }
+
+    /**
+     * Sem uma fase do ciclo de vida o Maven 3 nao resolve os modulos irmaos pelo reactor e passa
+     * a exigir o jar instalado no repositorio local. A fase {@code compile} (ou
+     * {@code test-compile}) faz o reactor apontar cada irmao para o seu {@code target/classes},
+     * enquanto os skips evitam compilar e copiar recursos de novo.
+     */
+    List<String> reactorClasspathCommand(JavaModule module, String scope) {
+        boolean test = "test".equals(scope);
+        List<String> command = new ArrayList<>(baseCommand());
+        command.add("-q");
+        command.add(test ? "test-compile" : "compile");
+        command.add("dependency:build-classpath");
+        command.add("-Dmaven.main.skip=true");
+        command.add("-Dmaven.resources.skip=true");
+        if (test) {
+            command.add("-Dmaven.test.skip=true");
+        }
+        command.add("-Dmdep.outputFile=" + REACTOR_CLASSPATH_FILE);
+        command.add("-Dmdep.includeScope=" + scope);
+        command.add("-pl");
+        command.add(relativeModulePath(module));
+        command.add("-am");
+        appendActiveProfiles(command);
+        return command;
+    }
+
+    private static void collectError(List<String> errors, String line) {
+        if (line == null || errors.size() >= MAX_FAILURE_LINES) {
+            return;
+        }
+        String plain = line.replaceAll("\u001B\\[[;\\d]*m", "").trim();
+        if (plain.startsWith("[ERROR]") && plain.length() > "[ERROR]".length()) {
+            errors.add(plain);
+        }
+    }
+
+    private void rememberClasspathFailure(JavaModule module, List<String> errors) {
+        if (!errors.isEmpty()) {
+            lastClasspathFailures.put(module.root(), String.join(System.lineSeparator(), errors));
+        }
+    }
+
+    @Override
+    public Optional<String> lastClasspathFailure(JavaModule module) {
+        return module == null ? Optional.empty()
+                : Optional.ofNullable(lastClasspathFailures.get(module.root()));
     }
 
     private void appendActiveProfiles(List<String> command) {

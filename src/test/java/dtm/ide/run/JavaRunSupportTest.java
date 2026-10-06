@@ -248,6 +248,48 @@ class JavaRunSupportTest {
     }
 
     @Test
+    void anUnresolvedClasspathIsReportedInsteadOfSilentlyDroppingTheLibraries() {
+        List<String> output = new java.util.ArrayList<>();
+        JavaRunSupport withoutClasspath = new JavaRunSupport(() -> descriptor, () -> jdk,
+                () -> new FakeBuildSystem(true, false), output::add);
+
+        withoutClasspath.buildCommand(configuration(JavaRunSupport.TYPE_RUN,
+                        Map.of(JavaRunSupport.PROPERTY_MAIN_CLASS, "com.example.Main")),
+                descriptor, jdk, 0);
+
+        assertTrue(output.stream().anyMatch(line -> line.contains("demo")
+                && line.contains("classes do workspace")), String.join("\n", output));
+        assertTrue(output.contains("[ERROR] dependencia ausente"), String.join("\n", output));
+    }
+
+    @Test
+    void stoppingDuringTheBuildCancelsTheRunBeforeTheProcessStarts() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger checks = new java.util.concurrent.atomic.AtomicInteger();
+
+        var handle = runSupport.launch(configuration(JavaRunSupport.TYPE_RUN,
+                        Map.of(JavaRunSupport.PROPERTY_MAIN_CLASS, "com.example.Main")), null, 0,
+                () -> checks.incrementAndGet() > 1);
+
+        assertFalse(handle.isAlive());
+        assertTrue(handle.isReadonly());
+        String message = new String(handle.getOutput().readAllBytes(),
+                java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(message.contains("Execucao cancelada."), message);
+    }
+
+    @Test
+    void cancelPreparationStopsTheBuildSystem() {
+        FakeBuildSystem build = new FakeBuildSystem();
+        JavaRunSupport support = new JavaRunSupport(() -> descriptor, () -> jdk, () -> build,
+                line -> {
+                });
+
+        support.cancelPreparation();
+
+        assertTrue(build.cancelled);
+    }
+
+    @Test
     void argumentsRespectQuotes() {
         List<String> arguments = JavaRunSupport.splitArguments("--nome=\"Maria Silva\" --idade 30");
 
@@ -311,6 +353,7 @@ class JavaRunSupportTest {
 
         private final boolean succeeds;
         private final boolean resolvesClasspath;
+        private volatile boolean cancelled;
 
         FakeBuildSystem() {
             this(true, true);
@@ -333,11 +376,18 @@ class JavaRunSupportTest {
 
         @Override
         public void cancel() {
+            cancelled = true;
         }
 
         @Override
         public boolean isRunning() {
             return false;
+        }
+
+        @Override
+        public Optional<String> lastClasspathFailure(JavaModule module) {
+            return resolvesClasspath ? Optional.empty()
+                    : Optional.of("[ERROR] dependencia ausente");
         }
 
         @Override

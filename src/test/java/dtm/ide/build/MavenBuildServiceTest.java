@@ -85,6 +85,36 @@ class MavenBuildServiceTest {
     }
 
     @Test
+    void reactorClasspathRunsTheCompilePhaseWithoutCompiling() {
+        JavaModule api = module(root.resolve("api"));
+        MavenBuildService service = service(descriptor(rootModule(), api));
+
+        List<String> command = service.reactorClasspathCommand(api, "runtime");
+
+        assertTrue(command.indexOf("compile") < command.indexOf("dependency:build-classpath"));
+        assertTrue(command.contains("-Dmaven.main.skip=true"));
+        assertTrue(command.contains("-Dmaven.resources.skip=true"));
+        assertFalse(command.contains("-Dmaven.test.skip=true"));
+        assertTrue(command.contains("-Dmdep.includeScope=runtime"));
+        assertEquals("api", command.get(command.indexOf("-pl") + 1));
+        assertTrue(command.contains("-am"));
+    }
+
+    @Test
+    void reactorTestClasspathRunsTheTestCompilePhaseWithoutCompiling() {
+        JavaModule api = module(root.resolve("api"));
+        MavenBuildService service = service(descriptor(rootModule(), api));
+
+        List<String> command = service.reactorClasspathCommand(api, "test");
+
+        assertTrue(command.contains("test-compile"));
+        assertFalse(command.contains("compile"));
+        assertTrue(command.contains("-Dmaven.main.skip=true"));
+        assertTrue(command.contains("-Dmaven.test.skip=true"));
+        assertTrue(command.contains("-Dmdep.includeScope=test"));
+    }
+
+    @Test
     void selectedDependencyRefreshUsesTargetedPurgeAndForcesResolution() {
         MavenBuildService service = service(descriptor(rootModule()));
         List<String> arguments = service.dependencyRefreshArguments(

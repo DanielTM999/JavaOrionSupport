@@ -55,6 +55,47 @@ class ProcessRunnerTest {
     }
 
     @Test
+    void aCancelledRunnerRunsTheNextCommandNormally() throws Exception {
+        ProcessRunner runner = new ProcessRunner();
+        runner.cancel();
+        CompletableFuture.supplyAsync(() -> runner.run(
+                List.of(javaExecutable(), "-cp", System.getProperty("java.class.path"),
+                        SleepingProcess.class.getName()), Path.of("."), Map.of(), line -> {
+                }))
+                .get(10, TimeUnit.SECONDS);
+
+        int exit = CompletableFuture.supplyAsync(() -> runner.run(
+                List.of(javaExecutable(), "-version"), Path.of("."), Map.of(), line -> {
+                }))
+                .get(10, TimeUnit.SECONDS);
+
+        assertEquals(0, exit);
+    }
+
+    @Test
+    void cancellingAnActiveRunDoesNotCancelTheNextOne() throws Exception {
+        ProcessRunner runner = new ProcessRunner();
+        CompletableFuture<Integer> execution = CompletableFuture.supplyAsync(() -> runner.run(
+                List.of(javaExecutable(), "-cp", System.getProperty("java.class.path"),
+                        SleepingProcess.class.getName()), Path.of("."), Map.of(), line -> {
+                }));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!runner.isRunning() && System.nanoTime() < deadline) {
+            Thread.sleep(25);
+        }
+        assertTrue(runner.isRunning());
+        runner.cancel();
+        assertNotEquals(0, execution.get(5, TimeUnit.SECONDS));
+
+        int exit = CompletableFuture.supplyAsync(() -> runner.run(
+                List.of(javaExecutable(), "-version"), Path.of("."), Map.of(), line -> {
+                }))
+                .get(10, TimeUnit.SECONDS);
+
+        assertEquals(0, exit);
+    }
+
+    @Test
     void pluginUnloadTerminatesAnActiveBuildAndItsChild() throws Exception {
         ProcessRunner runner = new ProcessRunner();
         AtomicLong childPid = new AtomicLong(-1);
