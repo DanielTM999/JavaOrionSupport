@@ -7777,9 +7777,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void stop(RunConfigurationData configuration) {
         RunProcessHandle process = runningProcess(configuration);
-        if (process == null) {
-            cancelPendingLaunch(configuration);
-        }
+        boolean cancelledPreparation = process == null && cancelPendingLaunch(configuration);
         Runnable pendingTest = process == null ? pendingTestDebug.getAndSet(null) : null;
         if (pendingTest != null) {
             pendingTest.run();
@@ -7794,7 +7792,9 @@ public class JavaIdeAdapter extends IdeAdapter {
                 process.terminate();
             }
         }
-        requestSetRunButtonRunning(hasRunningProcess());
+        if (!cancelledPreparation) {
+            requestSetRunButtonRunning(hasRunningProcess());
+        }
     }
 
     @Override
@@ -8020,7 +8020,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         RunConfigurationKey key = RunConfigurationKey.of(configuration);
         AtomicBoolean cancelled = new AtomicBoolean();
         pendingLaunches.put(key, cancelled);
-        requestSetRunButtonRunning(true);
         try {
             return launchWithBuildProgress(configuration, () -> launcher.apply(cancelled::get));
         } finally {
@@ -8028,9 +8027,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private void cancelPendingLaunch(RunConfigurationData configuration) {
+    private boolean cancelPendingLaunch(RunConfigurationData configuration) {
         if (pendingLaunches.isEmpty()) {
-            return;
+            return false;
         }
         AtomicBoolean matching = configuration == null ? null
                 : pendingLaunches.get(RunConfigurationKey.of(configuration));
@@ -8040,6 +8039,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             pendingLaunches.values().forEach(flag -> flag.set(true));
         }
         ensureRunSupport().cancelPreparation();
+        return true;
     }
 
     private RunProcessHandle launchWithBuildProgress(RunConfigurationData configuration,
