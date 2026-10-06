@@ -22,13 +22,6 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-/**
- * Converte um projeto Maven criado pelo Spring Initializr em um reactor multi-modulo.
- *
- * <p>O primeiro modulo informado e o executavel. Ele conserva as dependencias, fontes e
- * configuracoes produzidas pelo Initializr e passa a depender dos demais modulos. O POM raiz
- * herda do parent do Spring Boot e centraliza a versao dos artefatos internos.</p>
- */
 final class SpringMultiModuleScaffolder {
 
     private static final Pattern MODULE_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]*");
@@ -347,7 +340,6 @@ final class SpringMultiModuleScaffolder {
                 Files.deleteIfExists(path);
             }
         } catch (IOException ignored) {
-            // A falha ao limpar staging nao deve ocultar o resultado da geracao.
         }
     }
 }

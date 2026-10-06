@@ -170,10 +170,6 @@ public class JavaRunSupport {
         }
     }
 
-    /**
-     * Executa a configuracao consultando {@code cancelled} entre as etapas de preparacao, para
-     * que o Stop interrompa o build, a cadeia e a resolucao do classpath antes do processo subir.
-     */
     public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context,
                                    int allocatedDebugPort, BooleanSupplier cancelled) {
         BooleanSupplier stopped = cancelled == null ? () -> false : cancelled;
@@ -249,7 +245,6 @@ public class JavaRunSupport {
         }
     }
 
-    /** Interrompe o build ou a resolucao de classpath de um Run que ainda esta se preparando. */
     public void cancelPreparation() {
         IncrementalJavaBuilder builder = activeIncrementalBuilder.get();
         if (builder != null) {
@@ -278,7 +273,6 @@ public class JavaRunSupport {
         }
     }
 
-    /** Monta a especificacao do processo de acordo com o tipo da configuracao. */
     public ProcessSpec processSpec(RunConfigurationData configuration,
                                    JavaProjectDescriptor descriptor, int debugPort) {
         String type = configuration == null ? "" : configuration.getType();
@@ -292,8 +286,6 @@ public class JavaRunSupport {
                     debugPort).toProcessSpec();
         };
     }
-
-    // --- Aplicacao e Spring Boot --------------------------------------------
 
     public LaunchCommand buildCommand(RunConfigurationData configuration,
                                       JavaProjectDescriptor descriptor,
@@ -337,8 +329,6 @@ public class JavaRunSupport {
                 environmentOf(configuration, jdk));
     }
 
-    // --- JAR -----------------------------------------------------------------
-
     private ProcessSpec jarSpec(RunConfigurationData configuration,
                                 JavaProjectDescriptor descriptor, int debugPort) {
         JdkInstallation jdk = RunJdkResolver.resolve(propertiesOf(configuration), jdkSupplier);
@@ -380,8 +370,6 @@ public class JavaRunSupport {
         return module != null ? module.root() : descriptor.root();
     }
 
-    // --- Maven e Gradle ------------------------------------------------------
-
     private ProcessSpec buildToolSpec(RunConfigurationData configuration,
                                       JavaProjectDescriptor descriptor, int listenPort) {
         boolean gradle = JavaRunTypes.GRADLE.equals(configuration.getType());
@@ -394,8 +382,6 @@ public class JavaRunSupport {
         }
         return toolProcess(configuration, descriptor, goals, List.of(), listenPort);
     }
-
-    // --- Testes --------------------------------------------------------------
 
     private ProcessSpec testSpec(RunConfigurationData configuration,
                                  JavaProjectDescriptor descriptor, int debugPort) {
@@ -411,10 +397,6 @@ public class JavaRunSupport {
         return toolProcess(configuration, descriptor, List.of("test"), extra, 0);
     }
 
-    /**
-     * Argumentos que fazem o build tool iniciar uma unica JVM de testes suspensa, para que os
-     * breakpoints sejam registrados antes do primeiro teste rodar.
-     */
     static List<String> testDebugArguments(boolean gradle, int debugPort) {
         if (!gradle) {
             return List.of("-DforkCount=1",
@@ -488,8 +470,6 @@ public class JavaRunSupport {
         return ProcessSpec.of(command.command(), workingDirectory, command.environment());
     }
 
-    // --- Build antes de executar --------------------------------------------
-
     public Optional<String> runBeforeLaunchChain(RunConfigurationData configuration) {
         List<RunChainStep> steps = RunChainStep.decodeAll(
                 property(configuration, JavaRunTypes.BEFORE_LAUNCH_CHAIN));
@@ -500,7 +480,6 @@ public class JavaRunSupport {
                 .run(steps, configuration == null ? null : configuration.getId());
     }
 
-    /** Executa o build previo exigido pela configuracao, quando aplicavel. */
     Optional<String> buildBeforeRun(RunConfigurationData configuration) {
         Optional<BuildSystem.BuildAction> action = buildBeforeRunAction(configuration);
         if (action.isEmpty()) {
@@ -512,12 +491,10 @@ public class JavaRunSupport {
         return compile(configuration);
     }
 
-    /** Informa ao host se o Run executara um build interno antes de abrir o processo. */
     public static Optional<BuildSystem.BuildAction> buildBeforeRunAction(
             RunConfigurationData configuration) {
         String type = configuration == null ? "" : configuration.getType();
         if (JavaRunTypes.BUILD_TOOL.contains(type)) {
-            // Maven, Gradle e Testes sao o proprio processo executado e devem manter o terminal.
             return Optional.empty();
         }
         boolean enabled = JavaRunValidation.flag(propertiesOf(configuration),
@@ -589,8 +566,6 @@ public class JavaRunSupport {
         }
     }
 
-    // --- Auxiliares ----------------------------------------------------------
-
     static String jdwpAgent(int port) {
         return "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:" + port;
     }
@@ -654,7 +629,6 @@ public class JavaRunSupport {
         return environment;
     }
 
-    /** Le o editor de ambiente aceitando {@code NOME=valor} por linha ou separado por virgulas. */
     static Map<String, String> customEnvironment(RunConfigurationData configuration) {
         Map<String, String> environment = new LinkedHashMap<>();
         for (String entry : splitList(property(configuration, PROPERTY_ENVIRONMENT))) {

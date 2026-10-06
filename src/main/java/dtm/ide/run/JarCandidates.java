@@ -13,22 +13,16 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Stream;
 
-/**
- * Descoberta dos JARs ja empacotados pelo projeto, oferecidos como sugestao na configuracao
- * {@code java.jar}. A selecao manual de qualquer outro arquivo continua permitida.
- */
 public final class JarCandidates {
 
     private static final List<String> OUTPUT_DIRS = List.of("target", "build/libs");
 
-    /** Sufixos que nunca sao executaveis com {@code -jar}. */
     private static final List<String> IGNORED_SUFFIXES = List.of(
             "-sources.jar", "-javadoc.jar", "-tests.jar", "-test.jar");
 
     private JarCandidates() {
     }
 
-    /** JARs do modulo informado, ou de todos os modulos quando {@code module} e nulo. */
     public static List<Path> find(JavaProjectDescriptor descriptor, JavaModule module) {
         if (descriptor == null) {
             return List.of();
@@ -58,7 +52,6 @@ public final class JarCandidates {
             try (Stream<Path> entries = Files.list(directory)) {
                 entries.filter(JarCandidates::isRunnableJar).forEach(jars::add);
             } catch (Exception ignored) {
-                // Um diretorio de build inacessivel apenas nao contribui com sugestoes.
             }
         }
         jars.sort(Comparator.comparing((Path path) -> lastModified(path)).reversed()

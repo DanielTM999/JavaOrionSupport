@@ -395,7 +395,6 @@ public final class JavaLexicalIndex {
         try {
             executor.submit(task);
         } catch (RejectedExecutionException ignored) {
-            // Shutdown raced with an editor or watcher callback.
         }
     }
 

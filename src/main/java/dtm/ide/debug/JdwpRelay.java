@@ -14,18 +14,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * Relay TCP que viabiliza o modo Listen do Remote JVM.
- *
- * <p>O Microsoft Java Debug Server oferece oficialmente apenas {@code launch} e
- * {@code attach}: ele sempre conecta em uma porta, nunca fica escutando. No modo Listen quem
- * escuta e a Orion, e a JVM alvo (iniciada com {@code server=n}) e quem conecta. Este relay
- * cobre a diferenca: aceita a conexao da JVM, abre uma porta em loopback para o debug adapter
- * e retransmite o trafego JDWP nos dois sentidos.</p>
- *
- * @see <a href="https://github.com/microsoft/vscode-java-debug/blob/main/Configuration.md">
- *      Configuracao oficial do Java Debugger</a>
- */
 @Slf4j
 public final class JdwpRelay implements AutoCloseable {
 
@@ -42,12 +30,6 @@ public final class JdwpRelay implements AutoCloseable {
         this.adapterServer = adapterServer;
     }
 
-    /**
-     * Reserva as duas portas: a de escuta da JVM alvo e a de loopback do debug adapter.
-     *
-     * @throws IOException quando a porta ja esta ocupada -- o erro aparece antes de qualquer
-     *                     espera.
-     */
     public static JdwpRelay open(String bindHost, int port) throws IOException {
         ServerSocket targetServer = new ServerSocket();
         try {
@@ -62,23 +44,14 @@ public final class JdwpRelay implements AutoCloseable {
         }
     }
 
-    /** Porta loopback em que o debug adapter deve fazer o attach. */
     public int adapterPort() {
         return adapterServer.getLocalPort();
     }
 
-    /** Porta em que a JVM alvo deve conectar. */
     public int listenPort() {
         return targetServer.getLocalPort();
     }
 
-    /**
-     * Espera a JVM alvo conectar e, a partir dai, retransmite o trafego assim que o debug
-     * adapter se conectar a {@link #adapterPort()}.
-     *
-     * @param timeoutMillis tempo maximo de espera; {@code 0} espera indefinidamente.
-     * @throws SocketTimeoutException quando a JVM nao conecta a tempo.
-     */
     public void awaitTarget(int timeoutMillis) throws IOException {
         targetServer.setSoTimeout(Math.max(0, timeoutMillis));
         target = targetServer.accept();
@@ -140,7 +113,6 @@ public final class JdwpRelay implements AutoCloseable {
         }
     }
 
-    /** Fecha sockets e libera as threads do relay; seguro de chamar mais de uma vez. */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -156,7 +128,6 @@ public final class JdwpRelay implements AutoCloseable {
         return closed.get();
     }
 
-    /** Aguarda o fim das threads do relay; usado apenas em testes. */
     void awaitShutdown(long millis) throws InterruptedException {
         List<Thread> snapshot;
         synchronized (pumps) {
@@ -174,7 +145,6 @@ public final class JdwpRelay implements AutoCloseable {
         try {
             closeable.close();
         } catch (IOException ignored) {
-            // Fechar um socket ja encerrado nao e um erro relevante.
         }
     }
 }

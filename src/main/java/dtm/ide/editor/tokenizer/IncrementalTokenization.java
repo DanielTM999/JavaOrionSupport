@@ -85,11 +85,6 @@ final class IncrementalTokenization {
         }
     }
 
-    /**
-     * Finds the first window token, after the edit, from which the old token stream can be
-     * reused: it must start a line in both texts and match the old token in type and length.
-     * Tokens close to the end of the window are ignored because the window may cut them short.
-     */
     private static int resyncPoint(List<Token> window, int restart, int windowEnd, int changeEnd,
                                    int delta, List<Token> previous, String oldText, String newText) {
         for (int i = 0; i < window.size(); i++) {
@@ -226,10 +221,6 @@ final class IncrementalTokenization {
         return offset;
     }
 
-    /**
-     * Lets a tokenizer veto reusing old tokens when the window contains constructs whose
-     * classification depends on text outside the window.
-     */
     @FunctionalInterface
     interface ResyncGuard {
         boolean allowsResync(String text, int from, int to);

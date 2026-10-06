@@ -11,19 +11,10 @@ import java.awt.LayoutManager;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Layout responsivo dos campos de uma secao.
- *
- * <p>Distribui as celulas em duas colunas quando ha largura suficiente e as empilha em uma
- * unica coluna quando o painel fica estreito, sem nunca produzir rolagem horizontal. Uma
- * celula pode ocupar a linha inteira declarando o span cheio.</p>
- */
 final class FormFlowLayout implements LayoutManager {
 
-    /** Propriedade de cliente que marca quantas colunas a celula ocupa. */
     static final String SPAN = "dtm.ide.run.form.span";
 
-    /** Abaixo desta largura util o formulario passa a empilhar os campos. */
     static final int TWO_COLUMN_THRESHOLD = 520;
 
     private final int columns;
@@ -55,12 +46,10 @@ final class FormFlowLayout implements LayoutManager {
 
     @Override
     public void addLayoutComponent(String name, Component component) {
-        // O span e lido da propriedade de cliente da celula.
     }
 
     @Override
     public void removeLayoutComponent(Component component) {
-        // Nada a liberar.
     }
 
     @Override

@@ -29,7 +29,6 @@ public final class JUnitTestDiscovery {
     private static final Pattern TYPE_DECLARATION = Pattern.compile(
             "\\b(?:class|record|interface|enum)\\s+([A-Za-z_$][\\w$]*)\\b");
 
-    /** {@code @Test} aplicado diretamente a uma classe -- o estilo do TestNG. */
     private static final Pattern CLASS_LEVEL_TEST = Pattern.compile(
             "(?m)^[ \\t]*@Test\\b[^\\n]*\\R(?:[ \\t]*@[^\\n]*\\R)*"
                     + "[ \\t]*(?:(?:public|abstract|final|static)\\s+)*"
@@ -117,11 +116,6 @@ public final class JUnitTestDiscovery {
         return tests;
     }
 
-    /**
-     * No TestNG, um {@code @Test} na classe transforma todos os metodos publicos em testes.
-     * Os metodos de ciclo de vida ({@code @BeforeMethod}, {@code @AfterClass}, ...) e os
-     * provedores de dados continuam de fora.
-     */
     private static List<JavaTest> testNgClassLevel(Path file, String code, int[] lineStarts,
                                                    List<JavaTest> known) {
         List<JavaTest> tests = new ArrayList<>();
@@ -158,7 +152,6 @@ public final class JUnitTestDiscovery {
         return tests;
     }
 
-    /** {@code true} quando o metodo carrega uma anotacao de ciclo de vida ou de dados. */
     private static boolean isLifecycleAnnotated(String code, int methodStart) {
         int from = Math.max(0, methodStart - 220);
         String preceding = code.substring(from, methodStart);

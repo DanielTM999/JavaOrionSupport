@@ -6,14 +6,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Comando montado por um {@link BuildSystem} sem ser executado.
- *
- * <p>Permite que as configuracoes de execucao Maven, Gradle e Testes reaproveitem exatamente
- * a mesma montagem de comando usada pelos servicos de build -- wrapper, ferramenta
- * provisionada, selecao de modulo, profiles e {@code JAVA_HOME} -- e iniciem o processo por
- * conta propria, com PTY e cancelamento.</p>
- */
 public record BuildCommand(
         List<String> command,
         Path workingDirectory,
@@ -82,7 +74,6 @@ public record BuildCommand(
         return List.copyOf(arguments);
     }
 
-    /** Opcoes de invocacao aplicadas a um comando de ferramenta. */
     public record Options(
             List<String> profiles,
             List<String> extraArguments,

@@ -7,7 +7,6 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
-/** Keeps diagnostic ranges aligned with edits that leave Java tokens unchanged. */
 public final class JavaDiagnosticEdits {
 
     private static final int STRADDLE_MARGIN = 4096;
@@ -15,11 +14,6 @@ public final class JavaDiagnosticEdits {
     private JavaDiagnosticEdits() {
     }
 
-    /**
-     * Compares the Java tokens of both texts without allocating them. The scan stops as soon as
-     * both sides reach the unchanged suffix at the same relative position, so an edit near the
-     * top of a large file does not pay for the rest of the document.
-     */
     public static boolean sameCode(String before, String after) {
         if (before == null || after == null) return false;
         if (before.equals(after)) return true;
@@ -44,7 +38,6 @@ public final class JavaDiagnosticEdits {
         }
     }
 
-    /** Token boundaries as {@code [start0, end0, start1, end1, ...]}. */
     private static int[] tokens(String source) {
         int[] result = new int[64];
         int size = 0;
@@ -175,10 +168,6 @@ public final class JavaDiagnosticEdits {
         return List.copyOf(moved);
     }
 
-    /**
-     * Token mapping only differs from a plain shift for ranges that reach into the edited region
-     * or into a token that straddles its end; everything else is mapped arithmetically.
-     */
     private static boolean touchesChange(int start, int end, Change change) {
         return end >= change.prefix() && start <= change.oldEnd() + STRADDLE_MARGIN;
     }

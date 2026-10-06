@@ -16,10 +16,6 @@ import java.awt.RenderingHints;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * Uma secao do formulario de execucao ("Execucao", "JVM", "Ambiente", ...), desenhada como um
- * cartao com as cores e o espacamento vindos de {@link UiTokens}.
- */
 public final class FormSection extends JPanel {
 
     private final JPanel body = new JPanel(new FormFlowLayout());
@@ -55,12 +51,10 @@ public final class FormSection extends JPanel {
         add(body, BorderLayout.CENTER);
     }
 
-    /** Adiciona um campo ocupando metade da largura em telas largas. */
     public FormSection add(String name, FormFieldCell cell) {
         return place(name, cell, 1);
     }
 
-    /** Adiciona um campo que sempre ocupa a linha inteira. */
     public FormSection addWide(String name, FormFieldCell cell) {
         return place(name, cell, 2);
     }
@@ -72,7 +66,6 @@ public final class FormSection extends JPanel {
         return this;
     }
 
-    /** Adiciona um componente livre (aviso, botao) ocupando a linha inteira. */
     public FormSection addComponent(JComponent component) {
         FormFlowLayout.setSpan(component, 2);
         body.add(component);

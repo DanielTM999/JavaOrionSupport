@@ -28,22 +28,13 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
 
-/**
- * Toolkit visual compartilhado pelos formularios de configuracao de execucao.
- *
- * <p>Todas as cores, fontes e espacamentos vem de {@link UiTokens}, de modo que os
- * formularios acompanham o tema claro/escuro da IDE e a escala de exibicao sem nenhuma cor
- * fixa.</p>
- */
 public final class RunFormUi {
 
-    /** Altura unica de todos os controles de entrada. */
     public static final int FIELD_HEIGHT = PillButtons.FIELD_HEIGHT;
 
     private RunFormUi() {
     }
 
-    /** Painel raiz do formulario: uma unica coluna vertical, sem rolagem aninhada. */
     public static Page page() {
         return new Page();
     }
@@ -56,7 +47,6 @@ public final class RunFormUi {
         return new FormFieldCell(label, sized(control));
     }
 
-    /** Campo com um botao de selecao de arquivo/diretorio a direita. */
     public static FormFieldCell fieldWithButton(String label, JComponent control, JButton button) {
         JPanel row = new JPanel(new BorderLayout(UiTokens.space(1), 0));
         row.setOpaque(false);
@@ -113,7 +103,6 @@ public final class RunFormUi {
         return button;
     }
 
-    /** Aviso destacado, usado por exemplo para lembrar que o JDWP nao e autenticado. */
     public static JComponent notice(String message) {
         JLabel label = new JLabel("<html><body style='width:100%'>" + escape(message) + "</body></html>");
         label.setFont(UiTokens.fontSmall());
@@ -128,7 +117,6 @@ public final class RunFormUi {
         return wrapper;
     }
 
-    /** Aplica a altura padrao dos controles, mantendo os campos alinhados. */
     public static <T extends JComponent> T sized(T component) {
         if (component instanceof TextAreaField) {
             return component;
@@ -153,7 +141,6 @@ public final class RunFormUi {
         }
     }
 
-    /** Texto de um combo editavel, lendo o editor quando o usuario digitou um valor novo. */
     public static String valueOf(JComboBox<String> combo) {
         Object selected = combo.isEditable() && combo.getEditor() != null
                 ? combo.getEditor().getItem()
@@ -194,10 +181,6 @@ public final class RunFormUi {
                 .replace("<", "&lt;").replace(">", "&gt;");
     }
 
-    /**
-     * Coluna vertical de secoes que acompanha a largura da viewport, garantindo um unico
-     * fluxo de rolagem e nenhuma barra horizontal.
-     */
     public static final class Page extends JPanel implements Scrollable {
 
         private Page() {

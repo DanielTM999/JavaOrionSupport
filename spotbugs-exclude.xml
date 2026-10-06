@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Falsos positivos conhecidos do SpotBugs; cada exclusao precisa de uma justificativa. -->
 <FindBugsFilter>
-    <!-- Diretorios padrao onde os sistemas operacionais instalam JDKs (ex.: /usr/lib/jvm). -->
     <Match>
         <Class name="dtm.ide.sdk.JdkDetector"/>
         <Method name="systemRoots"/>

@@ -9,7 +9,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Descoberta textual no estilo TestNG, em que {@code @Test} pode estar na classe. */
 class TestNgDiscoveryTest {
 
     private static final Path FILE = Path.of("src/test/java/com/exemplo/PedidoTest.java");

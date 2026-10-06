@@ -123,7 +123,6 @@ public final class LspJsonRpcClient {
                 }
             });
         } catch (RejectedExecutionException ignored) {
-            // O cliente foi encerrado entre a verificacao de closed e o enfileiramento.
         }
     }
 
@@ -181,10 +180,6 @@ public final class LspJsonRpcClient {
         }
     }
 
-    /**
-     * Runs {@code listener} once if the connection is lost without {@link #close()} being called
-     * first, e.g. when the server stops answering on its stream while the process is still alive.
-     */
     public void onUnexpectedDisconnect(Runnable listener) {
         disconnectListener = listener;
         if (disconnected) {
@@ -277,7 +272,6 @@ public final class LspJsonRpcClient {
                 }
             });
         } catch (RejectedExecutionException ignored) {
-            // Cliente encerrado; nao ha servidor esperando essa resposta.
         }
     }
 

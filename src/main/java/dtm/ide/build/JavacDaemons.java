@@ -1,6 +1,5 @@
 package dtm.ide.build;
 
-import dtm.ide.build.daemon.CompilerDaemon;
 import dtm.ide.run.OwnedRunProcesses;
 import lombok.extern.slf4j.Slf4j;
 
@@ -24,6 +23,11 @@ import java.util.function.Consumer;
 
 @Slf4j
 public final class JavacDaemons {
+
+    static final String DAEMON_CLASS = "dtm.ide.build.daemon.CompilerDaemon";
+    static final String REQUEST = "COMPILE\t";
+    static final String END = "\u0001END ";
+    static final int UNAVAILABLE = 97;
 
     private static final long START_TIMEOUT_MS = 30_000;
     private static final Map<Path, Daemon> DAEMONS = new ConcurrentHashMap<>();
@@ -139,7 +143,7 @@ public final class JavacDaemons {
             installShutdownHook();
             List<String> command = List.of(java.toString(), "-Xms64m", "-Xmx2g",
                     "-XX:+UseParallelGC", "-Dfile.encoding=UTF-8", "-cp", location.toString(),
-                    CompilerDaemon.class.getName());
+                    DAEMON_CLASS);
             Daemon daemon = null;
             try {
                 long launchGeneration = OwnedRunProcesses.launchGeneration();
@@ -151,7 +155,7 @@ public final class JavacDaemons {
                 Daemon started = daemon;
                 String ready = CompletableFuture.supplyAsync(started::readLine)
                         .get(START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-                if (ready != null && ready.equals(CompilerDaemon.END + 0)) {
+                if (ready != null && ready.equals(END + 0)) {
                     log.info("Compilador residente iniciado com a JDK {}", jdkHome);
                     return daemon;
                 }
@@ -167,7 +171,7 @@ public final class JavacDaemons {
 
         private static Path daemonClasspath() {
             try {
-                return Path.of(CompilerDaemon.class.getProtectionDomain().getCodeSource()
+                return Path.of(JavacDaemons.class.getProtectionDomain().getCodeSource()
                         .getLocation().toURI());
             } catch (Exception e) {
                 return null;
@@ -193,14 +197,14 @@ public final class JavacDaemons {
                 argumentFile = Files.createTempFile("orion-javac", ".args");
                 String content = argumentFileContent(arguments);
                 Files.writeString(argumentFile, content, StandardCharsets.UTF_8);
-                input.write(CompilerDaemon.REQUEST + argumentFile);
+                input.write(REQUEST + argumentFile);
                 input.newLine();
                 input.flush();
                 String line;
                 while ((line = readLine()) != null) {
-                    if (line.startsWith(CompilerDaemon.END)) {
-                        int exitCode = Integer.parseInt(line.substring(CompilerDaemon.END.length()).trim());
-                        return exitCode == CompilerDaemon.UNAVAILABLE ? OptionalInt.empty()
+                    if (line.startsWith(END)) {
+                        int exitCode = Integer.parseInt(line.substring(END.length()).trim());
+                        return exitCode == UNAVAILABLE ? OptionalInt.empty()
                                 : OptionalInt.of(exitCode);
                     }
                     lines.add(line);

@@ -5,14 +5,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Especificacao de um processo local a ser iniciado por uma configuracao de execucao.
- *
- * <p>E a camada comum entre Aplicacao, Spring Boot, JAR, Maven, Gradle e Testes: todos
- * descrevem o que executar por meio deste registro e delegam o inicio ao
- * {@link ProcessLauncher}, que aplica PTY, streaming imediato e cancelamento em dois
- * estagios.</p>
- */
 public record ProcessSpec(
         List<String> command,
         Path workingDirectory,
@@ -20,11 +12,8 @@ public record ProcessSpec(
         Termination termination
 ) {
 
-    /** Politica de encerramento aplicada quando o usuario pressiona Stop. */
     public enum Termination {
-        /** Pede a parada normal e, no segundo Stop, mata a arvore de processos. */
         TWO_STAGE_TREE,
-        /** Encerra apenas o processo iniciado, sem tocar nos filhos. */
         PROCESS_ONLY
     }
 
@@ -45,7 +34,6 @@ public record ProcessSpec(
         return new ProcessSpec(command, workingDirectory, environment, policy);
     }
 
-    /** Argumentos adicionais anexados ao final do comando. */
     public ProcessSpec withArguments(List<String> arguments) {
         if (arguments == null || arguments.isEmpty()) {
             return this;
@@ -55,7 +43,6 @@ public record ProcessSpec(
         return new ProcessSpec(merged, workingDirectory, environment, termination);
     }
 
-    /** Variaveis adicionadas ao ambiente, sobrescrevendo as existentes. */
     public ProcessSpec withEnvironment(Map<String, String> extra) {
         if (extra == null || extra.isEmpty()) {
             return this;
@@ -69,7 +56,6 @@ public record ProcessSpec(
         return command.isEmpty();
     }
 
-    /** Linha de comando exibida no console antes do inicio do processo. */
     public String display() {
         return String.join(" ", command);
     }

@@ -118,7 +118,6 @@
                 </plugins>
             </build>
         </profile>
-        <!-- mvn -Pquality verify: SpotBugs (prioridade alta) e cobertura minima de linhas -->
         <profile>
             <id>quality</id>
             <build>
@@ -236,14 +235,6 @@
                 </configuration>
                 <executions>
                     <execution>
-                        <id>default-compile</id>
-                        <configuration>
-                            <excludes>
-                                <exclude>dtm/ide/build/daemon/**</exclude>
-                            </excludes>
-                        </configuration>
-                    </execution>
-                    <execution>
                         <id>compiler-daemon</id>
                         <phase>compile</phase>
                         <goals>
@@ -252,9 +243,31 @@
                         <configuration>
                             <release>8</release>
                             <proc>none</proc>
-                            <includes>
-                                <include>dtm/ide/build/daemon/**</include>
-                            </includes>
+                            <compileSourceRoots>
+                                <compileSourceRoot>${project.basedir}/src/daemon/java</compileSourceRoot>
+                            </compileSourceRoots>
+                            <useIncrementalCompilation>false</useIncrementalCompilation>
+                            <compilerArgs>
+                                <arg>-Xlint:-options</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>swing-designer-host</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                        <configuration>
+                            <release>8</release>
+                            <proc>none</proc>
+                            <compileSourceRoots>
+                                <compileSourceRoot>${project.basedir}/src/host/java</compileSourceRoot>
+                            </compileSourceRoots>
+                            <useIncrementalCompilation>false</useIncrementalCompilation>
+                            <compilerArgs>
+                                <arg>-Xlint:-options</arg>
+                            </compilerArgs>
                         </configuration>
                     </execution>
                 </executions>

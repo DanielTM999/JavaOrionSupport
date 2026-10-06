@@ -27,7 +27,7 @@ class JavaFileChangeRouterTest {
         try {
             router.acceptCreated(file);
             router.accept(file, StandardWatchEventKinds.ENTRY_MODIFY);
-            router.dispatch(file, 1); // The first timer already left its queue before cancellation.
+            router.dispatch(file, 1);
             assertTrue(events.isEmpty());
             assertTrue(latch.await(3, TimeUnit.SECONDS));
             assertEquals(1, events.size());

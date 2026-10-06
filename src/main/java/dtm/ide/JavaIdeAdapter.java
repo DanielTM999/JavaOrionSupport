@@ -53,6 +53,7 @@ import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointDialogView;
 import dtm.ide.api.project.editor.NativeEditorType;
+import dtm.ide.api.project.editor.IdeTabMenuContext;
 import dtm.ide.api.project.tree.PathRenameDecision;
 import dtm.ide.api.project.tree.PathTransferDecision;
 import dtm.ide.api.project.tree.PathTransferRequest;
@@ -71,6 +72,8 @@ import dtm.ide.build.incremental.IncrementalJavaBuilder;
 import dtm.ide.build.incremental.ModuleBuildState;
 import dtm.ide.build.BuildRunConfigurations;
 import dtm.ide.build.BuildSystem;
+import dtm.ide.swingdesigner.SwingDesignerEnvironment;
+import dtm.ide.swingdesigner.SwingDesignerSupport;
 import dtm.ide.build.GradleBuildService;
 import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.build.MavenBuildService;
@@ -480,6 +483,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile IdeProjectContext projectContext;
     private volatile JdkService jdkService;
     private volatile JdkInstallation projectJdk;
+    private volatile SwingDesignerSupport swingDesigner;
+    private volatile OutputPanelHandle swingDesignerOutput;
     private volatile JdtBuildMode appliedBuildMode;
     private volatile JdkManagerPanel jdkManagerPanel;
     private static final String STRUCTURE_TAB_ID = "javaProjectStructure";
@@ -623,12 +628,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    /**
-     * Releases everything bound to the current project. Used when the project is closed and
-     * when {@link #bind} receives a different root without a close in between. When switching,
-     * only a language server still bound to the old root is stopped, so the start requested
-     * for the new root is never cancelled by this teardown.
-     */
     private void teardownProject(boolean switching) {
         Path closingRoot;
         synchronized (lifecycleLock) {
@@ -653,6 +652,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         buildSystem = null;
         dependencyService = null;
         runSupport = null;
+        closeSwingDesigner();
         runBuildProgress.set(null);
         cancelStartupBuild();
         hideProgress(STARTUP_BUILD_PROGRESS_ID);
@@ -707,6 +707,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         lifecycle.incrementAndGet();
         cancelStartupBuild();
         background.close();
+        closeSwingDesigner();
         dtm.ide.run.OwnedRunProcesses.shutdownAll();
         debugStartGeneration.incrementAndGet();
         closeDebugRelay();
@@ -1428,7 +1429,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return lifecycle.get() == ticket && root != null && root.equals(projectRoot);
     }
 
-    /** Publishes the descriptor only if the project did not change while it was computed. */
     private boolean publishDescriptor(long ticket, Path root, JavaProjectDescriptor described) {
         List<RunConfigurationData> configurations = buildStaticRunConfigurations(described);
         synchronized (lifecycleLock) {
@@ -1644,10 +1644,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return javaCompletion(mergeCompletionSuggestions(contextual, local), context);
     }
 
-    /**
-     * Java completion that never blocks the caller on JDT LS: local sources answer immediately
-     * and the semantic request completes the future when the server replies.
-     */
     @Override
     public CompletableFuture<List<AutoCompleteItem>> getCompletionSuggestionsAsync(
             IdeCompletionContext context) {
@@ -2153,7 +2149,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private static volatile DeclarationsMemo declarationsMemo;
 
-    /** Unused-method and unused-field passes run on the same buffer back to back. */
     private static List<JavaLexicalSource.Declared> declarationsOf(String text) {
         DeclarationsMemo memo = declarationsMemo;
         if (memo != null && (memo.text() == text || memo.text().equals(text))) {
@@ -4472,7 +4467,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private void publishNavigationResult(long ticket, long session, IdeEditorContext editor,
                                          Path file, String requestedText, Kind kind, Result result) {
         if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
-        // Read snippets off the EDT, including snapshots of other open buffers.
         List<UsagesPopup.Item> items = needsUsagesPopup(kind, result.locations())
                 ? buildUsageItems(result.locations(), file, requestedText) : List.of();
         SwingUtilities.invokeLater(() -> {
@@ -5916,6 +5910,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp != null && JavaProjectConventions.isJava(filePath)) {
             lsp.saveDocument(filePath, content);
         }
+        SwingDesignerSupport designer = swingDesigner;
+        if (designer != null && JavaProjectConventions.isJava(filePath)) {
+            designer.onJavaFileSaved(filePath);
+        }
         if (JavaProjectConventions.isMavenPom(filePath)
                 || JavaProjectConventions.isGradleBuildFile(filePath)) {
             onBuildFileChanged(filePath);
@@ -5965,7 +5963,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     Result resolveNavigation(Path filePath, String source, int line, int col, Kind kind) {
         if (!JavaProjectConventions.isJava(filePath)) return Result.of(Status.UNAVAILABLE);
-        // Spring property literals have their own identity; plain Java symbols belong to JDT LS.
         long springStart = System.nanoTime();
         SpringNavigation.Target spring = springTargetAt(filePath, source, line, col);
         long springMs = elapsedMs(springStart);
@@ -6137,6 +6134,10 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         boolean singleDirectory = selectedPaths.size() == 1 && Files.isDirectory(selected);
         contributeNewJavaFileMenu(menu, current, directory, singleDirectory);
+        if (selectedPaths.size() == 1 && SwingDesignerSupport.isJavaSource(selected)) {
+            menu.item(text("swing.viewer.open", "Visualizar Swing"), JavaIcons.javaClass(JavaIcons.SMALL),
+                    event -> openSwingViewer(selected));
+        }
 
         int position = singleDirectory ? IDE_NEW_MENU_INDEX + 1 : Integer.MAX_VALUE;
         if (singleDirectory) {
@@ -6563,7 +6564,123 @@ public class JavaIdeAdapter extends IdeAdapter {
                         event -> showEvaluateDialog(editorContext, 0))
                 .item(text("debug.addWatch", "Add Watch"), debugPaused
                                 && debugExpression != null,
-                        event -> addDebugWatch(debugExpression));
+                        event -> addDebugWatch(debugExpression))
+                .separator()
+                .item(text("swing.viewer.open", "Visualizar Swing"), JavaIcons.javaClass(JavaIcons.SMALL),
+                        event -> openSwingViewer(editorContext.filePath()));
+    }
+
+    @Override
+    public void contributeTabMenu(IdeMenuBuilder menu, IdeTabMenuContext context) {
+        if (menu == null || context == null || !SwingDesignerSupport.isJavaSource(context.filePath())) {
+            return;
+        }
+        menu.separator()
+                .item(text("swing.viewer.open", "Visualizar Swing"), JavaIcons.javaClass(JavaIcons.SMALL),
+                        event -> openSwingViewer(context.filePath()));
+    }
+
+    public void openSwingViewer(Path file) {
+        SwingDesignerSupport support = ensureSwingDesigner();
+        if (support == null) {
+            notifySwingDesigner(text("swing.viewer.noProject", "Abra um projeto Java para usar o Swing Viewer."));
+            return;
+        }
+        support.openViewer(file);
+    }
+
+    private synchronized SwingDesignerSupport ensureSwingDesigner() {
+        if (unloaded || descriptor == null) {
+            return null;
+        }
+        SwingDesignerSupport current = swingDesigner;
+        if (current == null) {
+            current = new SwingDesignerSupport(new AdapterSwingDesignerEnvironment(),
+                    this::openManagedCenterTab, this::notifySwingDesigner);
+            swingDesigner = current;
+        }
+        return current;
+    }
+
+    private void closeSwingDesigner() {
+        SwingDesignerSupport current;
+        synchronized (this) {
+            current = swingDesigner;
+            swingDesigner = null;
+        }
+        if (current != null) {
+            try {
+                current.close();
+            } catch (RuntimeException e) {
+                log.debug("Falha ao encerrar o Swing Designer: {}", e.getMessage());
+            }
+        }
+        swingDesignerOutput = null;
+    }
+
+    private void notifySwingDesigner(String message) {
+        createNotification(NotificationContext.builder()
+                .title(text("swing.viewer.title", "Swing Viewer"))
+                .message(message)
+                .icon(JavaIcons.javaClass(JavaIcons.SMALL))
+                .build());
+    }
+
+    private void writeSwingDesignerOutput(String line) {
+        OutputPanelHandle panel = swingDesignerOutput;
+        if (panel == null) {
+            try {
+                panel = requestOutputPanel("Swing Designer", OutputPanelOptions.output());
+                swingDesignerOutput = panel;
+            } catch (RuntimeException e) {
+                log.debug("Painel de saida do Swing Designer indisponivel: {}", e.getMessage());
+                return;
+            }
+        }
+        writeOutput(panel, line);
+    }
+
+    private final class AdapterSwingDesignerEnvironment implements SwingDesignerEnvironment {
+
+        @Override
+        public JavaProjectDescriptor descriptor() {
+            return descriptor;
+        }
+
+        @Override
+        public JdkInstallation projectJdk() {
+            return getProjectJdk();
+        }
+
+        @Override
+        public java.util.Optional<String> runtimeClasspath(JavaModule module) {
+            BuildSystem build = ensureBuildSystem();
+            return build == null ? java.util.Optional.empty() : runtimeClasspathOf(build, module);
+        }
+
+        @Override
+        public BuildResult compile(JavaModule module, Consumer<String> output) {
+            JavaProjectDescriptor current = descriptor;
+            BuildSystem build = ensureBuildSystem();
+            if (current == null || build == null) {
+                return BuildResult.failed("compile", text("swing.viewer.noBuild",
+                        "O projeto ainda nao foi carregado."));
+            }
+            if (settings().isIncrementalBuild()) {
+                IncrementalJavaBuilder builder = new IncrementalJavaBuilder(current,
+                        JavaIdeAdapter.this::ensureBuildSystem, JavaIdeAdapter.this::getProjectJdk);
+                if (builder.isApplicable(module)) {
+                    return builder.build(module, false, output);
+                }
+            }
+            return build.execute(BuildRequest.of(BuildSystem.BuildAction.COMPILE, module)
+                    .withSkipTests(true), output);
+        }
+
+        @Override
+        public void output(String line) {
+            writeSwingDesignerOutput(line);
+        }
     }
 
     private void contributeBuildFileEditorMenu(IdeMenuBuilder menu) {
@@ -6716,7 +6833,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                     JavaRunTypes.SPRING_BOOT, formContext));
         }
         contributions.add(new JavaRunConfigurationContribution(JavaRunTypes.JAR, formContext));
-        // Maven aparece apenas em projetos Maven e Gradle apenas em projetos Gradle.
         if (current.isMaven()) {
             contributions.add(new JavaRunConfigurationContribution(
                     JavaRunTypes.MAVEN, formContext));
@@ -6789,8 +6905,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         String type = configuration.getType();
-        // A API do formulario nao permite bloquear o Apply, entao a configuracao invalida e
-        // aceita mas nao pode ser executada: Run e Debug ficam desabilitados.
         boolean valid = JavaRunValidation.validate(configuration,
                 JavaRunValidation.Context.of(descriptor)).isValid();
         boolean runnable = valid && JavaRunTypes.supportsRun(type);
@@ -6901,13 +7015,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return handle;
     }
 
-    /**
-     * Inicia a depuracao de uma JVM remota.
-     *
-     * <p>No modo Attach a Orion conecta diretamente na JVM. No modo Listen ela abre a porta e
-     * espera a JVM conectar, retransmitindo o trafego JDWP por um {@link JdwpRelay} porque o
-     * debug adapter oficial nao sabe escutar.</p>
-     */
     private RunProcessHandle launchRemoteDebug(RunConfigurationData configuration,
                                                RunExecutionContext context) {
         JavaRunValidation.Report report = JavaRunValidation.validate(configuration,
@@ -7102,7 +7209,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    /** Typing only needs the run/coverage buttons to settle once the user pauses. */
     private void scheduleRunButtonsRefresh() {
         long ticket = runButtonsTicket.incrementAndGet();
         background.schedule(() -> {
@@ -7368,7 +7474,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             repaintDebugBreakpointLines();
             forgetDebugLibrarySources();
         }
-        // JAR externo e Remote JVM nao tem classes locais confiaveis para recarregar.
         boolean hotReloadable = active && supportsHotReloadForSelection();
         requestSetHotReloadButtonVisible(hotReloadable);
         requestSetHotReloadButtonEnabled(hotReloadable);

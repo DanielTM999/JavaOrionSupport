@@ -37,7 +37,6 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Validates the editor buffer without reading files or resolving Maven artifacts. */
 public final class PomDiagnostics {
 
     private static final String NAMESPACE = "http://maven.apache.org/POM/4.0.0";

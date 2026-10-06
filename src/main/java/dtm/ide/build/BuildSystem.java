@@ -58,15 +58,6 @@ public interface BuildSystem {
         return executeToolCommand(module, command, output);
     }
 
-    /**
-     * Monta, sem executar, o comando da ferramenta para os objetivos/tasks informados.
-     *
-     * <p>Usado pelas configuracoes de execucao Maven, Gradle e Testes, que iniciam o processo
-     * por conta propria para obter PTY, saida incremental e cancelamento.</p>
-     *
-     * @return vazio quando a implementacao nao possui uma ferramenta externa (por exemplo
-     *         {@code javac}).
-     */
     default Optional<BuildCommand> toolCommand(JavaModule module, List<String> goals,
                                                BuildCommand.Options options) {
         return Optional.empty();

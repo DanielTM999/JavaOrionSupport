@@ -18,10 +18,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Montagem dos comandos reaproveitada pelas configuracoes de execucao Maven e Gradle, para
- * que elas nao divirjam do que os servicos de build ja executam.
- */
 class BuildToolCommandTest {
 
     @TempDir

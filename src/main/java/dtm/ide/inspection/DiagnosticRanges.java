@@ -23,12 +23,6 @@ public final class DiagnosticRanges {
         return List.copyOf(clamped);
     }
 
-    /**
-     * Keeps the precise server range for single-line diagnostics and reduces a multi-line
-     * range to its first meaningful source line. Language servers sometimes attach a parser
-     * error to a complete declaration; painting that range literally makes a whole file look
-     * broken even though it is only one diagnostic.
-     */
     public static List<Diagnostic> compactMultiline(Collection<Diagnostic> diagnostics,
                                                      String text) {
         if (diagnostics == null || diagnostics.isEmpty()) {

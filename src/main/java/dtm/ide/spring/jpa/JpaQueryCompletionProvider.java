@@ -58,7 +58,6 @@ public final class JpaQueryCompletionProvider {
     private JpaQueryCompletionProvider() {
     }
 
-    /** Completion and trigger checks scan the same buffer repeatedly; most files have no @Query. */
     private static JpaQueryLiteralScanner.Scan scanOf(String source) {
         if (source.indexOf("Query") < 0) {
             return JpaQueryLiteralScanner.EMPTY;

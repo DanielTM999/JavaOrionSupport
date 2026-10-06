@@ -11,12 +11,6 @@ import java.awt.event.ItemEvent;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * Formulario da configuracao {@code java.test} (JUnit/TestNG).
- *
- * <p>O escopo define o que sera executado -- todos os testes do modulo, um pacote, uma
- * classe, um metodo ou um padrao livre -- e o alvo se adapta ao escopo escolhido.</p>
- */
 public final class TestRunForm extends RunConfigurationFormBase {
 
     private static String text(String key, String fallback) {
@@ -79,7 +73,6 @@ public final class TestRunForm extends RunConfigurationFormBase {
         return options;
     }
 
-    /** O alvo so faz sentido fora do escopo "todos"; o texto de ajuda segue o escopo. */
     private void updateTargetField() {
         TestScope selected = TestScope.parse(scope.value());
         boolean enabled = selected.requiresTarget();

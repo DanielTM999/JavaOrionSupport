@@ -6,7 +6,6 @@ import dtm.stools.component.panels.editor.code.api.Range;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Converts between character offsets and the line/column positions used by LSP and the editor. */
 public final class TextOffsets {
 
     private TextOffsets() {
@@ -25,7 +24,6 @@ public final class TextOffsets {
         return new Position(line, bounded - lineStart);
     }
 
-    /** Offsets {@code [start, end)} for each range, clamped to the text. */
     public static List<int[]> offsets(String text, List<Range> ranges) {
         String source = text == null ? "" : text;
         List<Integer> lineStarts = new ArrayList<>();

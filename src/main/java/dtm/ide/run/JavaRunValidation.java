@@ -16,13 +16,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
-/**
- * Validacao das configuracoes de execucao Java.
- *
- * <p>A API de formulario do Workbench nao permite bloquear o botao Apply, entao a validacao
- * roda em tres momentos: no formulario (erros inline), na selecao da configuracao (para
- * desabilitar Run/Debug) e no lancador (protecao final).</p>
- */
 public final class JavaRunValidation {
 
     private static String text(String key, String fallback) {
@@ -37,11 +30,9 @@ public final class JavaRunValidation {
     private JavaRunValidation() {
     }
 
-    /** Um erro associado a uma propriedade do formulario. */
     public record Problem(String field, String message) {
     }
 
-    /** Resultado da validacao de uma configuracao. */
     public record Report(List<Problem> problems) {
 
         public Report {
@@ -74,14 +65,12 @@ public final class JavaRunValidation {
         }
     }
 
-    /** Contexto do projeto usado para resolver modulos e caminhos relativos. */
     public record Context(JavaProjectDescriptor descriptor, boolean checkFileSystem) {
 
         public static Context of(JavaProjectDescriptor descriptor) {
             return new Context(descriptor, true);
         }
 
-        /** Contexto que ignora a existencia dos arquivos, util enquanto o usuario digita. */
         public static Context lenient(JavaProjectDescriptor descriptor) {
             return new Context(descriptor, false);
         }
@@ -247,7 +236,6 @@ public final class JavaRunValidation {
         environmentProblem(value(properties, JavaRunTypes.ENVIRONMENT)).ifPresent(problems::add);
     }
 
-    /** Valida o editor multilinha de ambiente no formato {@code NOME=valor}. */
     public static Optional<Problem> environmentProblem(String raw) {
         if (raw == null || raw.isBlank()) {
             return Optional.empty();

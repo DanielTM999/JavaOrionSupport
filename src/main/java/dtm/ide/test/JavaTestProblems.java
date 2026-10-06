@@ -11,7 +11,6 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Converts test report failures to navigable problems while retaining compiler diagnostics. */
 public final class JavaTestProblems {
 
     private JavaTestProblems() {

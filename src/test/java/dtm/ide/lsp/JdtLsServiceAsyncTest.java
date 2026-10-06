@@ -120,7 +120,6 @@ class JdtLsServiceAsyncTest {
         declared.set(service, value);
     }
 
-    /** Reads the frames the client writes and answers the requests a test picks. */
     private static final class FakeServer {
 
         final PipedInputStream clientInput = new PipedInputStream(1 << 16);
@@ -178,7 +177,6 @@ class JdtLsServiceAsyncTest {
                     received.add(MAPPER.readTree(body));
                 }
             } catch (IOException ignored) {
-                // o cliente fechou a conexao
             }
         }
 

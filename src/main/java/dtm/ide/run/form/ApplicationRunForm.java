@@ -15,12 +15,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Formulario das configuracoes {@code java.run} e {@code java.springBoot}.
- *
- * <p>A secao "Spring Boot" aparece apenas para o tipo Spring Boot; as demais secoes sao
- * identicas nos dois casos.</p>
- */
 public final class ApplicationRunForm extends RunConfigurationFormBase {
 
     private static String text(String key, String fallback) {
@@ -100,7 +94,6 @@ public final class ApplicationRunForm extends RunConfigurationFormBase {
         revalidateOnEdit(serverPort);
     }
 
-    /** Ao escolher uma classe principal conhecida, seleciona automaticamente o modulo dela. */
     private void wireMainClassSelection() {
         mainClass.addItemListener(event -> {
             if (event.getStateChange() != ItemEvent.SELECTED) {

@@ -19,7 +19,6 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Conservative fallback for Safe Delete when the language server has not indexed a source yet. */
 public final class JavaSafeDeleteScanner {
 
     private static final Pattern TYPE_DECLARATION = Pattern.compile(

@@ -249,7 +249,6 @@ public final class JavaDebugValueTree extends JPanel {
                 if (values.isEmpty()) node.add(ValueNode.empty());
             }
             model.nodeStructureChanged(node);
-            // Do not expand on failure: expansion is the user's explicit retry action.
             if (error == null) tree.expandPath(path);
         }));
     }

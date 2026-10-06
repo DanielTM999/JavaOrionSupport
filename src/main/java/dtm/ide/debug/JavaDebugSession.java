@@ -648,8 +648,6 @@ public final class JavaDebugSession implements AutoCloseable, DebuggerCompletion
         DapClient current = client;
         if (current != null) {
             try {
-                // Uma JVM remota apenas perde o depurador; um processo iniciado pela IDE
-                // e encerrado junto com a sessao.
                 current.request("disconnect", Map.of(
                         "terminateDebuggee", attachTarget.terminateOnDisconnect(),
                         "restart", false)).get(2, TimeUnit.SECONDS);

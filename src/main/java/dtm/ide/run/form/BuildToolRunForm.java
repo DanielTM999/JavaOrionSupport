@@ -11,14 +11,6 @@ import javax.swing.JComboBox;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Formulario compartilhado pelas configuracoes {@code java.maven} e {@code java.gradle}.
- *
- * <p>Os dois tipos delegam a execucao ao build tool do projeto, entao mudam apenas os rotulos
- * e o campo de profiles, exclusivo do Maven. O Debug fica desabilitado para ambos: depurar o
- * processo Maven/Gradle nao equivale a depurar a aplicacao produzida -- para isso existe a
- * configuracao Remote JVM.</p>
- */
 public final class BuildToolRunForm extends RunConfigurationFormBase {
 
     private static String text(String key, String fallback) {

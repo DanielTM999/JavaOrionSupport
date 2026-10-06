@@ -10,12 +10,12 @@ import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 
-final class FlatTreeRenderer extends TreeNodeRenderer {
+public final class FlatTreeRenderer extends TreeNodeRenderer {
 
     private boolean paintHighlight;
     private Color highlight;
 
-    FlatTreeRenderer() {
+    public FlatTreeRenderer() {
         setOpaque(false);
     }
 
@@ -31,8 +31,6 @@ final class FlatTreeRenderer extends TreeNodeRenderer {
 
     @Override
     protected void paintComponent(Graphics g) {
-        // Swing paints tree renderers through a CellRendererPane, where nested
-        // renderer components are not always validated before the first frame.
         doLayout();
         if (paintHighlight && highlight != null) {
             Graphics2D graphics = (Graphics2D) g.create();

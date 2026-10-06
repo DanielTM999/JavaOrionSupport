@@ -416,7 +416,6 @@ public class JdtLsService {
         this.maxHeap = value == null || value.isBlank() ? "2G" : value.trim();
     }
 
-    /** Applies immediately to a running server through {@code workspace/didChangeConfiguration}. */
     public void setInlayHintsMode(dtm.ide.settings.InlayHintsMode value) {
         dtm.ide.settings.InlayHintsMode mode = value == null ? dtm.ide.settings.InlayHintsMode.LITERALS : value;
         if (mode == inlayHintsMode) {
@@ -703,10 +702,6 @@ public class JdtLsService {
         }
     }
 
-    /**
-     * The JSON-RPC stream broke but the process may still be running: kill it so the regular
-     * exit path reports the crash and schedules a restart.
-     */
     private void onProtocolLost(Process server, long launchGeneration) {
         if (!isCurrent(launchGeneration) || !server.isAlive()) {
             return;
@@ -742,7 +737,6 @@ public class JdtLsService {
         }
     }
 
-    /** Clears the crash history, e.g. when the user restarts the server by hand. */
     public void resetCrashHistory() {
         synchronized (crashRestarts) {
             crashRestarts.clear();
@@ -1211,7 +1205,6 @@ public class JdtLsService {
             try {
                 handle.onExit().get(3, TimeUnit.SECONDS);
             } catch (TimeoutException ignored) {
-                // Escala abaixo para encerramento forcado.
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception error) {
@@ -1484,10 +1477,6 @@ public class JdtLsService {
         return current;
     }
 
-    /**
-     * Parses outside the service lock and notifies listeners after leaving it, so diagnostics
-     * arriving for a large file never hold up document changes coming from the editor.
-     */
     void onPublishDiagnostics(JsonNode params) {
         if (params == null) {
             return;
@@ -1755,12 +1744,10 @@ public class JdtLsService {
         }
     }
 
-    /** Tells JDT LS that a source appeared on disk outside the editor. */
     public void pathCreated(Path createdPath) {
         queueWatchedFile(createdPath, WatchedFileBatch.CREATED);
     }
 
-    /** Tells JDT LS that a source changed on disk outside the editor. */
     public void pathChanged(Path changedPath) {
         queueWatchedFile(changedPath, WatchedFileBatch.CHANGED);
     }
@@ -1885,7 +1872,6 @@ public class JdtLsService {
         drainWatchedFiles();
     }
 
-    /** Asks JDT LS to reread the build files of the project. */
     public void projectConfigurationUpdate() {
         invalidateWorkspaceNavigation();
         LspJsonRpcClient rpc = client;
@@ -1903,7 +1889,6 @@ public class JdtLsService {
                 Map.of("uri", LspConversions.toUri(root)));
     }
 
-    /** Tells JDT LS that a source disappeared, including files moved to Orion's trash. */
     public void pathDeleted(Path deletedPath) {
         if (deletedPath == null) {
             return;
@@ -2262,11 +2247,6 @@ public class JdtLsService {
         }
     }
 
-    /**
-     * Requests completion without blocking the caller. The future completes with an empty list
-     * when the document changed while JDT LS was answering, and cancelling it cancels the
-     * request on the server.
-     */
     public CompletableFuture<List<AutoCompleteItem>> completeAsync(Path filePath, String text, int line,
                                                                    int col, CompletionTrigger trigger,
                                                                    Character triggerCharacter,
@@ -2335,7 +2315,6 @@ public class JdtLsService {
         return items;
     }
 
-    /** Fills in the Javadoc of the selected completion item, which JDT LS sends lazily. */
     public CompletableFuture<AutoCompleteItem> resolveCompletionAsync(AutoCompleteItem item) {
         if (item == null || !capabilities.completionResolve() || !(item.data() instanceof JsonNode raw)) {
             return CompletableFuture.completedFuture(item);
@@ -2517,7 +2496,6 @@ public class JdtLsService {
                 .thenApply(result -> isCurrentText(filePath, text) ? LspConversions.signatureHelp(result) : null);
     }
 
-    /** Extend-selection chain for a position, from the innermost range to the whole file. */
     public CompletableFuture<List<Range>> selectionRangesAsync(Path filePath, String text, int line, int col) {
         if (!syncBeforeRequest(filePath, text)) {
             return CompletableFuture.completedFuture(List.of());
@@ -2601,7 +2579,6 @@ public class JdtLsService {
         }
         Map<String, Object> params = positionParams(filePath, line, col);
         if (extraParams != null) params.putAll(extraParams);
-        // Explicit navigation runs off the EDT and needs more time than hover/completion.
         long requestStart = System.nanoTime();
         JsonNode response = requestCoalesced(method, params, timeoutMs, key, interactive);
         if (log.isDebugEnabled()) {
@@ -2740,7 +2717,6 @@ public class JdtLsService {
         return callHierarchyItems(result);
     }
 
-    /** {@code null} when the server cannot answer yet, so the editor keeps its brace-based folding. */
     public CompletableFuture<List<FoldRange>> foldingRangesAsync(Path filePath, String text) {
         if (!capabilities.foldingRange() || !isReady() || !syncBeforeRequest(filePath, text)) {
             return CompletableFuture.completedFuture(null);
@@ -3722,7 +3698,6 @@ public class JdtLsService {
                 resolved.add(lens == null ? unresolvedLens(node, Status.INDEXING) : lens);
             }
             publishLenses(file, uri, work, resolved);
-            // Each pass advances through the entire document. A slow lens cannot starve later batches.
             for (int attempt = 0; attempt <= MAX_CODE_LENS_RETRIES && currentLensWork(uri, work); attempt++) {
                 List<Integer> remaining = new ArrayList<>();
                 for (int i = 0; i < resolved.size(); i++) {
@@ -3823,7 +3798,6 @@ public class JdtLsService {
         return edits.isEmpty() ? null : TextEditApplier.apply(text, edits);
     }
 
-    /** Sequential save transformations share the updated snapshot without accepting stale requests. */
     public String prepareSave(Path file, String source, boolean organize, boolean format,
                               int tabSize, boolean spaces) {
         if (!syncBeforeRequest(file, source)) return source;
@@ -3885,12 +3859,6 @@ public class JdtLsService {
         return diagnosticsByPath.getOrDefault(normalizePath(filePath), List.of());
     }
 
-    /**
-     * Discards every diagnostic cached from the current server session.
-     *
-     * <p>The listeners are notified after the caches are empty so editors can remove stale
-     * markers immediately, even when the language server itself is unresponsive.</p>
-     */
     public void clearDiagnostics() {
         Set<Path> affected = new java.util.LinkedHashSet<>(diagnosticsByPath.keySet());
         affected.addAll(rawDiagnosticsByPath.keySet());
@@ -3977,11 +3945,6 @@ public class JdtLsService {
         return requestAsync(method, positionParams(filePath, line, col), interactiveTimeoutMs(), true);
     }
 
-    /**
-     * Non-blocking request. A timeout cancels the request (which tells JDT LS to drop it) and
-     * completes the future with {@code null}, as do failures and edits to the document for the
-     * methods in {@link #CANCELLED_ON_EDIT}.
-     */
     private CompletableFuture<JsonNode> requestAsync(String method, Object params, long timeoutMs,
                                                      boolean interactive) {
         LspJsonRpcClient rpc = client;
@@ -4024,13 +3987,10 @@ public class JdtLsService {
             return true;
         }
         if (!current.equals(text)) {
-            // Um snapshot ja visto e diferente do atual pertence a uma requisicao atrasada.
             if (!authoritative && documents.hasSeen(uri, text)) {
                 log.debug("Requisicao descartada para {}: revisao anterior do editor", uri);
                 return false;
             }
-            // Um snapshot novo vindo de uma acao interativa e autoritativo. Eventos de digitacao
-            // podem estar enfileirados em outro executor, sobretudo antes de Ctrl+click/definition.
             log.debug("Sincronizando {} antes da requisicao interativa", uri);
             changeDocument(filePath, text);
         }
@@ -4077,10 +4037,6 @@ public class JdtLsService {
         }
     }
 
-    /**
-     * Read-only requests whose answer is tied to the document version: once the user edits the
-     * file the answer is stale, so the request is cancelled instead of keeping JDT LS busy.
-     */
     private static final Set<String> CANCELLED_ON_EDIT = Set.of(
             "textDocument/hover", "textDocument/signatureHelp", "textDocument/semanticTokens/full",
             "textDocument/inlayHint", "textDocument/codeLens", "textDocument/documentHighlight",

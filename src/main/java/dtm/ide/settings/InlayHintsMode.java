@@ -1,6 +1,5 @@
 package dtm.ide.settings;
 
-/** How much JDT LS shows as inlay hints; the keys are the values JDT LS expects. */
 public enum InlayHintsMode {
     NONE("none", "Desligadas"),
     LITERALS("literals", "Nomes de parametros para literais"),

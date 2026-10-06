@@ -254,11 +254,6 @@ public final class SpringInitializrClient {
         return url.toString();
     }
 
-    /**
-     * Converte a notacao interna exposta pelo metadata do Initializr para a versao
-     * efetivamente publicada nos repositorios Spring/Maven. O Spring Boot 2 e anterior
-     * usava {@code .RELEASE} de verdade, portanto essas versoes permanecem intactas.
-     */
     static String normalizeBootVersion(String version) {
         String value = version == null ? "" : version.trim();
         Matcher matcher = MODERN_QUALIFIED_BOOT_VERSION.matcher(value);

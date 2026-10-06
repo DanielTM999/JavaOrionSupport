@@ -66,6 +66,22 @@ class JavacDaemonsTest {
         assertEquals("\"C:\\\\dir com espaco\\\\A.java\"", JavacDaemons.quote("C:\\dir com espaco\\A.java"));
     }
 
+    @Test
+    void theDaemonIsCompiledForJava8AndSharesTheProtocolConstants() throws Exception {
+        Class<?> daemon = Class.forName(JavacDaemons.DAEMON_CLASS);
+        String resource = JavacDaemons.DAEMON_CLASS.replace('.', '/') + ".class";
+
+        try (java.io.DataInputStream in = new java.io.DataInputStream(
+                daemon.getClassLoader().getResourceAsStream(resource))) {
+            assertEquals(0xCAFEBABE, in.readInt());
+            in.readUnsignedShort();
+            assertEquals(52, in.readUnsignedShort());
+        }
+        assertEquals(JavacDaemons.REQUEST, daemon.getField("REQUEST").get(null));
+        assertEquals(JavacDaemons.END, daemon.getField("END").get(null));
+        assertEquals(JavacDaemons.UNAVAILABLE, daemon.getField("UNAVAILABLE").get(null));
+    }
+
     private static List<String> command(Path output, Path source) {
         Path javac = Path.of(System.getProperty("java.home"), "bin",
                 System.getProperty("os.name").startsWith("Windows") ? "javac.exe" : "javac");

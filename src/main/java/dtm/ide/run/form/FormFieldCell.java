@@ -9,12 +9,6 @@ import javax.swing.JPanel;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 
-/**
- * Uma celula do formulario: rotulo, controle e a linha de ajuda/erro logo abaixo.
- *
- * <p>Todas as celulas tem a mesma altura de controle e o mesmo espacamento, o que mantem os
- * campos alinhados independentemente do tipo de entrada usado.</p>
- */
 public final class FormFieldCell extends JPanel {
 
     private final JLabel label = new JLabel();
@@ -44,7 +38,6 @@ public final class FormFieldCell extends JPanel {
         return control;
     }
 
-    /** Texto de apoio permanente, exibido enquanto nao ha erro. */
     public FormFieldCell helper(String text) {
         this.helperText = text == null ? "" : text;
         if (message.getForeground() != UiTokens.danger()) {
@@ -60,7 +53,6 @@ public final class FormFieldCell extends JPanel {
         return this;
     }
 
-    /** Marca o campo com um erro inline. */
     public void setError(String text) {
         if (text == null || text.isBlank()) {
             clearError();

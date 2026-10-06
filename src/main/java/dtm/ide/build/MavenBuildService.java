@@ -277,12 +277,6 @@ public final class MavenBuildService implements BuildSystem {
         }
     }
 
-    /**
-     * Sem uma fase do ciclo de vida o Maven 3 nao resolve os modulos irmaos pelo reactor e passa
-     * a exigir o jar instalado no repositorio local. A fase {@code compile} (ou
-     * {@code test-compile}) faz o reactor apontar cada irmao para o seu {@code target/classes},
-     * enquanto os skips evitam compilar e copiar recursos de novo.
-     */
     List<String> reactorClasspathCommand(JavaModule module, String scope) {
         boolean test = "test".equals(scope);
         List<String> command = new ArrayList<>(baseCommand());

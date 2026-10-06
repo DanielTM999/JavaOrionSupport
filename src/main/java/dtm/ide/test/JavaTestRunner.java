@@ -176,7 +176,6 @@ public class JavaTestRunner {
         return run(List.of(), module, output);
     }
 
-    /** Executa um escopo de configuracao ({@code java.test}) em vez de uma lista de testes. */
     public TestRun run(TestScope scope, String target, JavaModule module,
                        Consumer<String> output) {
         if (buildSystem == null || descriptor == null) {

@@ -21,10 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Servidor DAP falso confirmando o que a sessao envia ao attach e ao desconectar de uma JVM
- * remota.
- */
 class JavaRemoteDebugSessionTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -104,7 +100,6 @@ class JavaRemoteDebugSessionTest {
         assertEquals(JavaAttachTarget.DEFAULT_TIMEOUT, target.timeoutMillis());
     }
 
-    /** Adapter DAP minimo que responde tudo com sucesso e registra as requisicoes. */
     private static final class FakeAdapter implements AutoCloseable {
 
         private final ServerSocket server;
@@ -154,7 +149,6 @@ class JavaRemoteDebugSessionTest {
                     future(command).complete(request);
                 }
             } catch (Exception ignored) {
-                // O fim da conexao encerra o adapter falso.
             }
         }
 

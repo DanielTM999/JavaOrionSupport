@@ -6,10 +6,6 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
-/**
- * Stops an application gracefully on the first request and forcefully terminates its complete
- * process tree on subsequent requests.
- */
 @Slf4j
 final class TwoStageProcessTerminator {
 

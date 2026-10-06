@@ -11,13 +11,6 @@ import java.awt.event.ItemEvent;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * Formulario da configuracao {@code java.remote}.
- *
- * <p>No modo Attach a Orion conecta em uma JVM que ja esta escutando ({@code server=y}); no
- * modo Listen a Orion abre a porta e espera a JVM alvo conectar ({@code server=n}). O comando
- * JDWP correspondente e exibido pronto para copiar.</p>
- */
 public final class RemoteRunForm extends RunConfigurationFormBase {
 
     private static String text(String key, String fallback) {
@@ -109,7 +102,6 @@ public final class RemoteRunForm extends RunConfigurationFormBase {
         updateJdwpCommand();
     }
 
-    /** Mostra o {@code -agentlib:jdwp} exato que a JVM alvo precisa usar. */
     private void updateJdwpCommand() {
         boolean listen = isListen();
         String address = listen

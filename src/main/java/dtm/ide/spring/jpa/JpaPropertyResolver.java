@@ -13,7 +13,6 @@ public final class JpaPropertyResolver {
     private JpaPropertyResolver() {
     }
 
-    /** Resolves literal JPQL attribute names; only dots separate path segments. */
     public static Optional<List<JpaField>> resolveJpqlPath(JpaEntity root, String expression,
                                                            EntityLookup lookup) {
         if (root == null || expression == null || expression.isBlank()) {

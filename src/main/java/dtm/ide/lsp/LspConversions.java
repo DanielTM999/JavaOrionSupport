@@ -56,7 +56,6 @@ final class LspConversions {
         return new Range(position(node.get("start")), position(node.get("end")));
     }
 
-    /** Flattens an LSP SelectionRange (range + parent chain) into ranges from inner to outer. */
     static List<Range> selectionChain(JsonNode result) {
         JsonNode node = result != null && result.isArray() && !result.isEmpty() ? result.get(0) : result;
         List<Range> chain = new ArrayList<>();
@@ -278,7 +277,6 @@ final class LspConversions {
         return expanded.replaceAll("\\$\\{?\\d+}?", "");
     }
 
-    /** Copies the documentation of a {@code completionItem/resolve} answer into the item. */
     static AutoCompleteItem withResolvedDocumentation(AutoCompleteItem item, JsonNode resolved) {
         if (item == null || resolved == null || !resolved.isObject()) {
             return item;
@@ -457,7 +455,6 @@ final class LspConversions {
                 Map.of("uri", uri, "data", rawData(node.get("data"))));
     }
 
-    /** LSP folding ranges; the import block starts collapsed, like in IntelliJ. */
     static List<FoldRange> foldRanges(JsonNode result) {
         if (result == null || !result.isArray()) {
             return List.of();
@@ -475,7 +472,6 @@ final class LspConversions {
         return List.copyOf(ranges);
     }
 
-    /** Keeps the original LSP item in {@code data} so it can be sent back unchanged. */
     static TypeHierarchyItem typeHierarchyItem(JsonNode node) {
         if (node == null || !node.isObject()) {
             return null;

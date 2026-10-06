@@ -99,9 +99,7 @@ final class BuildProblemsCoordinator {
         return changed;
     }
 
-    /** Shifts every located problem of {@code file} with a single pass over both texts. */
-    private static List<BuildDiagnostic> moved(List<BuildDiagnostic> problems, Path file,
-                                               String before, String after) {
+    private static List<BuildDiagnostic> moved(List<BuildDiagnostic> problems, Path file, String before, String after) {
         List<BuildDiagnostic> result = new ArrayList<>();
         for (BuildDiagnostic problem : problems) {
             if (!file.equals(problem.file()) || !problem.hasLocation()) {

@@ -8,10 +8,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * IntelliJ-style postfix templates: {@code list.for}, {@code value.nn}, {@code expr.sout}...
- * The template replaces the word after the dot, and an additional edit removes {@code expr.}.
- */
 public final class PostfixCompletionProvider {
 
     private static final String DETAIL = "postfix";
@@ -37,7 +33,6 @@ public final class PostfixCompletionProvider {
     private PostfixCompletionProvider() {
     }
 
-    /** Postfix items for the word being typed after {@code expr.}, or an empty list. */
     public static List<AutoCompleteItem> suggestions(String text, int caretOffset) {
         if (text == null || caretOffset <= 0 || caretOffset > text.length()) {
             return List.of();
@@ -71,10 +66,6 @@ public final class PostfixCompletionProvider {
         return List.copyOf(items);
     }
 
-    /**
-     * Start of the expression that ends right before {@code dot}: identifiers, member access,
-     * calls, array access and string literals on the same line. Returns -1 when there is none.
-     */
     static int expressionStart(String text, int dot) {
         int index = dot - 1;
         int lineStart = text.lastIndexOf('\n', dot) + 1;

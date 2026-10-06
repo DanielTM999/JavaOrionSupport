@@ -685,7 +685,6 @@ final class JavaProjectWizardView extends JPanel {
                 start = candidate;
             }
         } catch (InvalidPathException ignored) {
-            // O seletor abre no diretorio padrao quando o texto ainda nao forma um caminho valido.
         }
         File selected = OsFilePicker.openDirectory(text("action.browse", "Escolher pasta"), start);
         if (selected != null) {

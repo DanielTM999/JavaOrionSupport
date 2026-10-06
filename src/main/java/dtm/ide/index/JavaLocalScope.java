@@ -119,7 +119,6 @@ public final class JavaLocalScope {
             JavacTask task = (JavacTask) compiler.getTask(null, fileManager, diagnostics,
                     List.of("-proc:none"), null, List.of(file));
             CompilationUnitTree unit = task.parse().iterator().next();
-            // Broken syntax can change nesting. Never guess a binding in that case.
             if (diagnostics.getDiagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR)) {
                 return Parsed.EMPTY;
             }
@@ -128,7 +127,6 @@ public final class JavaLocalScope {
             return new Parsed(scanner.symbols.stream().map(Symbol::snapshot).toList(),
                     List.copyOf(scanner.declared));
         } catch (Exception | LinkageError unavailable) {
-            // A host runtime without jdk.compiler still has semantic navigation through JDT LS.
             fileManager = null;
             return Parsed.EMPTY;
         }
@@ -311,7 +309,6 @@ public final class JavaLocalScope {
             return null;
         }
         @Override public Void visitCase(CaseTree tree, Void unused) {
-            // Labels may contain type/pattern names, which are not local-variable uses.
             if (tree.getCaseKind() == CaseTree.CaseKind.RULE) frames.push(new Frame(tree));
             scan(tree.getStatements(), null);
             scan(tree.getBody(), null);
@@ -325,7 +322,6 @@ public final class JavaLocalScope {
             return null;
         }
         @Override public Void visitBindingPattern(BindingPatternTree tree, Void unused) {
-            // Flow-dependent pattern bindings require JDT LS.
             return null;
         }
     }

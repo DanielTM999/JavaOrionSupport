@@ -38,8 +38,6 @@ public final class JavaProjectSources {
         List<Source> collected = new ArrayList<>();
         Set<Path> visited = new LinkedHashSet<>();
 
-        // Production sources are collected first so the shared limit cannot hide Spring beans
-        // behind a very large test tree.
         collect(descriptor.modules(), false, collected, visited);
         collect(descriptor.modules(), true, collected, visited);
 

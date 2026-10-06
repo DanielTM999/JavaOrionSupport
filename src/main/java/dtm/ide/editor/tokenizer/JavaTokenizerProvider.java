@@ -38,7 +38,6 @@ public final class JavaTokenizerProvider implements TokenizerCodeEditorProvider 
             "Comparable", "CharSequence", "StringBuilder", "StringBuffer", "Void"
     );
 
-    /** Old and new text of an edit are scanned alternately, so two entries avoid thrashing. */
     private record CachedScan(String source, JpaQueryLiteralScanner.Scan scan) {
     }
 

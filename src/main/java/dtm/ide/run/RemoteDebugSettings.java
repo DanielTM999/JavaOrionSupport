@@ -5,12 +5,6 @@ import dtm.ide.debug.JavaAttachTarget;
 
 import java.util.Map;
 
-/**
- * Leitura das propriedades de uma configuracao {@code java.remote}.
- *
- * <p>No modo Attach a Orion conecta em {@code host:porta}; no modo Listen o mesmo campo passa
- * a ser o endereco de bind local em que a Orion espera a JVM alvo.</p>
- */
 public record RemoteDebugSettings(boolean listen, String host, int port, int timeoutMillis) {
 
     public RemoteDebugSettings {
@@ -30,12 +24,10 @@ public record RemoteDebugSettings(boolean listen, String host, int port, int tim
                         JavaRunTypes.DEFAULT_REMOTE_TIMEOUT));
     }
 
-    /** Alvo de attach direto; no modo Listen o attach acontece contra a porta do relay. */
     public JavaAttachTarget attachTarget() {
         return JavaAttachTarget.remote(host, port, timeoutMillis);
     }
 
-    /** Alvo de attach contra a porta loopback exposta pelo relay do modo Listen. */
     public JavaAttachTarget relayTarget(int relayPort) {
         return JavaAttachTarget.remote(JavaAttachTarget.LOCALHOST, relayPort, timeoutMillis);
     }

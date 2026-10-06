@@ -63,7 +63,6 @@ class JdwpRelayTest {
         relay.awaitShutdown(2_000);
 
         assertTrue(relay.isClosed());
-        // A porta volta a ficar livre para uma nova sessao.
         try (ServerSocket reopened = new ServerSocket(listenPort, 1,
                 InetAddress.getByName(LOOPBACK))) {
             assertEquals(listenPort, reopened.getLocalPort());

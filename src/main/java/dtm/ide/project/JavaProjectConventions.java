@@ -48,10 +48,8 @@ public final class JavaProjectConventions {
 
     private static final int SHALLOW_SCAN_DEPTH = 2;
 
-    /** Teto de arquivos por varredura, para nao pagar um projeto inteiro em nenhum caminho. */
     public static final int MAX_SCAN_FILES = 20_000;
 
-    /** Teto da varredura textual de anotacoes, que le o conteudo de cada arquivo. */
     public static final int MAX_ANNOTATION_SCAN_FILES = 2_000;
 
     private JavaProjectConventions() {
@@ -349,14 +347,6 @@ public final class JavaProjectConventions {
         return !javaSources(root, depth, 1).isEmpty();
     }
 
-    /**
-     * Coleta arquivos {@code .java} sob {@code root} podando as pastas ignoradas na descida.
-     * Diferente de {@link Files#walk}, nao entra em {@code target/}, {@code build/},
-     * {@code node_modules/} nem {@code .git/} - o custo dessas subarvores nem chega a ser pago.
-     *
-     * @param maxDepth profundidade maxima relativa a {@code root}; {@code <= 0} significa sem limite
-     * @param maxFiles teto de arquivos coletados; {@code <= 0} usa {@link #MAX_SCAN_FILES}
-     */
     public static List<Path> javaSources(Path root, int maxDepth, int maxFiles) {
         if (root == null || !Files.isDirectory(root)) {
             return List.of();
@@ -408,8 +398,6 @@ public final class JavaProjectConventions {
             }
             declaresBuild |= hasBuildFile(module.root());
         }
-        // Projeto Boot com Maven/Gradle sempre declara o starter ou o plugin. Se ha build script
-        // e ele nao menciona Boot, nao vale ler o codigo-fonte inteiro para confirmar.
         if (declaresBuild) {
             return false;
         }

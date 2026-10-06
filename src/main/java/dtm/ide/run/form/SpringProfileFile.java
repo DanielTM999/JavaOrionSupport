@@ -8,7 +8,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Reads and updates only spring.profiles.active in a module's base configuration file. */
 final class SpringProfileFile {
 
     private static final String KEY = "spring.profiles.active";

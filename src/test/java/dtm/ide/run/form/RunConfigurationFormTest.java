@@ -51,8 +51,6 @@ class RunConfigurationFormTest {
         context = RunFormContext.of(() -> descriptor);
     }
 
-    // --- Regressao do nome ---------------------------------------------------
-
     @Test
     void noFormEverSendsATitleBack() {
         for (String type : List.of(JavaRunTypes.APPLICATION, JavaRunTypes.SPRING_BOOT,
@@ -82,7 +80,6 @@ class RunConfigurationFormTest {
         form.setData(saved);
         RunConfigurationData applied = form.getData();
 
-        // O Workbench mantem o titulo porque o plugin devolve null em vez do rotulo do tipo.
         assertNull(applied.getTitle());
         assertEquals("com.exemplo.Aplicacao",
                 applied.getProperties().get(JavaRunTypes.MAIN_CLASS));
@@ -101,8 +98,6 @@ class RunConfigurationFormTest {
 
         assertEquals("valor", form.getData().getProperties().get("propriedadeAntiga"));
     }
-
-    // --- Round-trip das propriedades ----------------------------------------
 
     @Test
     void applicationPropertiesSurviveTheRoundTrip() {
@@ -228,8 +223,6 @@ class RunConfigurationFormTest {
 
         assertRoundTrip(JavaRunTypes.REMOTE, properties);
     }
-
-    // --- Padroes -------------------------------------------------------------
 
     @Test
     void remoteConfigurationsStartOnLoopbackAttachAndPort5005() {

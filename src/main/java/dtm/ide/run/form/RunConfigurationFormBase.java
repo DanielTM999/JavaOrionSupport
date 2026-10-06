@@ -27,18 +27,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-/**
- * Base dos formularios de configuracao de execucao Java.
- *
- * <p>Duas regras valem para todos os tipos:</p>
- * <ul>
- *   <li>O titulo pertence ao Workbench. {@link #getData()} devolve {@code title = null} e o
- *       plugin nunca reenvia o titulo recebido em {@link #setData(RunConfigurationData)}, de
- *       modo que um nome personalizado como "Minha API Local" nao volta para "Spring Boot".</li>
- *   <li>Propriedades desconhecidas gravadas por versoes anteriores sao preservadas, entao
- *       configuracoes antigas continuam funcionando.</li>
- * </ul>
- */
 public abstract class RunConfigurationFormBase implements RunConfigurationForm {
 
     protected static String text(Class<?> owner, String key, String fallback) {
@@ -92,18 +80,11 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
         return I18n.getText(RunConfigurationFormBase.class, key, fallback);
     }
 
-    // --- Contrato dos formularios concretos ---------------------------------
-
-    /** Monta as secoes especificas do tipo. Chamado uma unica vez. */
     protected abstract void buildSections();
 
-    /** Grava os campos do tipo no mapa de propriedades. */
     protected abstract void collect(Map<String, Object> properties);
 
-    /** Carrega os campos do tipo a partir da configuracao recebida. */
     protected abstract void apply(RunConfigurationData configuration);
-
-    // --- RunConfigurationForm ------------------------------------------------
 
     @Override
     public JComponent getComponent() {
@@ -122,8 +103,6 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
         }
         validate(properties);
 
-        // O titulo e propriedade exclusiva do Workbench: devolver null preserva o nome
-        // digitado pelo usuario em vez de sobrescreve-lo com o rotulo do tipo.
         return RunConfigurationData.builder()
                 .type(type)
                 .title(null)
@@ -173,8 +152,6 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
         revalidateFields();
     }
 
-    // --- Validacao inline ----------------------------------------------------
-
     protected void validate(Map<String, Object> properties) {
         validate(properties, true);
     }
@@ -202,15 +179,12 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
         }
     }
 
-    // --- Construcao das secoes ----------------------------------------------
-
     protected FormSection section(String title, String subtitle) {
         FormSection section = RunFormUi.section(title, subtitle);
         page.section(section);
         return section;
     }
 
-    /** Registra a celula para receber erros inline da propriedade {@code name}. */
     protected FormFieldCell register(String name, FormFieldCell cell) {
         cells.put(name, cell);
         return cell;
@@ -224,7 +198,6 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
         return cells.get(name);
     }
 
-    /** Secao "Ambiente", comum a todos os tipos que iniciam um processo. */
     protected FormSection environmentSection() {
         FormSection section = section(
                 common("section.environment", "Ambiente"),
@@ -259,12 +232,10 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
         return section;
     }
 
-    /** Campo de modulo, presente em todos os tipos. */
     protected FormFieldCell moduleCell() {
         return field(JavaRunTypes.MODULE, common("field.module", "Modulo"), moduleField);
     }
 
-    /** Campo de JDK, com a opcao padrao "JDK do projeto". */
     protected FormFieldCell jdkCell() {
         return field(JavaRunTypes.JDK_HOME, common("field.jdk", "JDK"), jdkField.combo())
                 .helper(common("field.jdk.hint",
@@ -275,8 +246,6 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
         return register(JavaRunTypes.BUILD_BEFORE_RUN,
                 RunFormUi.field(common("field.beforeLaunch", "Antes de executar"), buildBeforeRun));
     }
-
-    // --- Estado compartilhado ------------------------------------------------
 
     protected void collectShared(Map<String, Object> properties) {
         properties.put(JavaRunTypes.MODULE, moduleName);
@@ -299,10 +268,6 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
                 JavaRunTypes.BUILD_BEFORE_RUN, JavaRunTypes.buildBeforeRunDefault(type)));
     }
 
-    /**
-     * Converte o formato antigo, separado por virgulas, para uma variavel por linha, sem
-     * quebrar valores que contenham virgula.
-     */
     static String normalizeEnvironment(String raw) {
         if (raw == null || raw.isBlank() || raw.contains("\n")) {
             return raw == null ? "" : raw;
@@ -365,7 +330,6 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
         return moduleField;
     }
 
-    /** Raiz usada para abrir seletores de arquivo e resolver caminhos relativos. */
     protected Path base() {
         return RunPaths.base(selectedModule().orElse(null), context.descriptor()).orElse(null);
     }
@@ -382,7 +346,6 @@ public abstract class RunConfigurationFormBase implements RunConfigurationForm {
                 });
     }
 
-    /** Revalida enquanto o usuario digita, para que o erro apareca junto do campo. */
     protected void revalidateOnEdit(javax.swing.text.JTextComponent field) {
         field.getDocument().addDocumentListener(new DocumentListener() {
             @Override

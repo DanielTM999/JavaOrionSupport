@@ -1,0 +1,654 @@
+{
+  "version": 1,
+  "library": { "name": "Swing", "category": "Swing" },
+  "components": {
+    "java.awt.Component": {
+      "properties": {
+        "name": { "category": "Geral" },
+        "enabled": { "preferred": true, "category": "Geral" },
+        "visible": { "preferred": true, "category": "Geral" },
+        "font": { "preferred": true, "category": "Aparência", "editor": "font" },
+        "foreground": { "preferred": true, "category": "Aparência", "editor": "color" },
+        "background": { "preferred": true, "category": "Aparência", "editor": "color" },
+        "cursor": { "category": "Aparência" },
+        "bounds": { "category": "Layout", "editor": "rectangle", "hidden": true },
+        "location": { "category": "Layout", "editor": "point", "hidden": true },
+        "size": { "category": "Layout", "editor": "dimension", "hidden": true },
+        "preferredSize": { "category": "Layout", "editor": "dimension" },
+        "minimumSize": { "category": "Layout", "editor": "dimension" },
+        "maximumSize": { "category": "Layout", "editor": "dimension" },
+        "dropTarget": { "hidden": true },
+        "locale": { "hidden": true },
+        "mixingCutoutShape": { "hidden": true },
+        "ignoreRepaint": { "hidden": true },
+        "focusTraversalKeysEnabled": { "hidden": true },
+        "componentOrientation": { "category": "Avançado" },
+        "focusable": { "category": "Comportamento" }
+      }
+    },
+    "java.awt.Container": {
+      "properties": {
+        "layout": { "hidden": true },
+        "focusCycleRoot": { "hidden": true },
+        "focusTraversalPolicy": { "hidden": true },
+        "focusTraversalPolicyProvider": { "hidden": true }
+      }
+    },
+    "java.awt.Window": {
+      "window": true,
+      "properties": {
+        "title": { "preferred": true, "category": "Geral" },
+        "resizable": { "category": "Geral" },
+        "alwaysOnTop": { "category": "Comportamento" },
+        "iconImage": { "category": "Aparência", "editor": "image" },
+        "iconImages": { "hidden": true },
+        "locationRelativeTo": { "category": "Layout", "editor": "expression" },
+        "locationByPlatform": { "category": "Layout" },
+        "autoRequestFocus": { "hidden": true },
+        "focusableWindowState": { "hidden": true },
+        "modalExclusionType": { "hidden": true },
+        "opacity": { "category": "Aparência" },
+        "shape": { "hidden": true },
+        "type": { "category": "Avançado" }
+      }
+    },
+    "javax.swing.JComponent": {
+      "properties": {
+        "toolTipText": { "preferred": true, "category": "Geral" },
+        "opaque": { "preferred": true, "category": "Aparência" },
+        "border": { "preferred": true, "category": "Aparência", "editor": "border" },
+        "alignmentX": { "category": "Layout" },
+        "alignmentY": { "category": "Layout" },
+        "componentPopupMenu": { "category": "Comportamento", "editor": "component" },
+        "inheritsPopupMenu": { "category": "Comportamento" },
+        "UI": { "hidden": true },
+        "actionMap": { "hidden": true },
+        "inputVerifier": { "hidden": true },
+        "transferHandler": { "hidden": true },
+        "debugGraphicsOptions": { "hidden": true },
+        "doubleBuffered": { "hidden": true },
+        "autoscrolls": { "hidden": true },
+        "requestFocusEnabled": { "hidden": true },
+        "verifyInputWhenFocusTarget": { "hidden": true }
+      }
+    },
+
+    "javax.swing.JPanel": {
+      "category": "Swing · Containers",
+      "displayName": "Panel",
+      "container": { "kind": "LAYOUT" }
+    },
+    "javax.swing.JScrollPane": {
+      "category": "Swing · Containers",
+      "displayName": "Scroll Pane",
+      "container": { "kind": "SINGLE_SLOT", "strategy": "setViewportView(${child})" },
+      "properties": {
+        "horizontalScrollBarPolicy": {
+          "editor": "constant",
+          "enumValues": [
+            "javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED",
+            "javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER",
+            "javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_ALWAYS"
+          ]
+        },
+        "verticalScrollBarPolicy": {
+          "editor": "constant",
+          "enumValues": [
+            "javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED",
+            "javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER",
+            "javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS"
+          ]
+        },
+        "viewportView": { "hidden": true }
+      }
+    },
+    "javax.swing.JSplitPane": {
+      "category": "Swing · Containers",
+      "displayName": "Split Pane",
+      "container": {
+        "kind": "SLOTS",
+        "slots": {
+          "left": "setLeftComponent(${child})",
+          "right": "setRightComponent(${child})"
+        }
+      },
+      "properties": {
+        "orientation": {
+          "preferred": true,
+          "editor": "constant",
+          "enumValues": ["javax.swing.JSplitPane.HORIZONTAL_SPLIT", "javax.swing.JSplitPane.VERTICAL_SPLIT"]
+        },
+        "dividerLocation": { "preferred": true },
+        "resizeWeight": {},
+        "leftComponent": { "hidden": true },
+        "rightComponent": { "hidden": true },
+        "topComponent": { "hidden": true },
+        "bottomComponent": { "hidden": true }
+      }
+    },
+    "javax.swing.JTabbedPane": {
+      "category": "Swing · Containers",
+      "displayName": "Tabbed Pane",
+      "container": {
+        "kind": "LIST",
+        "strategy": "addTab(${child.prop.tabTitle}, ${child.prop.tabIcon}, ${child}, ${child.prop.tabTooltip})",
+        "childProperties": {
+          "tabTitle": { "type": "java.lang.String", "default": "\"Tab\"", "displayName": "Título da aba" },
+          "tabIcon": { "type": "javax.swing.Icon", "default": "null", "editor": "icon", "displayName": "Ícone da aba" },
+          "tabTooltip": { "type": "java.lang.String", "default": "null", "displayName": "Tooltip da aba" }
+        }
+      },
+      "properties": {
+        "tabPlacement": {
+          "preferred": true,
+          "editor": "constant",
+          "enumValues": ["javax.swing.SwingConstants.TOP", "javax.swing.SwingConstants.BOTTOM",
+                         "javax.swing.SwingConstants.LEFT", "javax.swing.SwingConstants.RIGHT"]
+        },
+        "selectedIndex": { "hidden": true },
+        "selectedComponent": { "hidden": true }
+      }
+    },
+    "javax.swing.JToolBar": {
+      "category": "Swing · Containers",
+      "displayName": "Tool Bar",
+      "container": { "kind": "LIST", "strategy": "add(${child})" },
+      "properties": { "floatable": { "preferred": true } }
+    },
+    "javax.swing.JLayeredPane": {
+      "category": "Swing · Containers",
+      "displayName": "Layered Pane",
+      "container": { "kind": "LAYOUT" }
+    },
+    "javax.swing.JDesktopPane": {
+      "category": "Swing · Containers",
+      "displayName": "Desktop Pane",
+      "container": { "kind": "LIST", "strategy": "add(${child})" }
+    },
+    "javax.swing.JInternalFrame": {
+      "category": "Swing · Containers",
+      "displayName": "Internal Frame",
+      "container": {
+        "kind": "LAYOUT",
+        "strategy": "getContentPane().add(${child}, ${constraints})",
+        "target": "getContentPane()",
+        "slots": { "menuBar": "setJMenuBar(${child})" }
+      },
+      "properties": {
+        "title": { "preferred": true },
+        "closable": { "preferred": true },
+        "resizable": {},
+        "maximizable": {},
+        "iconifiable": {},
+        "contentPane": { "hidden": true },
+        "JMenuBar": { "hidden": true },
+        "glassPane": { "hidden": true },
+        "layeredPane": { "hidden": true },
+        "rootPane": { "hidden": true }
+      }
+    },
+
+    "javax.swing.JLabel": {
+      "category": "Swing · Controles",
+      "displayName": "Label",
+      "properties": {
+        "text": { "preferred": true, "default": "\"\"" },
+        "icon": { "preferred": true, "editor": "icon" },
+        "horizontalAlignment": {
+          "preferred": true,
+          "editor": "constant",
+          "enumValues": ["javax.swing.SwingConstants.LEADING", "javax.swing.SwingConstants.LEFT",
+                         "javax.swing.SwingConstants.CENTER", "javax.swing.SwingConstants.RIGHT",
+                         "javax.swing.SwingConstants.TRAILING"]
+        },
+        "verticalAlignment": {
+          "editor": "constant",
+          "enumValues": ["javax.swing.SwingConstants.TOP", "javax.swing.SwingConstants.CENTER",
+                         "javax.swing.SwingConstants.BOTTOM"]
+        },
+        "labelFor": { "editor": "component" },
+        "displayedMnemonic": {},
+        "disabledIcon": { "editor": "icon" }
+      }
+    },
+    "javax.swing.AbstractButton": {
+      "properties": {
+        "text": { "preferred": true },
+        "icon": { "preferred": true, "editor": "icon" },
+        "selected": { "preferred": true },
+        "actionCommand": { "category": "Comportamento" },
+        "action": { "editor": "expression", "category": "Comportamento" },
+        "mnemonic": { "category": "Comportamento" },
+        "horizontalAlignment": {
+          "editor": "constant",
+          "enumValues": ["javax.swing.SwingConstants.LEADING", "javax.swing.SwingConstants.LEFT",
+                         "javax.swing.SwingConstants.CENTER", "javax.swing.SwingConstants.RIGHT",
+                         "javax.swing.SwingConstants.TRAILING"]
+        },
+        "focusPainted": { "category": "Aparência" },
+        "borderPainted": { "category": "Aparência" },
+        "contentAreaFilled": { "category": "Aparência" },
+        "pressedIcon": { "editor": "icon" },
+        "rolloverIcon": { "editor": "icon" },
+        "selectedIcon": { "editor": "icon" },
+        "disabledIcon": { "editor": "icon" },
+        "model": { "hidden": true },
+        "multiClickThreshhold": { "hidden": true }
+      }
+    },
+    "javax.swing.JButton": { "category": "Swing · Controles", "displayName": "Button" },
+    "javax.swing.JToggleButton": { "category": "Swing · Controles", "displayName": "Toggle Button" },
+    "javax.swing.JCheckBox": { "category": "Swing · Controles", "displayName": "Check Box" },
+    "javax.swing.JRadioButton": { "category": "Swing · Controles", "displayName": "Radio Button" },
+    "javax.swing.JComboBox": {
+      "category": "Swing · Controles",
+      "displayName": "Combo Box",
+      "properties": {
+        "model": { "editor": "listModel", "preferred": true },
+        "editable": { "preferred": true },
+        "selectedIndex": { "hidden": true },
+        "selectedItem": { "hidden": true },
+        "maximumRowCount": {},
+        "renderer": { "editor": "expression" },
+        "editor": { "hidden": true },
+        "keySelectionManager": { "hidden": true },
+        "prototypeDisplayValue": { "hidden": true }
+      }
+    },
+    "javax.swing.JList": {
+      "category": "Swing · Controles",
+      "displayName": "List",
+      "properties": {
+        "model": { "editor": "listModel", "preferred": true },
+        "selectionMode": {
+          "editor": "constant",
+          "enumValues": ["javax.swing.ListSelectionModel.SINGLE_SELECTION",
+                         "javax.swing.ListSelectionModel.SINGLE_INTERVAL_SELECTION",
+                         "javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION"]
+        },
+        "visibleRowCount": {},
+        "cellRenderer": { "editor": "expression" },
+        "listData": { "hidden": true },
+        "selectedIndex": { "hidden": true },
+        "selectedIndices": { "hidden": true },
+        "selectedValue": { "hidden": true },
+        "selectionModel": { "hidden": true },
+        "prototypeCellValue": { "hidden": true }
+      }
+    },
+    "javax.swing.JTable": {
+      "category": "Swing · Controles",
+      "displayName": "Table",
+      "properties": {
+        "model": { "editor": "tableModel", "preferred": true },
+        "autoResizeMode": {
+          "editor": "constant",
+          "enumValues": ["javax.swing.JTable.AUTO_RESIZE_OFF", "javax.swing.JTable.AUTO_RESIZE_NEXT_COLUMN",
+                         "javax.swing.JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS",
+                         "javax.swing.JTable.AUTO_RESIZE_LAST_COLUMN",
+                         "javax.swing.JTable.AUTO_RESIZE_ALL_COLUMNS"]
+        },
+        "rowHeight": {},
+        "fillsViewportHeight": { "preferred": true },
+        "showGrid": {},
+        "columnModel": { "hidden": true },
+        "selectionModel": { "hidden": true },
+        "rowSorter": { "hidden": true },
+        "cellEditor": { "hidden": true },
+        "tableHeader": { "hidden": true }
+      }
+    },
+    "javax.swing.JTree": {
+      "category": "Swing · Controles",
+      "displayName": "Tree",
+      "properties": {
+        "model": { "editor": "expression" },
+        "rootVisible": { "preferred": true },
+        "showsRootHandles": {},
+        "cellRenderer": { "editor": "expression" },
+        "selectionModel": { "hidden": true },
+        "selectionPath": { "hidden": true },
+        "selectionPaths": { "hidden": true },
+        "selectionRow": { "hidden": true },
+        "selectionRows": { "hidden": true },
+        "leadSelectionPath": { "hidden": true },
+        "anchorSelectionPath": { "hidden": true },
+        "cellEditor": { "hidden": true }
+      }
+    },
+    "javax.swing.JSpinner": {
+      "category": "Swing · Controles",
+      "displayName": "Spinner",
+      "properties": { "model": { "editor": "expression", "preferred": true }, "value": { "hidden": true }, "editor": { "hidden": true } }
+    },
+    "javax.swing.JSlider": {
+      "category": "Swing · Controles",
+      "displayName": "Slider",
+      "properties": {
+        "minimum": { "preferred": true },
+        "maximum": { "preferred": true },
+        "value": { "preferred": true },
+        "orientation": {
+          "editor": "constant",
+          "enumValues": ["javax.swing.SwingConstants.HORIZONTAL", "javax.swing.SwingConstants.VERTICAL"]
+        },
+        "majorTickSpacing": {},
+        "minorTickSpacing": {},
+        "paintTicks": {},
+        "paintLabels": {},
+        "model": { "hidden": true },
+        "labelTable": { "hidden": true }
+      }
+    },
+    "javax.swing.JProgressBar": {
+      "category": "Swing · Controles",
+      "displayName": "Progress Bar",
+      "properties": {
+        "minimum": {},
+        "maximum": {},
+        "value": { "preferred": true },
+        "indeterminate": { "preferred": true },
+        "stringPainted": {},
+        "string": {},
+        "orientation": {
+          "editor": "constant",
+          "enumValues": ["javax.swing.SwingConstants.HORIZONTAL", "javax.swing.SwingConstants.VERTICAL"]
+        },
+        "model": { "hidden": true }
+      }
+    },
+    "javax.swing.JSeparator": {
+      "category": "Swing · Controles",
+      "displayName": "Separator",
+      "properties": {
+        "orientation": {
+          "preferred": true,
+          "editor": "constant",
+          "enumValues": ["javax.swing.SwingConstants.HORIZONTAL", "javax.swing.SwingConstants.VERTICAL"]
+        }
+      }
+    },
+    "javax.swing.JScrollBar": { "category": "Swing · Controles", "displayName": "Scroll Bar", "properties": { "model": { "hidden": true } } },
+
+    "javax.swing.text.JTextComponent": {
+      "properties": {
+        "text": { "preferred": true },
+        "editable": { "preferred": true },
+        "caretColor": { "editor": "color", "category": "Aparência" },
+        "selectionColor": { "editor": "color", "category": "Aparência" },
+        "selectedTextColor": { "editor": "color", "category": "Aparência" },
+        "disabledTextColor": { "editor": "color", "category": "Aparência" },
+        "margin": { "editor": "insets", "category": "Layout" },
+        "document": { "hidden": true },
+        "caret": { "hidden": true },
+        "caretPosition": { "hidden": true },
+        "highlighter": { "hidden": true },
+        "keymap": { "hidden": true },
+        "navigationFilter": { "hidden": true },
+        "selectionStart": { "hidden": true },
+        "selectionEnd": { "hidden": true },
+        "dragEnabled": { "hidden": true },
+        "dropMode": { "hidden": true },
+        "focusAccelerator": { "hidden": true }
+      }
+    },
+    "javax.swing.JTextField": {
+      "category": "Swing · Texto",
+      "displayName": "Text Field",
+      "properties": {
+        "columns": { "preferred": true },
+        "horizontalAlignment": {
+          "editor": "constant",
+          "enumValues": ["javax.swing.SwingConstants.LEADING", "javax.swing.SwingConstants.LEFT",
+                         "javax.swing.SwingConstants.CENTER", "javax.swing.SwingConstants.RIGHT",
+                         "javax.swing.SwingConstants.TRAILING"]
+        },
+        "scrollOffset": { "hidden": true }
+      }
+    },
+    "javax.swing.JPasswordField": { "category": "Swing · Texto", "displayName": "Password Field", "properties": { "echoChar": {} } },
+    "javax.swing.JFormattedTextField": {
+      "category": "Swing · Texto",
+      "displayName": "Formatted Field",
+      "properties": { "value": { "editor": "expression" }, "formatterFactory": { "editor": "expression" }, "formatter": { "hidden": true } }
+    },
+    "javax.swing.JTextArea": {
+      "category": "Swing · Texto",
+      "displayName": "Text Area",
+      "properties": {
+        "rows": { "preferred": true },
+        "columns": { "preferred": true },
+        "lineWrap": { "preferred": true },
+        "wrapStyleWord": { "preferred": true },
+        "tabSize": {}
+      }
+    },
+    "javax.swing.JEditorPane": {
+      "category": "Swing · Texto",
+      "displayName": "Editor Pane",
+      "properties": { "contentType": { "preferred": true }, "page": { "hidden": true }, "editorKit": { "hidden": true } }
+    },
+    "javax.swing.JTextPane": {
+      "category": "Swing · Texto",
+      "displayName": "Text Pane",
+      "properties": { "styledDocument": { "hidden": true }, "logicalStyle": { "hidden": true }, "characterAttributes": { "hidden": true }, "paragraphAttributes": { "hidden": true } }
+    },
+
+    "javax.swing.JMenuBar": {
+      "category": "Swing · Menus",
+      "displayName": "Menu Bar",
+      "container": { "kind": "LIST", "strategy": "add(${child})" },
+      "properties": { "helpMenu": { "hidden": true }, "selectionModel": { "hidden": true } }
+    },
+    "javax.swing.JMenu": {
+      "category": "Swing · Menus",
+      "displayName": "Menu",
+      "container": { "kind": "LIST", "strategy": "add(${child})" },
+      "properties": { "delay": { "hidden": true }, "menuLocation": { "hidden": true }, "popupMenuVisible": { "hidden": true } }
+    },
+    "javax.swing.JMenuItem": {
+      "category": "Swing · Menus",
+      "displayName": "Menu Item",
+      "properties": { "accelerator": { "editor": "keyStroke", "preferred": true }, "armed": { "hidden": true } }
+    },
+    "javax.swing.JCheckBoxMenuItem": { "category": "Swing · Menus", "displayName": "Check Box Menu Item" },
+    "javax.swing.JRadioButtonMenuItem": { "category": "Swing · Menus", "displayName": "Radio Menu Item" },
+    "javax.swing.JPopupMenu": {
+      "category": "Swing · Menus",
+      "displayName": "Popup Menu",
+      "container": { "kind": "LIST", "strategy": "add(${child})" },
+      "properties": { "invoker": { "hidden": true }, "selectionModel": { "hidden": true }, "popupSize": { "hidden": true } }
+    },
+    "javax.swing.JPopupMenu$Separator": { "category": "Swing · Menus", "displayName": "Menu Separator" },
+
+    "javax.swing.JFrame": {
+      "category": "Swing · Janelas",
+      "displayName": "Frame",
+      "window": true,
+      "container": {
+        "kind": "LAYOUT",
+        "strategy": "getContentPane().add(${child}, ${constraints})",
+        "target": "getContentPane()",
+        "slots": { "menuBar": "setJMenuBar(${child})" }
+      },
+      "properties": {
+        "defaultCloseOperation": {
+          "preferred": true,
+          "editor": "constant",
+          "enumValues": ["javax.swing.WindowConstants.DO_NOTHING_ON_CLOSE",
+                         "javax.swing.WindowConstants.HIDE_ON_CLOSE",
+                         "javax.swing.WindowConstants.DISPOSE_ON_CLOSE",
+                         "javax.swing.WindowConstants.EXIT_ON_CLOSE"]
+        },
+        "extendedState": { "category": "Geral" },
+        "undecorated": { "category": "Aparência" },
+        "contentPane": { "hidden": true },
+        "JMenuBar": { "hidden": true },
+        "glassPane": { "hidden": true },
+        "layeredPane": { "hidden": true },
+        "rootPane": { "hidden": true },
+        "transferHandler": { "hidden": true },
+        "maximizedBounds": { "hidden": true },
+        "state": { "hidden": true },
+        "menuBar": { "hidden": true }
+      }
+    },
+    "javax.swing.JDialog": {
+      "category": "Swing · Janelas",
+      "displayName": "Dialog",
+      "window": true,
+      "container": {
+        "kind": "LAYOUT",
+        "strategy": "getContentPane().add(${child}, ${constraints})",
+        "target": "getContentPane()",
+        "slots": { "menuBar": "setJMenuBar(${child})" }
+      },
+      "properties": {
+        "modal": { "preferred": true },
+        "modalityType": {},
+        "defaultCloseOperation": {
+          "preferred": true,
+          "editor": "constant",
+          "enumValues": ["javax.swing.WindowConstants.DO_NOTHING_ON_CLOSE",
+                         "javax.swing.WindowConstants.HIDE_ON_CLOSE",
+                         "javax.swing.WindowConstants.DISPOSE_ON_CLOSE"]
+        },
+        "undecorated": { "category": "Aparência" },
+        "contentPane": { "hidden": true },
+        "JMenuBar": { "hidden": true },
+        "glassPane": { "hidden": true },
+        "layeredPane": { "hidden": true },
+        "rootPane": { "hidden": true },
+        "transferHandler": { "hidden": true }
+      }
+    },
+    "javax.swing.JWindow": {
+      "category": "Swing · Janelas",
+      "displayName": "Window",
+      "window": true,
+      "container": {
+        "kind": "LAYOUT",
+        "strategy": "getContentPane().add(${child}, ${constraints})",
+        "target": "getContentPane()"
+      },
+      "properties": {
+        "contentPane": { "hidden": true },
+        "glassPane": { "hidden": true },
+        "layeredPane": { "hidden": true },
+        "rootPane": { "hidden": true },
+        "transferHandler": { "hidden": true }
+      }
+    }
+  },
+  "layouts": {
+    "java.awt.BorderLayout": {
+      "displayName": "BorderLayout",
+      "constructor": "new java.awt.BorderLayout(${hgap}, ${vgap})",
+      "constraintsType": "java.lang.String",
+      "dropPolicy": "border",
+      "properties": {
+        "hgap": { "type": "int", "default": "0" },
+        "vgap": { "type": "int", "default": "0" }
+      },
+      "constraints": {
+        "region": {
+          "type": "java.lang.String",
+          "editor": "constant",
+          "default": "java.awt.BorderLayout.CENTER",
+          "enumValues": ["java.awt.BorderLayout.NORTH", "java.awt.BorderLayout.SOUTH",
+                         "java.awt.BorderLayout.EAST", "java.awt.BorderLayout.WEST",
+                         "java.awt.BorderLayout.CENTER"]
+        }
+      }
+    },
+    "java.awt.FlowLayout": {
+      "displayName": "FlowLayout",
+      "constructor": "new java.awt.FlowLayout(${alignment}, ${hgap}, ${vgap})",
+      "dropPolicy": "flow",
+      "properties": {
+        "alignment": {
+          "type": "int",
+          "editor": "constant",
+          "default": "java.awt.FlowLayout.CENTER",
+          "enumValues": ["java.awt.FlowLayout.LEFT", "java.awt.FlowLayout.CENTER", "java.awt.FlowLayout.RIGHT",
+                         "java.awt.FlowLayout.LEADING", "java.awt.FlowLayout.TRAILING"]
+        },
+        "hgap": { "type": "int", "default": "5" },
+        "vgap": { "type": "int", "default": "5" }
+      }
+    },
+    "java.awt.GridLayout": {
+      "displayName": "GridLayout",
+      "constructor": "new java.awt.GridLayout(${rows}, ${columns}, ${hgap}, ${vgap})",
+      "dropPolicy": "grid",
+      "properties": {
+        "rows": { "type": "int", "default": "1" },
+        "columns": { "type": "int", "default": "0" },
+        "hgap": { "type": "int", "default": "0" },
+        "vgap": { "type": "int", "default": "0" }
+      }
+    },
+    "java.awt.GridBagLayout": {
+      "displayName": "GridBagLayout",
+      "constructor": "new java.awt.GridBagLayout()",
+      "constraintsType": "java.awt.GridBagConstraints",
+      "dropPolicy": "gridbag",
+      "constraints": {
+        "gridx": { "type": "int", "default": "java.awt.GridBagConstraints.RELATIVE" },
+        "gridy": { "type": "int", "default": "java.awt.GridBagConstraints.RELATIVE" },
+        "gridwidth": { "type": "int", "default": "1" },
+        "gridheight": { "type": "int", "default": "1" },
+        "weightx": { "type": "double", "default": "0.0" },
+        "weighty": { "type": "double", "default": "0.0" },
+        "anchor": {
+          "type": "int",
+          "editor": "constant",
+          "default": "java.awt.GridBagConstraints.CENTER",
+          "enumValues": ["java.awt.GridBagConstraints.CENTER", "java.awt.GridBagConstraints.NORTH",
+                         "java.awt.GridBagConstraints.NORTHEAST", "java.awt.GridBagConstraints.EAST",
+                         "java.awt.GridBagConstraints.SOUTHEAST", "java.awt.GridBagConstraints.SOUTH",
+                         "java.awt.GridBagConstraints.SOUTHWEST", "java.awt.GridBagConstraints.WEST",
+                         "java.awt.GridBagConstraints.NORTHWEST", "java.awt.GridBagConstraints.LINE_START",
+                         "java.awt.GridBagConstraints.LINE_END", "java.awt.GridBagConstraints.BASELINE"]
+        },
+        "fill": {
+          "type": "int",
+          "editor": "constant",
+          "default": "java.awt.GridBagConstraints.NONE",
+          "enumValues": ["java.awt.GridBagConstraints.NONE", "java.awt.GridBagConstraints.HORIZONTAL",
+                         "java.awt.GridBagConstraints.VERTICAL", "java.awt.GridBagConstraints.BOTH"]
+        },
+        "insets": { "type": "java.awt.Insets", "editor": "insets", "default": "new java.awt.Insets(0, 0, 0, 0)" },
+        "ipadx": { "type": "int", "default": "0" },
+        "ipady": { "type": "int", "default": "0" }
+      }
+    },
+    "javax.swing.BoxLayout": {
+      "displayName": "BoxLayout",
+      "constructor": "new javax.swing.BoxLayout(${target}, ${axis})",
+      "dropPolicy": "box",
+      "properties": {
+        "axis": {
+          "type": "int",
+          "editor": "constant",
+          "default": "javax.swing.BoxLayout.Y_AXIS",
+          "enumValues": ["javax.swing.BoxLayout.X_AXIS", "javax.swing.BoxLayout.Y_AXIS",
+                         "javax.swing.BoxLayout.LINE_AXIS", "javax.swing.BoxLayout.PAGE_AXIS"]
+        }
+      }
+    },
+    "java.awt.CardLayout": {
+      "displayName": "CardLayout",
+      "constructor": "new java.awt.CardLayout(${hgap}, ${vgap})",
+      "constraintsType": "java.lang.String",
+      "dropPolicy": "card",
+      "properties": {
+        "hgap": { "type": "int", "default": "0" },
+        "vgap": { "type": "int", "default": "0" }
+      },
+      "constraints": {
+        "card": { "type": "java.lang.String", "default": "${child.id}" }
+      }
+    }
+  }
+}

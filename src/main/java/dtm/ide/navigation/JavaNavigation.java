@@ -53,7 +53,6 @@ public final class JavaNavigation {
         Path path = path(location);
         Range range = location.range();
         String resource = path == null ? location.uri() : path.toUri().toString();
-        // Windows Path equality is case-insensitive, unlike URI equality.
         if (path != null && java.io.File.separatorChar == '\\') resource = resource.toLowerCase(java.util.Locale.ROOT);
         return resource + "|" + range.start().line() + ":" + range.start().col()
                 + "-" + range.end().line() + ":" + range.end().col();

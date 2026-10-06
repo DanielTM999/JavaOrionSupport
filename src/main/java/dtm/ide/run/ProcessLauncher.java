@@ -9,10 +9,6 @@ import java.io.SequenceInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
-/**
- * Inicia um {@link ProcessSpec} sob PTY, com streaming imediato da saida e cancelamento em
- * dois estagios. Todos os lancamentos locais do plugin passam por aqui.
- */
 @Slf4j
 public final class ProcessLauncher {
 
@@ -23,7 +19,6 @@ public final class ProcessLauncher {
         return launch(spec, List.of());
     }
 
-    /** Inicia o processo exibindo {@code notices} no console antes da saida dele. */
     public static RunProcessHandle launch(ProcessSpec spec, List<String> notices) throws Exception {
         long launchGeneration = OwnedRunProcesses.launchGeneration();
         PtyLauncher.Result result = PtyLauncher.launch(
@@ -64,7 +59,6 @@ public final class ProcessLauncher {
                 new ByteArrayInputStream(text.toString().getBytes(StandardCharsets.UTF_8)), output);
     }
 
-    /** Handle somente de saida usado para reportar erros de validacao e de preparacao. */
     public static RunProcessHandle message(String text) {
         String content = (text == null ? "" : text) + System.lineSeparator();
         return RunProcessHandle.outputOnly(

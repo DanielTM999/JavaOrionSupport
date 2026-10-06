@@ -11,7 +11,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Local run processes owned by this plugin, including runs sharing one configuration. */
 @Slf4j
 public final class OwnedRunProcesses {
 

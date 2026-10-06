@@ -13,7 +13,6 @@ import dtm.stools.i18n.I18n;
 
 import javax.swing.Icon;
 
-/** Registro de um tipo de configuracao de execucao Java no Workbench. */
 public final class JavaRunConfigurationContribution implements RunConfigurationContribution {
 
     private static String text(String key, String fallback) {

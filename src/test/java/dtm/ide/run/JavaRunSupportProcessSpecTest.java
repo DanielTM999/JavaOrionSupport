@@ -29,7 +29,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Montagem dos comandos dos tipos introduzidos nas fases 2 e 3. */
 class JavaRunSupportProcessSpecTest {
 
     @TempDir
@@ -53,8 +52,6 @@ class JavaRunSupportProcessSpecTest {
         runSupport = new JavaRunSupport(() -> descriptor, () -> jdk, () -> build, line -> {
         });
     }
-
-    // --- JAR -----------------------------------------------------------------
 
     @Test
     void aJarRunsWithTheJarFlagAndItsArguments() throws Exception {
@@ -156,8 +153,6 @@ class JavaRunSupportProcessSpecTest {
                 Map.of(JavaRunTypes.JAR_PATH, "target/ausente.jar")), 0));
     }
 
-    // --- Maven e Gradle ------------------------------------------------------
-
     @Test
     void mavenReusesTheBuildServiceCommandAssembly() {
         ProcessSpec spec = spec(configuration(JavaRunTypes.MAVEN, Map.of(
@@ -227,8 +222,6 @@ class JavaRunSupportProcessSpecTest {
                 () -> spec(configuration(JavaRunTypes.GRADLE, Map.of()), 0));
     }
 
-    // --- Testes --------------------------------------------------------------
-
     @Test
     void aTestConfigurationRunsTheTestGoalWithTheScopeSelector() {
         spec(configuration(JavaRunTypes.TEST, Map.of(
@@ -271,8 +264,6 @@ class JavaRunSupportProcessSpecTest {
         assertTrue(arguments.indexOf("-Dtest=com.exemplo.UmTest")
                 < arguments.indexOf("-Dgroups=lento"));
     }
-
-    // --- JDK e build antes de executar --------------------------------------
 
     @Test
     void anExplicitJdkThatDisappearedFailsInsteadOfFallingBack() {
@@ -333,8 +324,6 @@ class JavaRunSupportProcessSpecTest {
         assertTrue(build.actions.isEmpty());
     }
 
-    // --- Remote --------------------------------------------------------------
-
     @Test
     void remoteConfigurationsCannotBeStartedWithRun() {
         assertFalse(runSupport.launch(configuration(JavaRunTypes.REMOTE, Map.of(
@@ -348,8 +337,6 @@ class JavaRunSupportProcessSpecTest {
                 .isAlive());
         assertTrue(build.actions.isEmpty(), "nada e compilado antes da validacao passar");
     }
-
-    // --- Ambiente ------------------------------------------------------------
 
     @Test
     void theEnvironmentEditorAcceptsOneVariablePerLine() {
@@ -380,7 +367,6 @@ class JavaRunSupportProcessSpecTest {
                 .build();
     }
 
-    /** Build system que apenas registra o que foi pedido. */
     private final class RecordingBuildSystem implements BuildSystem {
 
         private final List<BuildAction> actions = new ArrayList<>();

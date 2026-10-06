@@ -13,7 +13,6 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
-/** Converte a saida das ferramentas de build em atualizacoes curtas para o progress loader. */
 public final class BuildProgressTracker implements Consumer<String> {
 
     private static final Pattern ANSI = Pattern.compile(
@@ -54,7 +53,6 @@ public final class BuildProgressTracker implements Consumer<String> {
         acceptProgress(line, -1);
     }
 
-    /** Recebe tambem os eventos $/progress produzidos pelo JDT LS. */
     public void acceptProgress(String message, int reportedPercent) {
         String clean = clean(message);
         if (clean.isBlank()) {

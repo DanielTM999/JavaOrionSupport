@@ -10,13 +10,6 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.function.Supplier;
 
-/**
- * Resolucao da JDK usada por uma configuracao de execucao.
- *
- * <p>Sem {@code jdkHome} a configuracao usa a JDK do projeto. Com {@code jdkHome} preenchido
- * a instalacao apontada e obrigatoria: se ela desapareceu, o lancamento falha com uma
- * mensagem clara em vez de cair silenciosamente na JDK do projeto.</p>
- */
 public final class RunJdkResolver {
 
     private static String text(String key, String fallback) {
@@ -26,7 +19,6 @@ public final class RunJdkResolver {
     private RunJdkResolver() {
     }
 
-    /** Valor de {@code jdkHome} que representa "usar a JDK do projeto". */
     public static final String PROJECT_JDK = "";
 
     public static JdkInstallation resolve(Map<String, Object> properties,
@@ -44,7 +36,6 @@ public final class RunJdkResolver {
         return explicit(home);
     }
 
-    /** Carrega a instalacao apontada por {@code home}, exigindo que ela exista. */
     public static JdkInstallation explicit(String home) {
         Path path;
         try {

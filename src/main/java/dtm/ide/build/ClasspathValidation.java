@@ -4,18 +4,11 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-/** Utilities for detecting stale external entries in a Java classpath. */
 public final class ClasspathValidation {
 
     private ClasspathValidation() {
     }
 
-    /**
-     * Returns whether the classpath contains a JAR entry that is no longer available.
-     *
-     * <p>Output directories are intentionally not checked: Gradle can report them before
-     * the first compilation has created them.</p>
-     */
     public static boolean hasMissingJar(String classpath) {
         if (classpath == null || classpath.isBlank()) {
             return false;
@@ -37,11 +30,6 @@ public final class ClasspathValidation {
         return false;
     }
 
-    /**
-     * Creates a stable stamp for every classpath entry without reading whole dependency JARs.
-     * A republished artifact at the same Maven coordinate changes its size and/or mtime and
-     * therefore invalidates the incremental build state.
-     */
     public static String fingerprint(String classpath) {
         if (classpath == null || classpath.isBlank()) {
             return "";

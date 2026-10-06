@@ -105,7 +105,6 @@ final class JdtLsSettings {
                 "variableTypes", Map.of("enabled", all));
     }
 
-    /** Copy of {@code settings} with the inlay hint section replaced. */
     @SuppressWarnings("unchecked")
     static Map<String, Object> withInlayHints(Map<String, Object> settings, InlayHintsMode mode) {
         Object java = settings == null ? null : settings.get("java");

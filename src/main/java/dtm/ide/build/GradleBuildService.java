@@ -51,7 +51,6 @@ public final class GradleBuildService implements BuildSystem {
         this.activeProfiles = supplier;
     }
 
-    /** Installs an internal hook used to ask the language server to reread the build model. */
     public void setStaleClasspathListener(Runnable listener) {
         this.staleClasspathListener = listener == null ? () -> {
         } : listener;
@@ -204,8 +203,6 @@ public final class GradleBuildService implements BuildSystem {
     @Override
     public BuildResult refreshDependencies(JavaModule module, DependencyCoordinate dependency,
                                            Consumer<String> output) {
-        // O cache de modulos do Gradle e compartilhado pelo build; a opcao oficial atualiza
-        // todas as configuracoes mesmo quando a acao nasceu de uma dependencia selecionada.
         BuildResult result = executeToolCommand(null,
                 List.of("dependencies", "--refresh-dependencies"), output);
         if (result.successful()) {
