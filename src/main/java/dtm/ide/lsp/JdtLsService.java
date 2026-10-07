@@ -34,7 +34,6 @@ import dtm.ide.navigation.JavaNavigation.Status;
 import dtm.ide.sdk.DownloadProgressListener;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
-import dtm.ide.sdk.SdkDownloader;
 import dtm.ide.test.JavaTest;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
@@ -54,7 +53,6 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -850,10 +848,10 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             if (!isCurrent(launchGeneration)) {
                 return;
             }
-            removeLegacyOverlappingWorkspace(root);
+            JdtLsProcess.removeLegacyOverlappingWorkspace(root);
             lease = JdtLsWorkspaceLease.acquire(provisioner.workspaceFor(root));
             Path workspace = lease.workspace();
-            stopOrphanedWorkspaceServers(lease);
+            JdtLsProcess.stopOrphanedWorkspaceServers(lease);
 
             List<String> command = buildCommand(runtime, installation, workspace);
             log.info("Iniciando o Eclipse JDT LS {} com JDK do servidor {} e JDK do projeto {} em {} (workspace {})",
@@ -945,7 +943,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             }
         } finally {
             if (started != null) {
-                terminateProcessTree(started.toHandle());
+                JdtLsProcess.terminateProcessTree(started.toHandle());
             }
             if (lease != null) {
                 lease.close();
@@ -1103,71 +1101,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
     }
 
-    static void removeLegacyOverlappingWorkspace(Path root) {
-        Path normalizedRoot = root.toAbsolutePath().normalize();
-        Path legacyRoot = normalizedRoot.resolve(".orion").resolve("jdtls").normalize();
-        Path legacyWorkspace = legacyRoot.resolve("workspace");
-        if (legacyRoot.startsWith(normalizedRoot.resolve(".orion"))
-                && Files.isDirectory(legacyWorkspace.resolve(".metadata"))) {
-            SdkDownloader.deleteRecursively(legacyRoot);
-        }
-    }
-
-    private void stopOrphanedWorkspaceServers(JdtLsWorkspaceLease lease) {
-        Path workspace = lease.workspace();
-        lease.recordedServer().ifPresent(handle -> {
-            log.warn("Encerrando JDT LS orfao registrado pid={} do workspace {}", handle.pid(), workspace);
-            terminateProcessTree(handle);
-        });
-        for (ProcessHandle handle : lease.serversHoldingMetadata()) {
-            log.warn("Encerrando JDT LS orfao pid={} que segurava o workspace {}", handle.pid(), workspace);
-            terminateProcessTree(handle);
-        }
-        try (var processes = ProcessHandle.allProcesses()) {
-            processes.filter(ProcessHandle::isAlive)
-                    .filter(handle -> handle.pid() != ProcessHandle.current().pid())
-                    .filter(handle -> handle.parent().map(ProcessHandle::isAlive).orElse(false) == false)
-                    .filter(handle -> isJdtLsForWorkspace(
-                            handle.info().command().orElse(""),
-                            handle.info().arguments().orElseGet(() -> new String[0]), workspace))
-                    .forEach(handle -> {
-                        log.warn("Encerrando JDT LS orfao pid={} do workspace {}",
-                                handle.pid(), workspace);
-                        terminateProcessTree(handle);
-                    });
-        } catch (Exception e) {
-            log.debug("Nao foi possivel procurar JDT LS orfao em {}: {}",
-                    workspace, e.getMessage());
-        }
-    }
-
-    static boolean isJdtLsForWorkspace(String command, String[] arguments, Path workspace) {
-        if (workspace == null || arguments == null || command == null
-                || !command.toLowerCase(java.util.Locale.ROOT).contains("java")) {
-            return false;
-        }
-        boolean launcher = false;
-        boolean sameWorkspace = false;
-        String expected = workspace.toAbsolutePath().normalize().toString();
-        for (int i = 0; i < arguments.length; i++) {
-            String argument = arguments[i] == null ? "" : arguments[i];
-            if (argument.toLowerCase(java.util.Locale.ROOT)
-                    .contains("org.eclipse.equinox.launcher")) {
-                launcher = true;
-            }
-            if ("-data".equals(argument) && i + 1 < arguments.length) {
-                try {
-                    String candidate = Path.of(arguments[i + 1]).toAbsolutePath()
-                            .normalize().toString();
-                    sameWorkspace = expected.equalsIgnoreCase(candidate);
-                } catch (Exception ignored) {
-                    sameWorkspace = expected.equalsIgnoreCase(arguments[i + 1]);
-                }
-            }
-        }
-        return launcher && sameWorkspace;
-    }
-
     private JdkInstallation resolveServerJdk(JdkInstallation preferred) {
         if (preferred != null && preferred.major() >= JdkService.LANGUAGE_SERVER_MIN_MAJOR
                 && preferred.isJdk()) {
@@ -1318,7 +1251,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             }
         } finally {
             for (ProcessHandle handle : List.copyOf(retiringProcesses)) {
-                terminateProcessTree(handle);
+                JdtLsProcess.terminateProcessTree(handle);
             }
             LIVE_SERVICES.remove(this);
             resetProjectState();
@@ -1370,7 +1303,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 }
             }
             if (running != null) {
-                terminateProcessTree(running.toHandle());
+                JdtLsProcess.terminateProcessTree(running.toHandle());
             }
             if (rpc != null) {
                 rpc.close();
@@ -1404,7 +1337,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 service.finishRetired(service.detach(), EXIT_HOOK_SHUTDOWN_TIMEOUT_MS,
                         EXIT_HOOK_SHUTDOWN_TIMEOUT_MS);
                 for (ProcessHandle handle : List.copyOf(service.retiringProcesses)) {
-                    terminateProcessTree(handle);
+                    JdtLsProcess.terminateProcessTree(handle);
                 }
             }));
         }
@@ -1434,41 +1367,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         requests.clearInFlight();
         workspaceWorkTokens.clear();
         capabilities = ServerCapabilities.none();
-    }
-
-    private static void terminateProcessTree(ProcessHandle handle) {
-        if (handle == null) {
-            return;
-        }
-        List<ProcessHandle> descendants;
-        try (var children = handle.descendants()) {
-            descendants = children.toList();
-        } catch (RuntimeException error) {
-            descendants = List.of();
-        }
-        descendants.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroy);
-        if (handle.isAlive()) {
-            handle.destroy();
-            try {
-                handle.onExit().get(3, TimeUnit.SECONDS);
-            } catch (TimeoutException ignored) {
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception error) {
-                log.debug("Falha ao aguardar encerramento normal do processo JDT LS", error);
-            }
-        }
-        descendants.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
-        if (handle.isAlive()) {
-            handle.destroyForcibly();
-            try {
-                handle.onExit().get(3, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception error) {
-                log.debug("Falha ao aguardar encerramento forcado do processo JDT LS", error);
-            }
-        }
     }
 
     public boolean awaitReady(long timeoutMs) {

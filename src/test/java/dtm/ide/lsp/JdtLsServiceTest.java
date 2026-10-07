@@ -317,11 +317,11 @@ class JdtLsServiceTest {
                 "-data", workspace.toString()
         };
 
-        assertTrue(JdtLsService.isJdtLsForWorkspace(
+        assertTrue(JdtLsProcess.isJdtLsForWorkspace(
                 root.resolve("jdk/bin/java.exe").toString(), matching, workspace));
-        assertFalse(JdtLsService.isJdtLsForWorkspace(
+        assertFalse(JdtLsProcess.isJdtLsForWorkspace(
                 root.resolve("jdk/bin/java.exe").toString(), matching, root.resolve("other")));
-        assertFalse(JdtLsService.isJdtLsForWorkspace(
+        assertFalse(JdtLsProcess.isJdtLsForWorkspace(
                 root.resolve("jdk/bin/java.exe").toString(),
                 new String[]{"-data", workspace.toString()}, workspace));
     }
@@ -352,7 +352,7 @@ class JdtLsServiceTest {
         Files.createDirectories(searchIndex.getParent());
         Files.writeString(searchIndex, "preservar");
 
-        JdtLsService.removeLegacyOverlappingWorkspace(root);
+        JdtLsProcess.removeLegacyOverlappingWorkspace(root);
 
         assertEquals(false, Files.exists(root.resolve(".orion/jdtls")));
         assertEquals(true, Files.isRegularFile(searchIndex));

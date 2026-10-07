@@ -2,11 +2,17 @@ package dtm.ide.lsp;
 
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkVendor;
+import dtm.ide.sdk.SdkDownloader;
+import lombok.extern.slf4j.Slf4j;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
+@Slf4j
 final class JdtLsProcess {
     private static final int MIN_AUTO_SHARED_ARCHIVE_MAJOR = 19;
 
@@ -70,6 +76,106 @@ final class JdtLsProcess {
         command.add("-data");
         command.add(workspace.toString());
         return command;
+    }
+
+    static void removeLegacyOverlappingWorkspace(Path root) {
+        Path normalizedRoot = root.toAbsolutePath().normalize();
+        Path legacyRoot = normalizedRoot.resolve(".orion").resolve("jdtls").normalize();
+        Path legacyWorkspace = legacyRoot.resolve("workspace");
+        if (legacyRoot.startsWith(normalizedRoot.resolve(".orion"))
+                && Files.isDirectory(legacyWorkspace.resolve(".metadata"))) {
+            SdkDownloader.deleteRecursively(legacyRoot);
+        }
+    }
+
+    static void stopOrphanedWorkspaceServers(JdtLsWorkspaceLease lease) {
+        Path workspace = lease.workspace();
+        lease.recordedServer().ifPresent(handle -> {
+            log.warn("Encerrando JDT LS orfao registrado pid={} do workspace {}", handle.pid(), workspace);
+            terminateProcessTree(handle);
+        });
+        for (ProcessHandle handle : lease.serversHoldingMetadata()) {
+            log.warn("Encerrando JDT LS orfao pid={} que segurava o workspace {}", handle.pid(), workspace);
+            terminateProcessTree(handle);
+        }
+        try (var processes = ProcessHandle.allProcesses()) {
+            processes.filter(ProcessHandle::isAlive)
+                    .filter(handle -> handle.pid() != ProcessHandle.current().pid())
+                    .filter(handle -> handle.parent().map(ProcessHandle::isAlive).orElse(false) == false)
+                    .filter(handle -> isJdtLsForWorkspace(
+                            handle.info().command().orElse(""),
+                            handle.info().arguments().orElseGet(() -> new String[0]), workspace))
+                    .forEach(handle -> {
+                        log.warn("Encerrando JDT LS orfao pid={} do workspace {}",
+                                handle.pid(), workspace);
+                        terminateProcessTree(handle);
+                    });
+        } catch (Exception e) {
+            log.debug("Nao foi possivel procurar JDT LS orfao em {}: {}",
+                    workspace, e.getMessage());
+        }
+    }
+
+    static boolean isJdtLsForWorkspace(String command, String[] arguments, Path workspace) {
+        if (workspace == null || arguments == null || command == null
+                || !command.toLowerCase(java.util.Locale.ROOT).contains("java")) {
+            return false;
+        }
+        boolean launcher = false;
+        boolean sameWorkspace = false;
+        String expected = workspace.toAbsolutePath().normalize().toString();
+        for (int i = 0; i < arguments.length; i++) {
+            String argument = arguments[i] == null ? "" : arguments[i];
+            if (argument.toLowerCase(java.util.Locale.ROOT)
+                    .contains("org.eclipse.equinox.launcher")) {
+                launcher = true;
+            }
+            if ("-data".equals(argument) && i + 1 < arguments.length) {
+                try {
+                    String candidate = Path.of(arguments[i + 1]).toAbsolutePath()
+                            .normalize().toString();
+                    sameWorkspace = expected.equalsIgnoreCase(candidate);
+                } catch (Exception ignored) {
+                    sameWorkspace = expected.equalsIgnoreCase(arguments[i + 1]);
+                }
+            }
+        }
+        return launcher && sameWorkspace;
+    }
+
+    static void terminateProcessTree(ProcessHandle handle) {
+        if (handle == null) {
+            return;
+        }
+        List<ProcessHandle> descendants;
+        try (var children = handle.descendants()) {
+            descendants = children.toList();
+        } catch (RuntimeException error) {
+            descendants = List.of();
+        }
+        descendants.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroy);
+        if (handle.isAlive()) {
+            handle.destroy();
+            try {
+                handle.onExit().get(3, TimeUnit.SECONDS);
+            } catch (TimeoutException ignored) {
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception error) {
+                log.debug("Falha ao aguardar encerramento normal do processo JDT LS", error);
+            }
+        }
+        descendants.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
+        if (handle.isAlive()) {
+            handle.destroyForcibly();
+            try {
+                handle.onExit().get(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception error) {
+                log.debug("Falha ao aguardar encerramento forcado do processo JDT LS", error);
+            }
+        }
     }
 
 }
