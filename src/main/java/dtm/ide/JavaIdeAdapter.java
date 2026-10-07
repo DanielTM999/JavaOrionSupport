@@ -53,7 +53,7 @@ import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointDialogView;
 import dtm.ide.api.project.editor.NativeEditorType;
-import dtm.ide.api.project.editor.IdeTabMenuContext;
+import dtm.ide.api.project.editor.view.IdeEditorViewModesBuilder;
 import dtm.ide.api.project.tree.PathRenameDecision;
 import dtm.ide.api.project.tree.PathTransferDecision;
 import dtm.ide.api.project.tree.PathTransferRequest;
@@ -6134,10 +6134,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         boolean singleDirectory = selectedPaths.size() == 1 && Files.isDirectory(selected);
         contributeNewJavaFileMenu(menu, current, directory, singleDirectory);
-        if (selectedPaths.size() == 1 && SwingDesignerSupport.isJavaSource(selected)) {
-            menu.item(text("swing.viewer.open", "Visualizar Swing"), JavaIcons.javaClass(JavaIcons.SMALL),
-                    event -> openSwingViewer(selected));
-        }
 
         int position = singleDirectory ? IDE_NEW_MENU_INDEX + 1 : Integer.MAX_VALUE;
         if (singleDirectory) {
@@ -6564,29 +6560,18 @@ public class JavaIdeAdapter extends IdeAdapter {
                         event -> showEvaluateDialog(editorContext, 0))
                 .item(text("debug.addWatch", "Add Watch"), debugPaused
                                 && debugExpression != null,
-                        event -> addDebugWatch(debugExpression))
-                .separator()
-                .item(text("swing.viewer.open", "Visualizar Swing"), JavaIcons.javaClass(JavaIcons.SMALL),
-                        event -> openSwingViewer(editorContext.filePath()));
+                        event -> addDebugWatch(debugExpression));
     }
 
     @Override
-    public void contributeTabMenu(IdeMenuBuilder menu, IdeTabMenuContext context) {
-        if (menu == null || context == null || !SwingDesignerSupport.isJavaSource(context.filePath())) {
+    public void contributeEditorViewModes(IdeEditorViewModesBuilder modes, IdeEditorContext editorContext) {
+        if (modes == null || editorContext == null || !SwingDesignerSupport.isJavaSource(editorContext.filePath())) {
             return;
         }
-        menu.separator()
-                .item(text("swing.viewer.open", "Visualizar Swing"), JavaIcons.javaClass(JavaIcons.SMALL),
-                        event -> openSwingViewer(context.filePath()));
-    }
-
-    public void openSwingViewer(Path file) {
         SwingDesignerSupport support = ensureSwingDesigner();
-        if (support == null) {
-            notifySwingDesigner(text("swing.viewer.noProject", "Abra um projeto Java para usar o Swing Viewer."));
-            return;
+        if (support != null) {
+            support.contributeViewModes(modes, editorContext);
         }
-        support.openViewer(file);
     }
 
     private synchronized SwingDesignerSupport ensureSwingDesigner() {
@@ -6595,8 +6580,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         SwingDesignerSupport current = swingDesigner;
         if (current == null) {
-            current = new SwingDesignerSupport(new AdapterSwingDesignerEnvironment(),
-                    this::openManagedCenterTab, this::notifySwingDesigner);
+            current = new SwingDesignerSupport(new AdapterSwingDesignerEnvironment());
             swingDesigner = current;
         }
         return current;
@@ -6616,14 +6600,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
         }
         swingDesignerOutput = null;
-    }
-
-    private void notifySwingDesigner(String message) {
-        createNotification(NotificationContext.builder()
-                .title(text("swing.viewer.title", "Swing Viewer"))
-                .message(message)
-                .icon(JavaIcons.javaClass(JavaIcons.SMALL))
-                .build());
     }
 
     private void writeSwingDesignerOutput(String line) {

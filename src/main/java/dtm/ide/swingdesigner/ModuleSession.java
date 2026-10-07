@@ -36,7 +36,7 @@ public final class ModuleSession implements AutoCloseable {
     private final SwingDesignerEnvironment environment;
     private List<ClasspathEntry> entries = List.of();
     private ClasspathIndex index;
-    private ComponentCatalog catalog;
+    private volatile ComponentCatalog catalog;
     private SwingViewClient client;
     private Path hostJava;
 
@@ -47,6 +47,10 @@ public final class ModuleSession implements AutoCloseable {
 
     public JavaModule module() {
         return module;
+    }
+
+    public Optional<ComponentCatalog> catalogIfReady() {
+        return Optional.ofNullable(catalog);
     }
 
     public synchronized ComponentCatalog catalog() {

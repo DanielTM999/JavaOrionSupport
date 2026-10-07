@@ -69,6 +69,9 @@ public final class SwingViewerPanel extends JPanel {
     private final JLabel status = new JLabel(" ");
     private final Timer saveDebounce;
 
+    private JSplitPane rightSplit;
+    private JSplitPane fullBody;
+    private boolean compact;
     private ConstructorUse constructor;
     private ViewResult current;
     private String selectedId;
@@ -439,17 +442,36 @@ public final class SwingViewerPanel extends JPanel {
         loading.setTrackColor(UiTokens.border());
         loading.setOverlayColor(UiTokens.overlay(UiTokens.background(), 0.9F));
 
-        JSplitPane right = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, loading, inspector);
-        right.setResizeWeight(1.0);
-        right.setBorder(null);
-        right.setContinuousLayout(true);
-        right.setDividerLocation(0.72);
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, hierarchy, right);
+        rightSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, loading, inspector);
+        rightSplit.setResizeWeight(1.0);
+        rightSplit.setBorder(null);
+        rightSplit.setContinuousLayout(true);
+        rightSplit.setDividerLocation(0.72);
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, hierarchy, rightSplit);
         split.setBorder(null);
         split.setContinuousLayout(true);
         split.setDividerLocation(UiTokens.scale(240));
         inspector.setPreferredSize(new java.awt.Dimension(UiTokens.scale(320), 100));
+        fullBody = split;
         return split;
+    }
+
+    public void setCompact(boolean compact) {
+        if (this.compact == compact || fullBody == null) {
+            return;
+        }
+        this.compact = compact;
+        if (compact) {
+            remove(fullBody);
+            rightSplit.setLeftComponent(null);
+            add(loading, BorderLayout.CENTER);
+        } else {
+            remove(loading);
+            rightSplit.setLeftComponent(loading);
+            add(fullBody, BorderLayout.CENTER);
+        }
+        revalidate();
+        repaint();
     }
 
     private void showMessage(long ticket, String text, String detail) {
