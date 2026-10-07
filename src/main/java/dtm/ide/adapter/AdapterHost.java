@@ -200,4 +200,5 @@ public interface AdapterHost extends AdapterContext {
     void onBuildFileChanged(Path file);
     JavaFileChangeRouter fileChangeRouter();
     void requestProjectTreeRevealCreated(Path file);
+    SourceActionSupport sourceActions();
 }
