@@ -101,8 +101,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         TOUCH
     }
 
-    private static final int DEBUG_MAX_STRING_LENGTH = 1_000;
-    private static final long DEBUG_ADAPTER_TIMEOUT_MS = 60_000;
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
 
     private static final long INITIALIZE_CEILING_MS = 900_000;
@@ -186,8 +184,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private volatile Path launchedLombokAgentJar;
     private volatile boolean springSupport;
     private volatile boolean debugBundleLoaded;
-    private final Object debugAdapterLock = new Object();
-    private volatile LspJsonRpcClient debugAdapterPreparedFor;
     private volatile boolean testBundleLoaded;
     private volatile Map<String, Object> effectiveSettings = Map.of();
     private volatile Consumer<Path> onCodeLensRefresh = path -> {
@@ -483,6 +479,24 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 @Override
                 public void workspaceBuildProgress(StatusListener progress) {
                     workspaceBuildProgress = progress;
+                }
+            });
+
+    private final JdtDebugAdapterCommands debugCommands = new JdtDebugAdapterCommands(requests,
+            new JdtDebugAdapterCommands.Host() {
+                @Override
+                public LspJsonRpcClient client() {
+                    return client;
+                }
+
+                @Override
+                public boolean isInteractive() {
+                    return JdtLsService.this.isInteractive();
+                }
+
+                @Override
+                public boolean debugBundleLoaded() {
+                    return debugBundleLoaded;
                 }
             });
 
@@ -1463,41 +1477,15 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public boolean isDebugAdapterAvailable() {
-        return debugBundleLoaded && isInteractive();
+        return debugCommands.isDebugAdapterAvailable();
     }
 
     public boolean prepareDebugAdapter() {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || !isDebugAdapterAvailable()) {
-            return false;
-        }
-        synchronized (debugAdapterLock) {
-            if (debugAdapterPreparedFor == rpc) {
-                return true;
-            }
-            JsonNode result = requests.requestInteractive("workspace/executeCommand", Map.of(
-                    "command", "vscode.java.updateDebugSettings",
-                    "arguments", List.of("{\"maxStringLength\":" + DEBUG_MAX_STRING_LENGTH
-                            + ",\"logLevel\":\"WARNING\",\"showStaticVariables\":true}")),
-                    DEBUG_ADAPTER_TIMEOUT_MS);
-            if (result == null) {
-                log.info("O adaptador de debug Java nao confirmou as configuracoes");
-                return false;
-            }
-            debugAdapterPreparedFor = rpc;
-            return true;
-        }
+        return debugCommands.prepareDebugAdapter();
     }
 
     public int startDebugSession() {
-        prepareDebugAdapter();
-        JsonNode result = requests.requestInteractive("workspace/executeCommand", Map.of(
-                "command", "vscode.java.startDebugSession",
-                "arguments", List.of()), DEBUG_ADAPTER_TIMEOUT_MS);
-        if (result == null || !result.canConvertToInt()) {
-            return -1;
-        }
-        return result.asInt(-1);
+        return debugCommands.startDebugSession();
     }
 
     public JsonNode findTestTypesAndMethods(Path file) {
