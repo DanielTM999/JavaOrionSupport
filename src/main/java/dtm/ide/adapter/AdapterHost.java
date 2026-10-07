@@ -157,4 +157,7 @@ public interface AdapterHost extends AdapterContext {
     CodeEditor requestEmbeddedCodeEditor(String name, String source, EmbeddedCodeEditorSettings settings);
     String openCenterTab(String id, String title, JComponent component, boolean closable);
     boolean isDebugPaused();
+    DiagnosticsEngine diagnostics();
+    IdeEditorContext getEditor(Path file, boolean focus);
+    <T> ModernComponentDialog.ModernComponentDialogBuilder<T> createModernComponentDialogBuilder(Class<T> type);
 }

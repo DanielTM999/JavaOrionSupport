@@ -61,6 +61,7 @@ import dtm.ide.adapter.CompletionEngine;
 import dtm.ide.adapter.DiagnosticsEngine;
 import dtm.ide.adapter.RenameSupport;
 import dtm.ide.adapter.SafeDeleteSupport;
+import dtm.ide.adapter.SourceActionSupport;
 import dtm.ide.adapter.UiThreads;
 import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
@@ -409,16 +410,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
     private static final long BUILD_SLOT_WAIT_MS = 600_000;
     private static final long BUILD_SLOT_POLL_MS = 100;
-    private static final long PASTE_IMPORT_WINDOW_MS = 20_000;
-    private static final long PASTE_IMPORT_RETRY_MS = 1_000;
-    private static final long PASTE_IMPORT_FOLLOW_UP_MS = 5_000;
-    private static final int PASTE_IMPORT_MAX_ROUNDS = 3;
-    private static final Pattern TYPE_LIKE_NAME = Pattern.compile("\\b\\p{Lu}");
-
-    private record PendingPasteImport(Path file, int offset, String pasted, Range range, long deadline,
-                                      int round, Set<String> handled) {
-    }
-
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String LSP_PROGRESS_ID = "javaLanguageServer";
@@ -986,6 +977,22 @@ public class JavaIdeAdapter extends IdeAdapter {
         public boolean isDebugPaused() {
             return JavaIdeAdapter.this.isDebugPaused();
         }
+    
+        @Override
+        public DiagnosticsEngine diagnostics() {
+            return diagnosticsEngine;
+        }
+
+        @Override
+        public IdeEditorContext getEditor(Path file, boolean focus) {
+            return JavaIdeAdapter.this.getEditor(file, focus);
+        }
+
+        @Override
+        public <T> ModernComponentDialog.ModernComponentDialogBuilder<T> createModernComponentDialogBuilder(
+                Class<T> type) {
+            return JavaIdeAdapter.this.createModernComponentDialogBuilder(type);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -1001,6 +1008,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final SafeDeleteSupport safeDeleteSupport = new SafeDeleteSupport(adapterHost);
     private final CodeLensSupport codeLensSupport = new CodeLensSupport(adapterHost);
     private final NavigationViews navigationViews = new NavigationViews(adapterHost);
+    private final SourceActionSupport sourceActions = new SourceActionSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1127,8 +1135,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JavaPluginSettings settings;
     private volatile IdeEditorContext activeJavaEditor;
     private final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
-    private final Map<Path, PendingPasteImport> pendingPasteImports = new ConcurrentHashMap<>();
-    private final Set<Path> pasteImportsResolving = ConcurrentHashMap.newKeySet();
     private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
     private final Map<Path, String> lastEditorContents = new ConcurrentHashMap<>();
     private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
@@ -1754,7 +1760,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             problems.supersedeCompilerProblems(normalized);
         }
         requestRefreshDiagnostics(path);
-        resolvePastedImports(path);
+        sourceActions.resolvePastedImports(path);
         List<BuildDiagnostic> problems = lsp == null ? List.of() : lsp.diagnostics(normalized)
                 .stream()
                 .map(diagnostic -> new BuildDiagnostic(normalized,
@@ -3482,7 +3488,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (context == null) {
             return;
         }
-        if (!context.setCommandHandler(this::handleCodeActionCommand)) {
+        if (!context.setCommandHandler(sourceActions::handleCodeActionCommand)) {
             log.debug("Nao foi possivel registrar as correcoes Java em {}", context.filePath());
         }
     }
@@ -3498,15 +3504,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         context.registerShortcut("java.findUsages", "alt F7",
                 () -> onFindUsages(context));
         context.registerShortcut("java.generate", "alt INSERT",
-                () -> showGenerateActions(context));
+                () -> sourceActions.showGenerateActions(context));
         context.registerShortcut("java.overrideMethods", "control INSERT",
-                () -> showOverrideMethods(context, false));
+                () -> sourceActions.showOverrideMethods(context, false));
         context.registerShortcut("java.implementMethods", "control I",
-                () -> showOverrideMethods(context, true));
+                () -> sourceActions.showOverrideMethods(context, true));
         context.registerShortcut("java.evaluateExpression", "alt F8",
                 () -> showEvaluateDialog(context, 0));
         context.registerShortcut("java.pasteImports", "control V", EditorShortcutScope.EDITOR, () -> {
-            SwingUtilities.invokeLater(() -> onPasted(context));
+            SwingUtilities.invokeLater(() -> sourceActions.onPasted(context));
             return false;
         });
         bindDebugShortcut(context, "F5", "java.debug.continue",
@@ -3524,185 +3530,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
 
-    private void onPasted(IdeEditorContext context) {
-        Path file = context.filePath();
-        if (jdtLs == null || !JavaProjectConventions.isJava(file) || context.isReadOnly()) {
-            return;
-        }
-        String pasted = clipboardText();
-        if (pasted == null || pasted.isBlank() || !TYPE_LIKE_NAME.matcher(pasted).find()) {
-            return;
-        }
-        String text = context.getText();
-        int offset = context.getCaretOffset() - pasted.length();
-        if (text == null || offset < 0 || !text.startsWith(pasted, offset)) {
-            return;
-        }
-        pendingPasteImports.put(JavaProjectConventions.normalize(file), new PendingPasteImport(
-                file, offset, pasted, rangeOf(text, offset, offset + pasted.length()),
-                System.currentTimeMillis() + PASTE_IMPORT_WINDOW_MS, 1, Set.of()));
-    }
-
-    private static String clipboardText() {
-        try {
-            Object data = java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
-                    .getData(java.awt.datatransfer.DataFlavor.stringFlavor);
-            return data instanceof String value ? value.replace("\r\n", "\n").replace("\r", "\n") : null;
-        } catch (Exception unavailable) {
-            return null;
-        }
-    }
-
-    private static Range rangeOf(String text, int start, int end) {
-        return Range.of(positionOf(text, start), positionOf(text, end));
-    }
-
-    private static Position positionOf(String text, int offset) {
-        int line = 0;
-        int lineStart = 0;
-        for (int i = 0; i < offset; i++) {
-            if (text.charAt(i) == '\n') {
-                line++;
-                lineStart = i + 1;
-            }
-        }
-        return Position.of(line, offset - lineStart);
-    }
-
-    private void resolvePastedImports(Path path) {
-        Path key = JavaProjectConventions.normalize(path);
-        PendingPasteImport pending = pendingPasteImports.get(key);
-        if (pending == null) {
-            return;
-        }
-        if (System.currentTimeMillis() > pending.deadline()) {
-            pendingPasteImports.remove(key, pending);
-            return;
-        }
-        JavaLanguageServer lsp = interactiveServerFor(pending.file());
-        ImportCandidateSupport imports = lsp == null ? null : lsp.extension(ImportCandidateSupport.class);
-        if (imports == null || !pasteImportsResolving.add(key)) {
-            return;
-        }
-        background.execute(() -> {
-            boolean retry = false;
-            try {
-                String text = lsp.documentContent(pending.file());
-                if (text == null || !text.startsWith(pending.pasted(), pending.offset())) {
-                    return;
-                }
-                ImportLookup lookup = imports.importCandidates(pending.file(), text, pending.range(),
-                        pending.handled());
-                if (!lookup.diagnosed()) {
-                    retry = true;
-                    return;
-                }
-                if (pendingPasteImports.remove(key, pending)) {
-                    Set<String> handled = new HashSet<>(pending.handled());
-                    handled.addAll(lookup.queried());
-                    PendingPasteImport resolved = new PendingPasteImport(pending.file(), pending.offset(),
-                            pending.pasted(), pending.range(), pending.deadline(), pending.round(),
-                            Set.copyOf(handled));
-                    SwingUtilities.invokeLater(() -> chooseImports(resolved, lookup.candidates()));
-                }
-            } finally {
-                pasteImportsResolving.remove(key);
-                if (retry && pendingPasteImports.get(key) == pending) {
-                    background.schedule(() -> resolvePastedImports(path), PASTE_IMPORT_RETRY_MS,
-                            TimeUnit.MILLISECONDS);
-                }
-            }
-        });
-    }
-
-    private void chooseImports(PendingPasteImport pending, Map<String, List<String>> candidates) {
-        List<String> chosen = new ArrayList<>();
-        Deque<Map.Entry<String, List<String>>> ambiguous = new ArrayDeque<>();
-        candidates.forEach((name, options) -> {
-            if (options.size() == 1) {
-                chosen.add(options.getFirst());
-            } else if (options.size() > 1) {
-                ambiguous.add(Map.entry(name, options));
-            }
-        });
-        askNextImport(pending, chosen, ambiguous);
-    }
-
-    private void askNextImport(PendingPasteImport pending, List<String> chosen,
-                               Deque<Map.Entry<String, List<String>>> ambiguous) {
-        Map.Entry<String, List<String>> next = ambiguous.poll();
-        if (next == null) {
-            applyPastedImports(pending, chosen);
-            return;
-        }
-        ImportChoicePanel panel = new ImportChoicePanel(next.getKey(), next.getValue(), choice -> {
-            if (choice != null) {
-                chosen.add(choice);
-            }
-            SwingUtilities.invokeLater(() -> askNextImport(pending, chosen, ambiguous));
-        });
-        showPopup(PlatformPopupBuilder.builder()
-                .component(panel)
-                .title(text("pasteImports.title", "Importar classe"))
-                .size(460, Math.min(380, 120 + next.getValue().size() * 44))
-                .modalityType(java.awt.Dialog.ModalityType.MODELESS)
-                .onLoad(component -> panel.focusList())
-                .onClose(component -> panel.closed())
-                .build());
-    }
-
-    private void applyPastedImports(PendingPasteImport pending, List<String> imports) {
-        Path file = pending.file();
-        IdeEditorContext editor = getEditor(file);
-        if (imports.isEmpty() || editor == null || editor.isReadOnly()) {
-            return;
-        }
-        String before = editor.getText();
-        JavaImportInserter.Result result = JavaImportInserter.insert(before, imports);
-        if (result.insertedLines() == 0) {
-            return;
-        }
-        int line = editor.getCaretLine();
-        int col = editor.getCaretCol();
-        if (!editor.applyEdits(result.edits())) {
-            return;
-        }
-        int shiftedLines = result.edits().stream()
-                .filter(edit -> edit.range().start().line() < line
-                        || (edit.range().start().line() == line && edit.range().start().col() <= col))
-                .mapToInt(edit -> (int) edit.newText().chars().filter(ch -> ch == '\n').count())
-                .sum();
-        int expectedLine = line + shiftedLines;
-        if (editor.getCaretLine() != expectedLine || editor.getCaretCol() != col) {
-            editor.setCaretPosition(expectedLine, col);
-        }
-        String after = editor.getText();
-        followUpPastedImports(pending, before, after);
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            lsp.changeDocument(file, after);
-        }
-        editor.refreshDiagnostics();
-        setStatusBarText(text("status.pasteImports", "Java: imports adicionados") + " - "
-                + imports.stream().map(name -> name.substring(name.lastIndexOf('.') + 1))
-                .collect(Collectors.joining(", ")));
-    }
-
-    private void followUpPastedImports(PendingPasteImport pending, String before, String after) {
-        if (pending.round() >= PASTE_IMPORT_MAX_ROUNDS || before == null || after == null
-                || !before.startsWith(pending.pasted(), pending.offset())) {
-            return;
-        }
-        int offset = pending.offset() + after.length() - before.length();
-        if (offset < 0 || !after.startsWith(pending.pasted(), offset)) {
-            return;
-        }
-        pendingPasteImports.putIfAbsent(JavaProjectConventions.normalize(pending.file()), new PendingPasteImport(
-                pending.file(), offset, pending.pasted(),
-                rangeOf(after, offset, offset + pending.pasted().length()),
-                System.currentTimeMillis() + PASTE_IMPORT_FOLLOW_UP_MS, pending.round() + 1, pending.handled()));
-    }
-
     private void bindDebugShortcut(IdeEditorContext context, String stroke,
                                    String actionId, Runnable action) {
         context.registerShortcut(actionId, stroke, EditorShortcutScope.WINDOW, () -> {
@@ -3712,354 +3539,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             action.run();
             return true;
         });
-    }
-
-    private void handleCodeActionCommand(Command command) {
-        if (command == null || command.arguments() == null || command.arguments().isEmpty()) {
-            return;
-        }
-        if (DiagnosticsEngine.DISABLE_INSPECTION_COMMAND.equals(command.id())) {
-            diagnosticsEngine.disableInspection(String.valueOf(command.arguments().getFirst()));
-            return;
-        }
-        if (DiagnosticsEngine.HIDE_OCCURRENCE_COMMAND.equals(command.id())) {
-            List<Object> arguments = command.arguments();
-            if (arguments.size() >= 3) {
-                diagnosticsEngine.hideInspectionOccurrence(String.valueOf(arguments.get(0)),
-                        String.valueOf(arguments.get(1)), String.valueOf(arguments.get(2)));
-            }
-            return;
-        }
-        if (!JavaLanguageServer.APPLY_CODE_ACTION_COMMAND.equals(command.id())) {
-            return;
-        }
-        String rawAction = String.valueOf(command.arguments().getFirst());
-        String sourcePrompt = sourcePromptId(rawAction);
-        if (sourcePrompt != null) {
-            runSourceAction(sourcePrompt, activeJavaEditor);
-            return;
-        }
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            background.submit(() -> applyResolvedCodeAction(lsp, rawAction));
-        }
-    }
-
-    private void applyResolvedCodeAction(JavaLanguageServer lsp, String rawAction) {
-        ResolvedCodeAction resolved = lsp.resolveCodeAction(rawAction);
-        if (resolved == null) {
-            setStatusBarText(text("status.codeActionFailed",
-                    "Java: nao foi possivel aplicar a correcao"));
-            return;
-        }
-        if (!resolved.edit().isEmpty()
-                && onUi(() -> applyWorkspaceEdit(lsp, resolved.edit())) == null) {
-            return;
-        }
-        if (resolved.commandJson() != null) {
-            lsp.executeCodeAction(resolved.commandJson());
-        }
-    }
-
-    private Boolean applyWorkspaceEdit(JavaLanguageServer lsp, IdeWorkspaceEdit edit) {
-        boolean skipped = false;
-        for (IdeWorkspaceEdit.Operation operation : edit.operations()) {
-            if (!(operation instanceof IdeWorkspaceEdit.TextEdits textEdits)) {
-                skipped = true;
-                continue;
-            }
-            IdeEditorContext editor = getEditor(textEdits.file(), true);
-            if (editor == null || editor.isReadOnly() || !editor.applyEdits(textEdits.edits())) {
-                skipped = true;
-                continue;
-            }
-            lsp.changeDocument(textEdits.file(), editor.getText());
-            editor.refreshDiagnostics();
-        }
-        if (skipped) {
-            setStatusBarText(text("status.codeActionPartial",
-                    "Java: a correcao nao pode ser aplicada por completo"));
-        }
-        return !skipped;
-    }
-
-    private static String sourcePromptId(String rawAction) {
-        if (rawAction == null) return null;
-        for (String id : List.of(SourceGenerationSupport.OVERRIDE_METHODS_PROMPT,
-                SourceGenerationSupport.HASHCODE_EQUALS_PROMPT,
-                SourceGenerationSupport.GENERATE_TOSTRING_PROMPT,
-                SourceGenerationSupport.GENERATE_ACCESSORS_PROMPT,
-                SourceGenerationSupport.GENERATE_CONSTRUCTORS_PROMPT,
-                SourceGenerationSupport.GENERATE_DELEGATE_METHODS_PROMPT)) {
-            if (rawAction.contains(id)) return id;
-        }
-        return null;
-    }
-
-    private void showGenerateActions(IdeEditorContext context) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        List<JavaSourceActionDialogs.Choice<String>> choices = List.of(
-                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.GENERATE_CONSTRUCTORS_PROMPT,
-                        text("generate.constructor", "Constructor..."), "",
-                        JavaSourceActionDialogs.Kind.CONSTRUCTOR),
-                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.GENERATE_ACCESSORS_PROMPT,
-                        text("generate.accessors", "Getter and Setter..."), "",
-                        JavaSourceActionDialogs.Kind.ACCESSOR),
-                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.HASHCODE_EQUALS_PROMPT,
-                        "equals() and hashCode()...", "", JavaSourceActionDialogs.Kind.EQUALS_HASH),
-                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.GENERATE_TOSTRING_PROMPT,
-                        "toString()...", "", JavaSourceActionDialogs.Kind.TO_STRING),
-                new JavaSourceActionDialogs.Choice<>("override",
-                        text("generate.override", "Override Methods..."), "",
-                        JavaSourceActionDialogs.Kind.OVERRIDE, "Ctrl+Insert"),
-                new JavaSourceActionDialogs.Choice<>("implement",
-                        text("generate.implement", "Implement Methods..."), "",
-                        JavaSourceActionDialogs.Kind.IMPLEMENT, "Ctrl+I"),
-                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.GENERATE_DELEGATE_METHODS_PROMPT,
-                        text("generate.delegate", "Delegate Methods..."), "",
-                        JavaSourceActionDialogs.Kind.DELEGATE)
-        );
-        String selected = JavaSourceActionDialogs.chooseOne(createModernComponentDialogBuilder(),
-                text("generate.title", "Generate"),
-                text("generate.choose", "Escolha o codigo que deseja gerar"), choices);
-        if (selected == null) return;
-        if ("override".equals(selected)) showOverrideMethods(context, false);
-        else if ("implement".equals(selected)) showOverrideMethods(context, true);
-        else runSourceAction(selected, context);
-    }
-
-    private void runSourceAction(String command, IdeEditorContext context) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        switch (command) {
-            case SourceGenerationSupport.OVERRIDE_METHODS_PROMPT -> showOverrideMethods(context, false);
-            case SourceGenerationSupport.GENERATE_CONSTRUCTORS_PROMPT -> showConstructors(context);
-            case SourceGenerationSupport.GENERATE_ACCESSORS_PROMPT -> showAccessors(context);
-            case SourceGenerationSupport.HASHCODE_EQUALS_PROMPT -> showHashCodeEquals(context);
-            case SourceGenerationSupport.GENERATE_TOSTRING_PROMPT -> showToString(context);
-            case SourceGenerationSupport.GENERATE_DELEGATE_METHODS_PROMPT -> showDelegateMethods(context);
-            default -> { }
-        }
-    }
-
-    private SourceGenerationSupport sourceGenerationFor(Path file) {
-        JavaLanguageServer lsp = interactiveServerFor(file);
-        return lsp == null ? null : lsp.extension(SourceGenerationSupport.class);
-    }
-
-    private void showOverrideMethods(IdeEditorContext context, boolean implementOnly) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
-        if (generator == null) return;
-        String source = context.getText();
-        int line = context.getCaretLine(), col = context.getCaretCol();
-        background.submit(() -> {
-            SourceGenerationSupport.OverrideStatus status = generator.overridableMethods(
-                    context.filePath(), source, line, col);
-            List<SourceGenerationSupport.SourceItem> methods = status.methods().stream()
-                    .filter(item -> item.selected() == implementOnly).toList();
-            SwingUtilities.invokeLater(() -> {
-                if (methods.isEmpty()) {
-                    sourceActionUnavailable(implementOnly ? "Implement Methods" : "Override Methods");
-                    return;
-                }
-                List<SourceGenerationSupport.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
-                        createModernComponentDialogBuilder(),
-                        implementOnly ? text("generate.implement", "Implement Methods")
-                                : text("generate.override", "Override Methods"),
-                        status.type(), sourceChoices(methods, implementOnly
-                                ? JavaSourceActionDialogs.Kind.IMPLEMENT
-                                : JavaSourceActionDialogs.Kind.OVERRIDE), item -> true);
-                if (selected == null || selected.isEmpty()) return;
-                submitGeneration(context, source, () -> generator.generateOverridableMethods(
-                        context.filePath(), source, line, col, selected));
-            });
-        });
-    }
-
-    private void showConstructors(IdeEditorContext context) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
-        if (generator == null) return;
-        String source = context.getText();
-        int line = context.getCaretLine(), col = context.getCaretCol();
-        background.submit(() -> {
-            SourceGenerationSupport.ConstructorsStatus status = generator.constructorsStatus(
-                    context.filePath(), source, line, col);
-            SwingUtilities.invokeLater(() -> {
-                if (status.constructors().isEmpty()) {
-                    sourceActionUnavailable(text("generate.constructor", "Constructor"));
-                    return;
-                }
-                List<SourceGenerationSupport.SourceItem> constructors = JavaSourceActionDialogs.chooseMany(
-                        createModernComponentDialogBuilder(), text("generate.constructor", "Constructor"),
-                        text("generate.chooseConstructors", "Selecione os construtores da superclasse"),
-                        sourceChoices(status.constructors(), JavaSourceActionDialogs.Kind.CONSTRUCTOR), item -> true);
-                if (constructors == null || constructors.isEmpty()) return;
-                List<SourceGenerationSupport.SourceItem> fields = status.fields().isEmpty() ? List.of()
-                        : JavaSourceActionDialogs.chooseMany(createModernComponentDialogBuilder(),
-                        text("generate.constructor", "Constructor"),
-                        text("generate.chooseFields", "Selecione os campos que serao inicializados"),
-                        sourceChoices(status.fields(), JavaSourceActionDialogs.Kind.FIELD),
-                        SourceGenerationSupport.SourceItem::selected);
-                if (fields == null) return;
-                submitGeneration(context, source, () -> generator.generateConstructors(
-                        context.filePath(), source, line, col, constructors, fields));
-            });
-        });
-    }
-
-    private void showAccessors(IdeEditorContext context) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
-        if (generator == null) return;
-        String source = context.getText();
-        int line = context.getCaretLine(), col = context.getCaretCol();
-        background.submit(() -> {
-            List<SourceGenerationSupport.SourceItem> available = generator.accessorsStatus(
-                    context.filePath(), source, line, col);
-            SwingUtilities.invokeLater(() -> {
-                if (available.isEmpty()) {
-                    sourceActionUnavailable(text("generate.accessors", "Getter and Setter"));
-                    return;
-                }
-                List<SourceGenerationSupport.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
-                        createModernComponentDialogBuilder(), text("generate.accessors", "Getter and Setter"),
-                        text("generate.chooseAccessors", "Selecione os campos"),
-                        sourceChoices(available, JavaSourceActionDialogs.Kind.ACCESSOR), item -> true);
-                if (selected == null || selected.isEmpty()) return;
-                submitGeneration(context, source, () -> generator.generateAccessors(
-                        context.filePath(), source, line, col, selected));
-            });
-        });
-    }
-
-    private void showHashCodeEquals(IdeEditorContext context) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
-        if (generator == null) return;
-        String source = context.getText();
-        int line = context.getCaretLine(), col = context.getCaretCol();
-        background.submit(() -> {
-            SourceGenerationSupport.FieldsStatus status = generator.hashCodeEqualsStatus(
-                    context.filePath(), source, line, col);
-            SwingUtilities.invokeLater(() -> {
-                if (status.fields().isEmpty()) {
-                    sourceActionUnavailable("equals() and hashCode()");
-                    return;
-                }
-                if (status.exists() && !JavaSourceActionDialogs.confirm(createModernComponentDialogBuilder(Boolean.class),
-                        "equals() and hashCode()", text("generate.regenerate",
-                                "Os metodos ja existem. Deseja gerar novamente?"),
-                        text("generate.regenerateAction", "Gerar novamente"))) return;
-                List<SourceGenerationSupport.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
-                        createModernComponentDialogBuilder(), "equals() and hashCode()",
-                        text("generate.chooseFields", "Selecione os campos"),
-                        sourceChoices(status.fields(), JavaSourceActionDialogs.Kind.FIELD), item -> true);
-                if (selected == null || selected.isEmpty()) return;
-                submitGeneration(context, source, () -> generator.generateHashCodeEquals(
-                        context.filePath(), source, line, col, selected, status.exists()));
-            });
-        });
-    }
-
-    private void showToString(IdeEditorContext context) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
-        if (generator == null) return;
-        String source = context.getText();
-        int line = context.getCaretLine(), col = context.getCaretCol();
-        background.submit(() -> {
-            SourceGenerationSupport.FieldsStatus status = generator.toStringStatus(
-                    context.filePath(), source, line, col);
-            SwingUtilities.invokeLater(() -> {
-                if (status.exists() && !JavaSourceActionDialogs.confirm(createModernComponentDialogBuilder(Boolean.class),
-                        "toString()", text("generate.replaceToString",
-                                "toString() ja existe. Deseja substituir a implementacao?"),
-                        text("generate.replace", "Substituir"))) return;
-                List<SourceGenerationSupport.SourceItem> selected = status.fields().isEmpty() ? List.of()
-                        : JavaSourceActionDialogs.chooseMany(createModernComponentDialogBuilder(), "toString()",
-                        text("generate.chooseFields", "Selecione os campos"),
-                        sourceChoices(status.fields(), JavaSourceActionDialogs.Kind.FIELD),
-                        SourceGenerationSupport.SourceItem::selected);
-                if (selected == null) return;
-                submitGeneration(context, source, () -> generator.generateToString(
-                        context.filePath(), source, line, col, selected));
-            });
-        });
-    }
-
-    private void showDelegateMethods(IdeEditorContext context) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
-        if (generator == null) return;
-        String source = context.getText();
-        int line = context.getCaretLine(), col = context.getCaretCol();
-        background.submit(() -> {
-            List<SourceGenerationSupport.DelegateTarget> targets = generator.delegateTargets(
-                    context.filePath(), source, line, col);
-            SwingUtilities.invokeLater(() -> {
-                if (targets.isEmpty()) {
-                    sourceActionUnavailable(text("generate.delegate", "Delegate Methods"));
-                    return;
-                }
-                List<JavaSourceActionDialogs.Choice<SourceGenerationSupport.DelegateTarget>> choices = targets.stream()
-                        .map(target -> new JavaSourceActionDialogs.Choice<>(target, target.label(), "",
-                                JavaSourceActionDialogs.Kind.FIELD))
-                        .toList();
-                SourceGenerationSupport.DelegateTarget target = JavaSourceActionDialogs.chooseOne(
-                        createModernComponentDialogBuilder(), text("generate.delegate", "Delegate Methods"),
-                        text("generate.chooseDelegateTarget", "Selecione o campo delegado"), choices);
-                if (target == null) return;
-                List<SourceGenerationSupport.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
-                        createModernComponentDialogBuilder(), text("generate.delegate", "Delegate Methods"),
-                        text("generate.chooseDelegateMethods", "Selecione os metodos delegados"),
-                        sourceChoices(target.methods(), JavaSourceActionDialogs.Kind.DELEGATE), item -> true);
-                if (selected == null || selected.isEmpty()) return;
-                submitGeneration(context, source, () -> generator.generateDelegateMethods(
-                        context.filePath(), source, line, col, target, selected));
-            });
-        });
-    }
-
-    private static List<JavaSourceActionDialogs.Choice<SourceGenerationSupport.SourceItem>> sourceChoices(
-            List<SourceGenerationSupport.SourceItem> items, JavaSourceActionDialogs.Kind kind) {
-        return items.stream().map(item -> new JavaSourceActionDialogs.Choice<>(
-                item, item.label(), item.detail(), kind)).toList();
-    }
-
-    private void submitGeneration(IdeEditorContext context, String source,
-                                  java.util.function.Supplier<List<TextEdit>> generation) {
-        background.submit(() -> {
-            List<TextEdit> edits = generation.get();
-            SwingUtilities.invokeLater(() -> applyGeneratedEdits(context, source, edits));
-        });
-    }
-
-    private void applyGeneratedEdits(IdeEditorContext context, String source, List<TextEdit> edits) {
-        if (edits == null || edits.isEmpty()) {
-            sourceActionUnavailable(text("generate.title", "Generate"));
-            return;
-        }
-        if (!Objects.equals(source, context.getText())) {
-            setStatusBarText(text("status.generate.changed",
-                    "Java: o arquivo mudou durante a geracao; tente novamente"));
-            return;
-        }
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp == null) return;
-        int line = context.getCaretLine(), col = context.getCaretCol();
-        String generated = lsp.applyTextEdits(source, edits);
-        context.setText(generated);
-        context.setCaretPosition(line, col);
-        lsp.changeDocument(context.filePath(), generated);
-        context.refreshDiagnostics();
-        context.refreshCodeLenses();
-        setStatusBarText(text("status.generate.done", "Java: codigo gerado"));
-    }
-
-    private void sourceActionUnavailable(String action) {
-        setStatusBarText(text("status.generate.unavailable", "Java: acao indisponivel")
-                + " - " + action);
     }
 
     @Override
@@ -4736,11 +4215,11 @@ public class JavaIdeAdapter extends IdeAdapter {
                                 event -> onFindUsages(editorContext)))
                 .separator()
                 .item(text("generate.title", "Generate..."), enabled,
-                        event -> showGenerateActions(editorContext))
+                        event -> sourceActions.showGenerateActions(editorContext))
                 .item(text("generate.override", "Override Methods..."), enabled,
-                        event -> showOverrideMethods(editorContext, false))
+                        event -> sourceActions.showOverrideMethods(editorContext, false))
                 .item(text("generate.implement", "Implement Methods..."), enabled,
-                        event -> showOverrideMethods(editorContext, true))
+                        event -> sourceActions.showOverrideMethods(editorContext, true))
                 .separator()
                 .item(text("debug.evaluate", "Evaluate Expression..."), debugPaused,
                         event -> showEvaluateDialog(editorContext, 0))
@@ -4906,7 +4385,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (edit == null || edit.isEmpty()) {
                 return false;
             }
-            return Boolean.TRUE.equals(onUi(() -> applyWorkspaceEdit(lsp, edit)));
+            return Boolean.TRUE.equals(onUi(() -> sourceActions.applyWorkspaceEdit(lsp, edit)));
         }
 
         @Override
@@ -4994,15 +4473,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         menu.into("code")
                 .add(MenuNode.item("javaGenerate", text("generate.title", "Generate..."))
                         .shortcut("alt INSERT")
-                        .onClick(event -> showGenerateActions(activeJavaEditor)))
+                        .onClick(event -> sourceActions.showGenerateActions(activeJavaEditor)))
                 .add(MenuNode.item("javaOverrideMethods",
                                 text("generate.override", "Override Methods..."))
                         .shortcut("control INSERT")
-                        .onClick(event -> showOverrideMethods(activeJavaEditor, false)))
+                        .onClick(event -> sourceActions.showOverrideMethods(activeJavaEditor, false)))
                 .add(MenuNode.item("javaImplementMethods",
                                 text("generate.implement", "Implement Methods..."))
                         .shortcut("control I")
-                        .onClick(event -> showOverrideMethods(activeJavaEditor, true)))
+                        .onClick(event -> sourceActions.showOverrideMethods(activeJavaEditor, true)))
                 .add(MenuNode.item("javaEvaluateExpression",
                                 text("debug.evaluate", "Evaluate Expression..."))
                         .shortcut("alt F8")
