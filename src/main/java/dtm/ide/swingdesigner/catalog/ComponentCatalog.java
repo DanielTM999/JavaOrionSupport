@@ -77,6 +77,24 @@ public final class ComponentCatalog {
         return scanner.enumConstants(className);
     }
 
+    public List<InjectionRule> injectionRules() {
+        Map<String, InjectionRule> rules = new LinkedHashMap<>();
+        for (DescriptorSet layer : layers) {
+            for (InjectionRule rule : layer.injections()) {
+                rules.put(rule.annotation() + "#" + rule.attribute(), rule);
+            }
+        }
+        return List.copyOf(rules.values());
+    }
+
+    public DesignerOptions options() {
+        DesignerOptions options = DesignerOptions.DEFAULTS;
+        for (DescriptorSet layer : layers) {
+            options = options.overlay(layer.options());
+        }
+        return options;
+    }
+
     public Map<String, LayoutDescriptor> layouts() {
         Map<String, LayoutDescriptor> merged = new LinkedHashMap<>();
         for (DescriptorSet layer : layers) {

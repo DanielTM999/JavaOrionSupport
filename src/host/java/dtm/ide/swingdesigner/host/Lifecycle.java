@@ -5,34 +5,25 @@ import java.awt.Component;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Map;
 
 final class Lifecycle {
 
     private Lifecycle() {
     }
 
-    static void run(Object instance, List<String> methods, List<String> warnings) {
+    static void run(Object instance, List<String> methods, List<Object> warnings) {
         for (String name : methods) {
             if (name == null || name.trim().isEmpty()) {
                 continue;
             }
-            Method method = find(instance.getClass(), name.trim());
+            Method method = find(instance.getClass(), name.trim(), 0);
             if (method == null) {
-                warnings.add("designInit: metodo " + name + "() nao encontrado em "
-                        + instance.getClass().getName());
+                warnings.add(Warnings.info("designInit: metodo " + name + "() nao encontrado em "
+                        + instance.getClass().getName()));
                 continue;
             }
-            try {
-                method.setAccessible(true);
-                method.invoke(instance);
-            } catch (InvocationTargetException error) {
-                Throwable cause = Instantiator.rootCause(error);
-                warnings.add(name + "() lancou " + Instantiator.describe(cause) + location(cause)
-                        + ". A tela foi renderizada ate esse ponto.");
-            } catch (Throwable error) {
-                warnings.add("designInit: nao foi possivel chamar " + name + "(): "
-                        + Instantiator.describe(error));
-            }
+            invoke(instance, method, new Object[0], "designInit", warnings);
         }
     }
 
@@ -50,9 +41,7 @@ final class Lifecycle {
         }
         for (StackTraceElement frame : error.getStackTrace()) {
             String owner = frame.getClassName();
-            if (owner.startsWith("java.") || owner.startsWith("javax.") || owner.startsWith("sun.")
-                    || owner.startsWith("jdk.") || owner.startsWith("com.sun.")
-                    || owner.startsWith("dtm.ide.swingdesigner.host.")) {
+            if (Warnings.isInfrastructure(owner)) {
                 continue;
             }
             String simple = owner.substring(owner.lastIndexOf('.') + 1);
@@ -63,11 +52,32 @@ final class Lifecycle {
         return "";
     }
 
-    private static Method find(Class<?> type, String name) {
+    private static boolean invoke(Object instance, Method method, Object[] arguments, String origin,
+                                  List<Object> warnings) {
+        try {
+            method.setAccessible(true);
+            method.invoke(instance, arguments);
+            return true;
+        } catch (InvocationTargetException error) {
+            Throwable cause = Instantiator.rootCause(error);
+            Map<String, Object> warning = Warnings.error(origin, method.getName() + "() lancou "
+                    + Instantiator.describe(cause), cause, instance);
+            warning.put("method", method.getName());
+            warnings.add(warning);
+            return false;
+        } catch (Throwable error) {
+            warnings.add(Warnings.info("Nao foi possivel chamar " + method.getName() + "(): "
+                    + Instantiator.describe(error)));
+            return false;
+        }
+    }
+
+    private static Method find(Class<?> type, String name, int arity) {
         Class<?> current = type;
         while (current != null && current != Object.class) {
             for (Method method : current.getDeclaredMethods()) {
-                if (method.getName().equals(name) && method.getParameterTypes().length == 0) {
+                if (method.getName().equals(name) && method.getParameterTypes().length == arity
+                        && !method.isBridge()) {
                     return method;
                 }
             }

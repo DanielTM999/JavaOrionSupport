@@ -1,7 +1,9 @@
 package dtm.ide.swingdesigner.runtime;
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import dtm.ide.swingdesigner.catalog.InjectionRule;
 import dtm.ide.swingdesigner.catalog.PropertyDescriptor;
+import dtm.ide.swingdesigner.recovery.LifecycleRecovery;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -20,6 +22,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,13 +77,13 @@ class DesignerHostIntegrationTest {
                     import javax.swing.*;
                     import java.awt.BorderLayout;
                     public class Principal extends BaseActivity {
-                        private final Runnable controller;
-                        public Principal(Runnable controller) { this.controller = controller; }
+                        private final Controlador controller;
+                        public Principal(Controlador controller) { this.controller = controller; }
                         @Override
                         protected void onDrawing() {
                             setTitle("Principal");
                             getContentPane().add(new JLabel("cabecalho"), BorderLayout.NORTH);
-                            controller.run();
+                            controller.iniciar();
                             getContentPane().add(new JButton("nunca"), BorderLayout.CENTER);
                         }
                     }
@@ -106,6 +109,83 @@ class DesignerHostIntegrationTest {
                             setJMenuBar(barra);
                             getContentPane().add(new Painel("x", 3));
                             pack();
+                        }
+                    }
+                    """);
+
+    private static final Map<String, String> EXTRA_SOURCES = Map.of(
+            "demo/Controlador.java", """
+                    package demo;
+                    public class Controlador {
+                        public Controlador(String nome) { }
+                        public void iniciar() { }
+                        public javax.swing.JPanel criarBarra() { return new javax.swing.JPanel(); }
+                    }
+                    """,
+            "demo/Valor.java", """
+                    package demo;
+                    import java.lang.annotation.*;
+                    @Retention(RetentionPolicy.RUNTIME)
+                    @Target(ElementType.FIELD)
+                    public @interface Valor {
+                        String chave();
+                        String padrao() default "";
+                    }
+                    """,
+            "demo/ComValor.java", """
+                    package demo;
+                    import javax.swing.*;
+                    public class ComValor extends JPanel {
+                        @Valor(chave = "titulo", padrao = "Ola")
+                        private String titulo;
+                        @Valor(chave = "colunas", padrao = "7")
+                        private int colunas;
+                        protected void montar() {
+                            add(new JLabel(titulo.toUpperCase() + colunas));
+                        }
+                    }
+                    """,
+            "demo/Servico.java", """
+                    package demo;
+                    public interface Servico {
+                        String nome();
+                        java.util.List<String> itens();
+                        Servico filho();
+                    }
+                    """,
+            "demo/ComServico.java", """
+                    package demo;
+                    import javax.swing.*;
+                    public class ComServico extends JPanel {
+                        private Servico servico;
+                        protected void montar() {
+                            add(new JLabel("[" + servico.nome() + servico.itens().size() + servico.filho().nome() + "]"));
+                        }
+                    }
+                    """,
+            "demo/Recuperavel.java", """
+                    package demo;
+                    import javax.swing.*;
+                    import java.awt.BorderLayout;
+                    public class Recuperavel extends BaseActivity {
+                        private Controlador controller;
+                        @Override
+                        protected void onDrawing() {
+                            getContentPane().add(new JLabel("topo"), BorderLayout.NORTH);
+                            controller.iniciar();
+                            String local = "x";
+                            getContentPane().add(new JLabel(local));
+                            JPanel barra = controller.criarBarra();
+                            barra.add(new JLabel("menu"));
+                            getContentPane().add(barra, BorderLayout.WEST);
+                            montarCorpo();
+                            this.montarRodape("fim", 3);
+                        }
+                        private void montarCorpo() {
+                            getContentPane().add(new JButton("corpo"), BorderLayout.CENTER);
+                        }
+                        private void montarRodape(String texto, int altura) {
+                            getContentPane().add(new JLabel(texto + altura), BorderLayout.SOUTH);
                         }
                     }
                     """);
@@ -193,6 +273,35 @@ class DesignerHostIntegrationTest {
     }
 
     @Test
+    void designerStatementsRunLiveAgainstBoundNodes() {
+        ViewResult view = client.view("demo.Painel", null, -1, -1);
+        assertEquals("java.awt.BorderLayout", view.root().layoutClass());
+        SnapshotNode salvar = view.root().children().stream()
+                .filter(node -> "salvar".equals(node.field())).findFirst().orElseThrow();
+        assertTrue(salvar.ownField());
+        assertEquals("South", salvar.constraints().asText());
+
+        String header = "package demo;\nimport javax.swing.*;\nimport java.awt.*;\n";
+        List<com.fasterxml.jackson.databind.node.ObjectNode> statements =
+                dtm.ide.swingdesigner.recovery.RecoveryPlanner.translate(header, "demo.Painel", List.of(
+                        "extra = new JCheckBox(\"Ativo\");", "extra.setSelected(true);",
+                        "add(extra, BorderLayout.WEST);", "botao.setText(\"Gravar\");"), java.util.Set.of());
+        ViewResult live = client.interpret(statements, List.of(), Map.of("botao", salvar.id()), false).view();
+
+        SnapshotNode added = live.root().children().stream()
+                .filter(node -> node.className().equals("javax.swing.JCheckBox")).findFirst().orElseThrow();
+        assertEquals("West", added.constraints().asText());
+        SwingViewClient.Inspection text = client.inspect(salvar.id(), List.of(property("text", "getText")));
+        assertEquals("Gravar", text.values().get("text").asText());
+
+        ViewResult removed = client.interpret(dtm.ide.swingdesigner.recovery.RecoveryPlanner.translate(header,
+                        "demo.Painel", List.of("designerParent.remove(designerChild);"), java.util.Set.of()),
+                List.of(), Map.of("designerParent", live.root().id(), "designerChild", added.id()), false).view();
+        assertTrue(removed.root().children().stream()
+                .noneMatch(node -> node.className().equals("javax.swing.JCheckBox")));
+    }
+
+    @Test
     void framesRenderTheirRootPaneWithMenuBarButAreInspectedAsTheWindow() {
         ViewResult result = client.view("demo.Tela", null, -1, -1);
 
@@ -234,7 +343,7 @@ class DesignerHostIntegrationTest {
 
         assertFalse(lazy.failed());
         assertTrue(lazy.root().children().stream().allMatch(child -> child.children().isEmpty()));
-        assertTrue(lazy.warnings().stream().anyMatch(warning -> warning.contains("designInit")),
+        assertTrue(lazy.warnings().stream().anyMatch(warning -> warning.text().contains("designInit")),
                 lazy.warnings()::toString);
 
         ViewResult drawn = client.view("demo.Principal", null, List.of("dispatchDrawing"), -1, -1);
@@ -245,10 +354,12 @@ class DesignerHostIntegrationTest {
         assertEquals("Principal", drawn.title());
         assertTrue(classes.contains("javax.swing.JLabel"), classes::toString);
         assertFalse(classes.contains("javax.swing.JButton"), classes::toString);
-        assertEquals(1, drawn.warnings().size(), drawn.warnings()::toString);
-        assertTrue(drawn.warnings().getFirst().contains("NullPointerException"), drawn.warnings()::toString);
-        assertTrue(drawn.warnings().getFirst().contains("Principal.onDrawing(Principal.java:"),
-                drawn.warnings()::toString);
+        assertEquals(1, drawn.errors().size(), drawn.warnings()::toString);
+        ViewWarning failure = drawn.errors().getFirst();
+        assertTrue(failure.message().contains("NullPointerException"), failure::toString);
+        assertTrue(failure.text().contains("Principal.onDrawing(Principal.java:"), failure::text);
+        assertTrue(failure.hint().contains("controller"), failure::toString);
+        assertTrue(failure.stack().contains("NullPointerException"));
     }
 
     @Test
@@ -256,7 +367,7 @@ class DesignerHostIntegrationTest {
         ViewResult result = client.view("demo.Painel", null, List.of("naoExiste"), -1, -1);
 
         assertFalse(result.failed());
-        assertTrue(result.warnings().stream().anyMatch(warning -> warning.contains("naoExiste")),
+        assertTrue(result.warnings().stream().anyMatch(warning -> warning.text().contains("naoExiste")),
                 result.warnings()::toString);
     }
 
@@ -266,6 +377,75 @@ class DesignerHostIntegrationTest {
 
         assertFalse(result.failed());
         assertEquals("javax.swing.JLabel", result.root().children().getFirst().className());
+    }
+
+    @Test
+    void annotatedDefaultsAreInjectedBeforeTheLifecycleRuns() {
+        ViewOptions options = new ViewOptions(List.of("montar"),
+                List.of(new InjectionRule("demo.Valor", "padrao", null)), Map.of(), true);
+
+        ViewResult result = client.view("demo.ComValor", null, options, 200, 60);
+
+        assertTrue(result.errors().isEmpty(), result.warnings()::toString);
+        assertEquals("javax.swing.JLabel", result.root().children().getFirst().className());
+        SwingViewClient.Inspection label = client.inspect(result.root().children().getFirst().id(),
+                List.of(property("text", "getText")));
+        assertEquals("OLA7", label.values().get("text").asText());
+        assertTrue(result.warnings().stream().anyMatch(warning -> warning.text().contains("titulo=Ola")),
+                result.warnings()::toString);
+    }
+
+    @Test
+    void explicitDesignValuesWinOverAnnotationDefaults() {
+        ViewOptions options = new ViewOptions(List.of("montar"),
+                List.of(new InjectionRule("demo.Valor", "padrao", null)),
+                Map.of("titulo", JsonNodeFactory.instance.textNode("Clientes")), true);
+
+        ViewResult result = client.view("demo.ComValor", null, options, 200, 60);
+        SwingViewClient.Inspection label = client.inspect(result.root().children().getFirst().id(),
+                List.of(property("text", "getText")));
+
+        assertEquals("CLIENTES7", label.values().get("text").asText());
+    }
+
+    @Test
+    void interfaceDependenciesReceiveDesignStubs() {
+        ViewResult stubbed = client.view("demo.ComServico", null,
+                new ViewOptions(List.of("montar"), List.of(), Map.of(), true), 200, 60);
+        SwingViewClient.Inspection label = client.inspect(stubbed.root().children().getFirst().id(),
+                List.of(property("text", "getText")));
+        ViewResult plain = client.view("demo.ComServico", null,
+                new ViewOptions(List.of("montar"), List.of(), Map.of(), false), 200, 60);
+
+        assertTrue(stubbed.errors().isEmpty(), stubbed.warnings()::toString);
+        assertEquals("[0]", label.values().get("text").asText());
+        assertTrue(stubbed.warnings().stream().anyMatch(warning -> warning.text().contains("servico (Servico)")),
+                stubbed.warnings()::toString);
+        assertEquals(1, plain.errors().size(), plain.warnings()::toString);
+    }
+
+    @Test
+    void recoveryRunsTheSelfCallsAfterTheFailingLine() {
+        ViewResult initial = client.view("demo.Recuperavel", null,
+                new ViewOptions(List.of("dispatchDrawing"), List.of(), Map.of(), false), -1, -1);
+        Path sources = root.resolve("src");
+
+        ViewResult recovered = LifecycleRecovery.using(
+                owner -> owner.startsWith("demo."),
+                className -> {
+                    Path file = sources.resolve(className.replace('.', '/') + ".java");
+                    return Files.isRegularFile(file) ? Optional.of(file) : Optional.empty();
+                },
+                client, false).run(initial);
+
+        List<String> classes = new ArrayList<>();
+        recovered.root().forEach(node -> classes.add(node.className()));
+        assertTrue(classes.contains("javax.swing.JButton"), classes::toString);
+        assertEquals(4, classes.stream().filter("javax.swing.JLabel"::equals).count(), classes::toString);
+        assertTrue(recovered.warnings().stream().anyMatch(warning -> warning.text().contains(
+                "Valores de design para: barra (JPanel)")), recovered.warnings()::toString);
+        assertTrue(recovered.warnings().stream().anyMatch(warning -> warning.isError()
+                && warning.text().contains("controller.criarBarra()")), recovered.warnings()::toString);
     }
 
     private static PropertyDescriptor property(String name, String getter) {
@@ -279,7 +459,9 @@ class DesignerHostIntegrationTest {
         Files.createDirectories(out);
         List<String> arguments = new ArrayList<>(List.of("-g", "-d", out.toString(), "--release", "8",
                 "-Xlint:-options"));
-        for (Map.Entry<String, String> source : SOURCES.entrySet()) {
+        Map<String, String> all = new java.util.LinkedHashMap<>(SOURCES);
+        all.putAll(EXTRA_SOURCES);
+        for (Map.Entry<String, String> source : all.entrySet()) {
             Path file = src.resolve(source.getKey());
             Files.createDirectories(file.getParent());
             Files.writeString(file, source.getValue());

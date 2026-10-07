@@ -23,13 +23,21 @@ import javax.swing.text.JTextComponent;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Container;
+import java.awt.BorderLayout;
+import java.awt.Dimension;
 import java.awt.Graphics2D;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
+import java.awt.Insets;
+import java.awt.LayoutManager;
+import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -48,6 +56,9 @@ final class Snapshots {
 
     private final Map<String, Component> nodes = new LinkedHashMap<String, Component>();
     private final Map<Component, String> fieldNames = new IdentityHashMap<Component, String>();
+    private final Map<Component, Boolean> ownFields = new IdentityHashMap<Component, Boolean>();
+    private final Map<Component, String> roles = new IdentityHashMap<Component, String>();
+    private Object owner;
 
     Map<String, Component> nodes() {
         return nodes;
@@ -56,6 +67,9 @@ final class Snapshots {
     Map<String, Object> describe(Component root, Object owner) {
         nodes.clear();
         fieldNames.clear();
+        ownFields.clear();
+        roles.clear();
+        this.owner = owner;
         collectFields(owner);
         Map<String, Object> node = node(root, root, "0");
         if (owner instanceof Component && owner != root) {
@@ -99,6 +113,20 @@ final class Snapshots {
         String field = fieldNames.get(component);
         if (field != null) {
             node.put("field", field);
+            if (Boolean.TRUE.equals(ownFields.get(component))) {
+                node.put("ownField", Boolean.TRUE);
+            }
+        }
+        if (component instanceof JRootPane) {
+            JRootPane rootPane = (JRootPane) component;
+            if (rootPane.getJMenuBar() != null) {
+                roles.put(rootPane.getJMenuBar(), "menuBar");
+            }
+            roles.put(rootPane.getContentPane(), "contentPane");
+        }
+        String role = roles.get(component);
+        if (role != null) {
+            node.put("role", role);
         }
         String name = component.getName();
         if (name != null && !name.startsWith("null.")) {
@@ -112,6 +140,25 @@ final class Snapshots {
         node.put("width", bounds.width);
         node.put("height", bounds.height);
         node.put("visible", component.isVisible());
+        Container parent = component.getParent();
+        if (component != root && parent != null) {
+            node.put("index", indexIn(parent, component));
+            Object constraints = constraints(parent, component);
+            if (constraints != null) {
+                node.put("constraints", constraints);
+            }
+        }
+        Dimension preferred = safePreferred(component);
+        if (preferred != null) {
+            node.put("prefWidth", preferred.width);
+            node.put("prefHeight", preferred.height);
+        }
+        if (component instanceof Container && !(component instanceof JRootPane) && !isLeaf(component)) {
+            Map<String, Object> layout = layout((Container) component, root);
+            if (layout != null) {
+                node.put("layout", layout);
+            }
+        }
         List<Object> children = new ArrayList<Object>();
         int index = 0;
         for (Component child : children(component)) {
@@ -164,6 +211,106 @@ final class Snapshots {
         return result;
     }
 
+    private static int indexIn(Container parent, Component child) {
+        Component[] siblings = parent.getComponents();
+        for (int i = 0; i < siblings.length; i++) {
+            if (siblings[i] == child) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static Dimension safePreferred(Component component) {
+        try {
+            return component.getPreferredSize();
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    static Object constraints(Container parent, Component child) {
+        LayoutManager layout = parent.getLayout();
+        try {
+            if (layout instanceof BorderLayout) {
+                Object value = ((BorderLayout) layout).getConstraints(child);
+                return value == null ? null : String.valueOf(value);
+            }
+            if (layout instanceof GridBagLayout) {
+                GridBagConstraints value = ((GridBagLayout) layout).getConstraints(child);
+                Map<String, Object> result = new LinkedHashMap<String, Object>();
+                result.put("gridx", value.gridx);
+                result.put("gridy", value.gridy);
+                result.put("gridwidth", value.gridwidth);
+                result.put("gridheight", value.gridheight);
+                result.put("weightx", value.weightx);
+                result.put("weighty", value.weighty);
+                result.put("anchor", value.anchor);
+                result.put("fill", value.fill);
+                Insets insets = value.insets;
+                if (insets != null) {
+                    Map<String, Object> margin = new LinkedHashMap<String, Object>();
+                    margin.put("top", insets.top);
+                    margin.put("left", insets.left);
+                    margin.put("bottom", insets.bottom);
+                    margin.put("right", insets.right);
+                    result.put("insets", margin);
+                }
+                result.put("ipadx", value.ipadx);
+                result.put("ipady", value.ipady);
+                return result;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static final String[] LAYOUT_GETTERS = {"getHgap", "getVgap", "getRows", "getColumns",
+            "getAlignment", "getAxis"};
+
+    private static Map<String, Object> layout(Container container, Component root) {
+        LayoutManager layout = container.getLayout();
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        if (layout == null) {
+            result.put("className", "null");
+            return result;
+        }
+        result.put("className", layout.getClass().getName());
+        for (String getter : LAYOUT_GETTERS) {
+            try {
+                Method method = layout.getClass().getMethod(getter);
+                if (method.getReturnType() == int.class) {
+                    String name = Character.toLowerCase(getter.charAt(3)) + getter.substring(4);
+                    result.put(name, method.invoke(layout));
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (layout instanceof GridBagLayout) {
+            try {
+                GridBagLayout bag = (GridBagLayout) layout;
+                int[][] dimensions = bag.getLayoutDimensions();
+                Point origin = bag.getLayoutOrigin();
+                Point absolute = container == root ? origin
+                        : SwingUtilities.convertPoint(container, origin, root);
+                result.put("originX", absolute.x);
+                result.put("originY", absolute.y);
+                result.put("columnWidths", toList(dimensions[0]));
+                result.put("rowHeights", toList(dimensions[1]));
+            } catch (Throwable ignored) {
+            }
+        }
+        return result;
+    }
+
+    private static List<Object> toList(int[] values) {
+        List<Object> list = new ArrayList<Object>();
+        for (int value : values) {
+            list.add(value);
+        }
+        return list;
+    }
+
     private static boolean isLeaf(Component component) {
         Class<?> type = component.getClass();
         for (Class<?> leaf : LEAF_TYPES) {
@@ -202,6 +349,9 @@ final class Snapshots {
                     Object value = field.get(owner);
                     if (value instanceof Component && !fieldNames.containsKey(value)) {
                         fieldNames.put((Component) value, field.getName());
+                        if (owner == this.owner) {
+                            ownFields.put((Component) value, Boolean.TRUE);
+                        }
                     }
                 } catch (Throwable ignored) {
                 }

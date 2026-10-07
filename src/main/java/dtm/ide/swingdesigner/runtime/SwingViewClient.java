@@ -50,10 +50,14 @@ public final class SwingViewClient {
 
     public ViewResult view(String className, ConstructorUse constructor, List<String> designInit,
                            int width, int height) {
+        return view(className, constructor, ViewOptions.of(designInit), width, height);
+    }
+
+    public ViewResult view(String className, ConstructorUse constructor, ViewOptions options,
+                           int width, int height) {
         ObjectNode params = host.params();
         params.put("className", className);
-        ArrayNode hooks = params.putArray("designInit");
-        designInit.forEach(hooks::add);
+        (options == null ? ViewOptions.NONE : options).writeTo(params);
         if (constructor != null) {
             params.set("constructor", constructor.toJson());
         }
@@ -105,15 +109,45 @@ public final class SwingViewClient {
     }
 
     public String preview(String className, ConstructorUse constructor, List<String> designInit) {
+        return preview(className, constructor, ViewOptions.of(designInit));
+    }
+
+    public String preview(String className, ConstructorUse constructor, ViewOptions options) {
         ObjectNode params = host.params();
         params.put("className", className);
-        ArrayNode hooks = params.putArray("designInit");
-        designInit.forEach(hooks::add);
+        (options == null ? ViewOptions.NONE : options).writeTo(params);
         if (constructor != null) {
             params.set("constructor", constructor.toJson());
         }
         JsonNode result = host.call("preview", params).result();
         return result.hasNonNull("error") ? result.get("error").asText() : null;
+    }
+
+    public Interpreted interpret(List<ObjectNode> statements, List<ObjectNode> priorLocals, boolean stubs) {
+        return interpret(statements, priorLocals, Map.of(), stubs);
+    }
+
+    public Interpreted interpret(List<ObjectNode> statements, List<ObjectNode> priorLocals,
+                                 Map<String, String> bindings, boolean stubs) {
+        ObjectNode params = host.params();
+        ObjectNode bound = params.putObject("bindings");
+        bindings.forEach(bound::put);
+        ArrayNode array = params.putArray("statements");
+        statements.forEach(array::add);
+        ArrayNode prior = params.putArray("priorLocals");
+        priorLocals.forEach(prior::add);
+        params.put("stubs", stubs);
+        HostResponse response = host.call("interpret", params);
+        List<Outcome> outcomes = new ArrayList<>();
+        for (JsonNode result : response.result().path("results")) {
+            outcomes.add(new Outcome(result.path("line").asInt(-1), result.path("text").asText(""),
+                    result.path("status").asText("failed")));
+        }
+        List<String> synthesized = new ArrayList<>();
+        for (JsonNode name : response.result().path("synthesized")) {
+            synthesized.add(name.asText());
+        }
+        return new Interpreted(result(response), outcomes, synthesized);
     }
 
     public void closePreview() {
@@ -134,9 +168,9 @@ public final class SwingViewClient {
         for (JsonNode attempt : result.path("attempts")) {
             attempts.add(attempt.asText());
         }
-        List<String> warnings = new ArrayList<>();
+        List<ViewWarning> warnings = new ArrayList<>();
         for (JsonNode warning : result.path("warnings")) {
-            warnings.add(warning.asText());
+            warnings.add(ViewWarning.parse(warning));
         }
         return new ViewResult(image,
                 result.path("width").asInt(),
@@ -161,5 +195,15 @@ public final class SwingViewClient {
     }
 
     public record Inspection(String className, Map<String, JsonNode> values, Map<String, String> errors) {
+    }
+
+    public record Interpreted(ViewResult view, List<Outcome> outcomes, List<String> synthesized) {
+    }
+
+    public record Outcome(int line, String text, String status) {
+
+        public boolean ok() {
+            return "ok".equals(status);
+        }
     }
 }

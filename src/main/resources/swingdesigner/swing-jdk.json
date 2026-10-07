@@ -7,10 +7,10 @@
         "name": { "category": "Geral" },
         "enabled": { "preferred": true, "category": "Geral" },
         "visible": { "preferred": true, "category": "Geral" },
-        "font": { "preferred": true, "category": "Aparência", "editor": "font" },
-        "foreground": { "preferred": true, "category": "Aparência", "editor": "color" },
-        "background": { "preferred": true, "category": "Aparência", "editor": "color" },
-        "cursor": { "category": "Aparência" },
+        "font": { "preferred": true, "category": "Aparencia", "editor": "font" },
+        "foreground": { "preferred": true, "category": "Aparencia", "editor": "color" },
+        "background": { "preferred": true, "category": "Aparencia", "editor": "color" },
+        "cursor": { "category": "Aparencia" },
         "bounds": { "category": "Layout", "editor": "rectangle", "hidden": true },
         "location": { "category": "Layout", "editor": "point", "hidden": true },
         "size": { "category": "Layout", "editor": "dimension", "hidden": true },
@@ -22,7 +22,7 @@
         "mixingCutoutShape": { "hidden": true },
         "ignoreRepaint": { "hidden": true },
         "focusTraversalKeysEnabled": { "hidden": true },
-        "componentOrientation": { "category": "Avançado" },
+        "componentOrientation": { "category": "Avancado" },
         "focusable": { "category": "Comportamento" }
       }
     },
@@ -40,23 +40,23 @@
         "title": { "preferred": true, "category": "Geral" },
         "resizable": { "category": "Geral" },
         "alwaysOnTop": { "category": "Comportamento" },
-        "iconImage": { "category": "Aparência", "editor": "image" },
+        "iconImage": { "category": "Aparencia", "editor": "image" },
         "iconImages": { "hidden": true },
         "locationRelativeTo": { "category": "Layout", "editor": "expression" },
         "locationByPlatform": { "category": "Layout" },
         "autoRequestFocus": { "hidden": true },
         "focusableWindowState": { "hidden": true },
         "modalExclusionType": { "hidden": true },
-        "opacity": { "category": "Aparência" },
+        "opacity": { "category": "Aparencia" },
         "shape": { "hidden": true },
-        "type": { "category": "Avançado" }
+        "type": { "category": "Avancado" }
       }
     },
     "javax.swing.JComponent": {
       "properties": {
         "toolTipText": { "preferred": true, "category": "Geral" },
-        "opaque": { "preferred": true, "category": "Aparência" },
-        "border": { "preferred": true, "category": "Aparência", "editor": "border" },
+        "opaque": { "preferred": true, "category": "Aparencia" },
+        "border": { "preferred": true, "category": "Aparencia", "editor": "border" },
         "alignmentX": { "category": "Layout" },
         "alignmentY": { "category": "Layout" },
         "componentPopupMenu": { "category": "Comportamento", "editor": "component" },
@@ -74,12 +74,12 @@
     },
 
     "javax.swing.JPanel": {
-      "category": "Swing · Containers",
+      "category": "Swing - Containers",
       "displayName": "Panel",
       "container": { "kind": "LAYOUT" }
     },
     "javax.swing.JScrollPane": {
-      "category": "Swing · Containers",
+      "category": "Swing - Containers",
       "displayName": "Scroll Pane",
       "container": { "kind": "SINGLE_SLOT", "strategy": "setViewportView(${child})" },
       "properties": {
@@ -103,7 +103,7 @@
       }
     },
     "javax.swing.JSplitPane": {
-      "category": "Swing · Containers",
+      "category": "Swing - Containers",
       "displayName": "Split Pane",
       "container": {
         "kind": "SLOTS",
@@ -127,14 +127,14 @@
       }
     },
     "javax.swing.JTabbedPane": {
-      "category": "Swing · Containers",
+      "category": "Swing - Containers",
       "displayName": "Tabbed Pane",
       "container": {
         "kind": "LIST",
         "strategy": "addTab(${child.prop.tabTitle}, ${child.prop.tabIcon}, ${child}, ${child.prop.tabTooltip})",
         "childProperties": {
-          "tabTitle": { "type": "java.lang.String", "default": "\"Tab\"", "displayName": "Título da aba" },
-          "tabIcon": { "type": "javax.swing.Icon", "default": "null", "editor": "icon", "displayName": "Ícone da aba" },
+          "tabTitle": { "type": "java.lang.String", "default": "\"Tab\"", "displayName": "Titulo da aba" },
+          "tabIcon": { "type": "javax.swing.Icon", "default": "null", "editor": "icon", "displayName": "Icone da aba" },
           "tabTooltip": { "type": "java.lang.String", "default": "null", "displayName": "Tooltip da aba" }
         }
       },
@@ -150,23 +150,23 @@
       }
     },
     "javax.swing.JToolBar": {
-      "category": "Swing · Containers",
+      "category": "Swing - Containers",
       "displayName": "Tool Bar",
       "container": { "kind": "LIST", "strategy": "add(${child})" },
       "properties": { "floatable": { "preferred": true } }
     },
     "javax.swing.JLayeredPane": {
-      "category": "Swing · Containers",
+      "category": "Swing - Containers",
       "displayName": "Layered Pane",
       "container": { "kind": "LAYOUT" }
     },
     "javax.swing.JDesktopPane": {
-      "category": "Swing · Containers",
+      "category": "Swing - Containers",
       "displayName": "Desktop Pane",
       "container": { "kind": "LIST", "strategy": "add(${child})" }
     },
     "javax.swing.JInternalFrame": {
-      "category": "Swing · Containers",
+      "category": "Swing - Containers",
       "displayName": "Internal Frame",
       "container": {
         "kind": "LAYOUT",
@@ -189,7 +189,7 @@
     },
 
     "javax.swing.JLabel": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "Label",
       "properties": {
         "text": { "preferred": true, "default": "\"\"" },
@@ -225,9 +225,9 @@
                          "javax.swing.SwingConstants.CENTER", "javax.swing.SwingConstants.RIGHT",
                          "javax.swing.SwingConstants.TRAILING"]
         },
-        "focusPainted": { "category": "Aparência" },
-        "borderPainted": { "category": "Aparência" },
-        "contentAreaFilled": { "category": "Aparência" },
+        "focusPainted": { "category": "Aparencia" },
+        "borderPainted": { "category": "Aparencia" },
+        "contentAreaFilled": { "category": "Aparencia" },
         "pressedIcon": { "editor": "icon" },
         "rolloverIcon": { "editor": "icon" },
         "selectedIcon": { "editor": "icon" },
@@ -236,12 +236,12 @@
         "multiClickThreshhold": { "hidden": true }
       }
     },
-    "javax.swing.JButton": { "category": "Swing · Controles", "displayName": "Button" },
-    "javax.swing.JToggleButton": { "category": "Swing · Controles", "displayName": "Toggle Button" },
-    "javax.swing.JCheckBox": { "category": "Swing · Controles", "displayName": "Check Box" },
-    "javax.swing.JRadioButton": { "category": "Swing · Controles", "displayName": "Radio Button" },
+    "javax.swing.JButton": { "category": "Swing - Controles", "displayName": "Button" },
+    "javax.swing.JToggleButton": { "category": "Swing - Controles", "displayName": "Toggle Button" },
+    "javax.swing.JCheckBox": { "category": "Swing - Controles", "displayName": "Check Box" },
+    "javax.swing.JRadioButton": { "category": "Swing - Controles", "displayName": "Radio Button" },
     "javax.swing.JComboBox": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "Combo Box",
       "properties": {
         "model": { "editor": "listModel", "preferred": true },
@@ -256,7 +256,7 @@
       }
     },
     "javax.swing.JList": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "List",
       "properties": {
         "model": { "editor": "listModel", "preferred": true },
@@ -277,7 +277,7 @@
       }
     },
     "javax.swing.JTable": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "Table",
       "properties": {
         "model": { "editor": "tableModel", "preferred": true },
@@ -299,7 +299,7 @@
       }
     },
     "javax.swing.JTree": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "Tree",
       "properties": {
         "model": { "editor": "expression" },
@@ -317,12 +317,12 @@
       }
     },
     "javax.swing.JSpinner": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "Spinner",
       "properties": { "model": { "editor": "expression", "preferred": true }, "value": { "hidden": true }, "editor": { "hidden": true } }
     },
     "javax.swing.JSlider": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "Slider",
       "properties": {
         "minimum": { "preferred": true },
@@ -341,7 +341,7 @@
       }
     },
     "javax.swing.JProgressBar": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "Progress Bar",
       "properties": {
         "minimum": {},
@@ -358,7 +358,7 @@
       }
     },
     "javax.swing.JSeparator": {
-      "category": "Swing · Controles",
+      "category": "Swing - Controles",
       "displayName": "Separator",
       "properties": {
         "orientation": {
@@ -368,16 +368,16 @@
         }
       }
     },
-    "javax.swing.JScrollBar": { "category": "Swing · Controles", "displayName": "Scroll Bar", "properties": { "model": { "hidden": true } } },
+    "javax.swing.JScrollBar": { "category": "Swing - Controles", "displayName": "Scroll Bar", "properties": { "model": { "hidden": true } } },
 
     "javax.swing.text.JTextComponent": {
       "properties": {
         "text": { "preferred": true },
         "editable": { "preferred": true },
-        "caretColor": { "editor": "color", "category": "Aparência" },
-        "selectionColor": { "editor": "color", "category": "Aparência" },
-        "selectedTextColor": { "editor": "color", "category": "Aparência" },
-        "disabledTextColor": { "editor": "color", "category": "Aparência" },
+        "caretColor": { "editor": "color", "category": "Aparencia" },
+        "selectionColor": { "editor": "color", "category": "Aparencia" },
+        "selectedTextColor": { "editor": "color", "category": "Aparencia" },
+        "disabledTextColor": { "editor": "color", "category": "Aparencia" },
         "margin": { "editor": "insets", "category": "Layout" },
         "document": { "hidden": true },
         "caret": { "hidden": true },
@@ -393,7 +393,7 @@
       }
     },
     "javax.swing.JTextField": {
-      "category": "Swing · Texto",
+      "category": "Swing - Texto",
       "displayName": "Text Field",
       "properties": {
         "columns": { "preferred": true },
@@ -406,14 +406,14 @@
         "scrollOffset": { "hidden": true }
       }
     },
-    "javax.swing.JPasswordField": { "category": "Swing · Texto", "displayName": "Password Field", "properties": { "echoChar": {} } },
+    "javax.swing.JPasswordField": { "category": "Swing - Texto", "displayName": "Password Field", "properties": { "echoChar": {} } },
     "javax.swing.JFormattedTextField": {
-      "category": "Swing · Texto",
+      "category": "Swing - Texto",
       "displayName": "Formatted Field",
       "properties": { "value": { "editor": "expression" }, "formatterFactory": { "editor": "expression" }, "formatter": { "hidden": true } }
     },
     "javax.swing.JTextArea": {
-      "category": "Swing · Texto",
+      "category": "Swing - Texto",
       "displayName": "Text Area",
       "properties": {
         "rows": { "preferred": true },
@@ -424,45 +424,45 @@
       }
     },
     "javax.swing.JEditorPane": {
-      "category": "Swing · Texto",
+      "category": "Swing - Texto",
       "displayName": "Editor Pane",
       "properties": { "contentType": { "preferred": true }, "page": { "hidden": true }, "editorKit": { "hidden": true } }
     },
     "javax.swing.JTextPane": {
-      "category": "Swing · Texto",
+      "category": "Swing - Texto",
       "displayName": "Text Pane",
       "properties": { "styledDocument": { "hidden": true }, "logicalStyle": { "hidden": true }, "characterAttributes": { "hidden": true }, "paragraphAttributes": { "hidden": true } }
     },
 
     "javax.swing.JMenuBar": {
-      "category": "Swing · Menus",
+      "category": "Swing - Menus",
       "displayName": "Menu Bar",
       "container": { "kind": "LIST", "strategy": "add(${child})" },
       "properties": { "helpMenu": { "hidden": true }, "selectionModel": { "hidden": true } }
     },
     "javax.swing.JMenu": {
-      "category": "Swing · Menus",
+      "category": "Swing - Menus",
       "displayName": "Menu",
       "container": { "kind": "LIST", "strategy": "add(${child})" },
       "properties": { "delay": { "hidden": true }, "menuLocation": { "hidden": true }, "popupMenuVisible": { "hidden": true } }
     },
     "javax.swing.JMenuItem": {
-      "category": "Swing · Menus",
+      "category": "Swing - Menus",
       "displayName": "Menu Item",
       "properties": { "accelerator": { "editor": "keyStroke", "preferred": true }, "armed": { "hidden": true } }
     },
-    "javax.swing.JCheckBoxMenuItem": { "category": "Swing · Menus", "displayName": "Check Box Menu Item" },
-    "javax.swing.JRadioButtonMenuItem": { "category": "Swing · Menus", "displayName": "Radio Menu Item" },
+    "javax.swing.JCheckBoxMenuItem": { "category": "Swing - Menus", "displayName": "Check Box Menu Item" },
+    "javax.swing.JRadioButtonMenuItem": { "category": "Swing - Menus", "displayName": "Radio Menu Item" },
     "javax.swing.JPopupMenu": {
-      "category": "Swing · Menus",
+      "category": "Swing - Menus",
       "displayName": "Popup Menu",
       "container": { "kind": "LIST", "strategy": "add(${child})" },
       "properties": { "invoker": { "hidden": true }, "selectionModel": { "hidden": true }, "popupSize": { "hidden": true } }
     },
-    "javax.swing.JPopupMenu$Separator": { "category": "Swing · Menus", "displayName": "Menu Separator" },
+    "javax.swing.JPopupMenu$Separator": { "category": "Swing - Menus", "displayName": "Menu Separator" },
 
     "javax.swing.JFrame": {
-      "category": "Swing · Janelas",
+      "category": "Swing - Janelas",
       "displayName": "Frame",
       "window": true,
       "container": {
@@ -481,7 +481,7 @@
                          "javax.swing.WindowConstants.EXIT_ON_CLOSE"]
         },
         "extendedState": { "category": "Geral" },
-        "undecorated": { "category": "Aparência" },
+        "undecorated": { "category": "Aparencia" },
         "contentPane": { "hidden": true },
         "JMenuBar": { "hidden": true },
         "glassPane": { "hidden": true },
@@ -494,7 +494,7 @@
       }
     },
     "javax.swing.JDialog": {
-      "category": "Swing · Janelas",
+      "category": "Swing - Janelas",
       "displayName": "Dialog",
       "window": true,
       "container": {
@@ -513,7 +513,7 @@
                          "javax.swing.WindowConstants.HIDE_ON_CLOSE",
                          "javax.swing.WindowConstants.DISPOSE_ON_CLOSE"]
         },
-        "undecorated": { "category": "Aparência" },
+        "undecorated": { "category": "Aparencia" },
         "contentPane": { "hidden": true },
         "JMenuBar": { "hidden": true },
         "glassPane": { "hidden": true },
@@ -523,7 +523,7 @@
       }
     },
     "javax.swing.JWindow": {
-      "category": "Swing · Janelas",
+      "category": "Swing - Janelas",
       "displayName": "Window",
       "window": true,
       "container": {

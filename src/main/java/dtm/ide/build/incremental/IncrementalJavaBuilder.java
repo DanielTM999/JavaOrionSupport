@@ -539,14 +539,28 @@ public final class IncrementalJavaBuilder {
         return selected;
     }
 
+    public BuildResult compileDetached(JavaModule module, List<Path> sources, Path outputDir,
+                                       Consumer<String> output) {
+        String dependencies = classpathOf(module, false).orElse("");
+        String classpath = module.outputDir().toString()
+                + (dependencies.isBlank() ? "" : java.io.File.pathSeparator + dependencies);
+        return compile(module, false, new LinkedHashSet<>(sources), classpath, outputDir,
+                outputDir.resolveSibling(outputDir.getFileName() + "-generated"), output);
+    }
+
     private BuildResult compile(JavaModule module, boolean test, Set<Path> sources,
                                 String classpath, Path outputDir, Consumer<String> output) {
+        return compile(module, test, sources, classpath, outputDir,
+                module.root().resolve(test ? GENERATED_TEST_SOURCES : GENERATED_SOURCES), output);
+    }
+
+    private BuildResult compile(JavaModule module, boolean test, Set<Path> sources,
+                                String classpath, Path outputDir, Path generated, Consumer<String> output) {
         JdkInstallation jdk = jdkSupplier.get();
         Instant start = Instant.now();
         Path argumentFile = null;
         try {
             Files.createDirectories(outputDir);
-            Path generated = module.root().resolve(test ? GENERATED_TEST_SOURCES : GENERATED_SOURCES);
             Files.createDirectories(generated);
 
             List<String> command = new ArrayList<>();

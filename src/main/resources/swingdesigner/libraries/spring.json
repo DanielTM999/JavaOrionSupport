@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "library": { "name": "Spring" },
+  "injections": [
+    {
+      "annotation": "org.springframework.beans.factory.annotation.Value",
+      "attribute": "value",
+      "pattern": "^\\$\\{[^:}]*:(.*)\\}$"
+    }
+  ]
+}

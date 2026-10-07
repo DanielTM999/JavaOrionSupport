@@ -122,7 +122,7 @@ final class InspectorValues {
     }
 
     private static int[] numbers(String value, int count) {
-        String[] parts = value.split("[,;x×\\s]+");
+        String[] parts = value.split("[,;x\\s]+");
         int[] numbers = new int[count];
         int index = 0;
         for (String part : parts) {

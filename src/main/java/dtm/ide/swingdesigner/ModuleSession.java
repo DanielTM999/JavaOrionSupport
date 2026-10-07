@@ -1,5 +1,6 @@
 package dtm.ide.swingdesigner;
 
+import dtm.ide.build.BuildResult;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.swingdesigner.catalog.ClasspathEntry;
@@ -17,14 +18,17 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Comparator;
 import java.util.Optional;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 @Slf4j
 public final class ModuleSession implements AutoCloseable {
@@ -39,6 +43,7 @@ public final class ModuleSession implements AutoCloseable {
     private volatile ComponentCatalog catalog;
     private SwingViewClient client;
     private Path hostJava;
+    private boolean shadowActive;
 
     ModuleSession(JavaModule module, SwingDesignerEnvironment environment) {
         this.module = module;
@@ -88,8 +93,7 @@ public final class ModuleSession implements AutoCloseable {
                 environment::output, HOST_START_TIMEOUT);
         SwingViewClient started = new SwingViewClient(process);
         try {
-            started.init(paths(current, ComponentOrigin.LIBRARY), paths(current, ComponentOrigin.WORKSPACE),
-                    null);
+            started.init(paths(current, ComponentOrigin.LIBRARY), runtimeWorkspace(current), null);
         } catch (RuntimeException e) {
             process.close();
             throw e;
@@ -104,6 +108,7 @@ public final class ModuleSession implements AutoCloseable {
     }
 
     public synchronized void refreshAfterBuild() {
+        clearShadow();
         List<ClasspathEntry> previous = entries;
         refreshCatalog();
         if (client == null || !client.host().isAlive()) {
@@ -118,7 +123,95 @@ public final class ModuleSession implements AutoCloseable {
             client = null;
             return;
         }
-        client.reload(paths(entries, ComponentOrigin.WORKSPACE));
+        client.reload(runtimeWorkspace(entries));
+    }
+
+    public synchronized BuildResult compileShadow(String className, String text) {
+        Path base = shadowDirectory();
+        Path classes = base.resolve("classes");
+        int dollar = className.indexOf('$');
+        String outer = dollar < 0 ? className : className.substring(0, dollar);
+        Path source = base.resolve("src").resolve(outer.replace('.', '/') + ".java");
+        try {
+            Files.createDirectories(source.getParent());
+            Files.writeString(source, text, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return BuildResult.failed("javac", "Nao foi possivel preparar a compilacao do designer: "
+                    + e.getMessage());
+        }
+        List<String> lines = new ArrayList<>();
+        BuildResult result = environment.compileShadow(module, source, classes, lines::add);
+        if (result == null || !result.successful()) {
+            return result == null ? BuildResult.failed("javac", String.join("\n", lines)) : result;
+        }
+        shadowActive = true;
+        if (client != null && client.host().isAlive()) {
+            client.reload(runtimeWorkspace(entries));
+        }
+        return result;
+    }
+
+    public synchronized void clearShadow() {
+        shadowActive = false;
+        Path base = shadowDirectory();
+        if (!Files.exists(base)) {
+            return;
+        }
+        try (Stream<Path> walk = Files.walk(base)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException ignored) {
+                }
+            });
+        } catch (IOException e) {
+            log.debug("Falha ao limpar {}: {}", base, e.getMessage());
+        }
+    }
+
+    public boolean hasShadow() {
+        return shadowActive;
+    }
+
+    private Path shadowDirectory() {
+        String key = Integer.toHexString(module.root().toAbsolutePath().normalize().toString().hashCode());
+        return environment.cacheDirectory().resolve("shadow").resolve(key);
+    }
+
+    List<Path> runtimeWorkspace(List<ClasspathEntry> current) {
+        LinkedHashSet<Path> paths = new LinkedHashSet<>();
+        Path shadowClasses = shadowDirectory().resolve("classes");
+        if (shadowActive && Files.isDirectory(shadowClasses)) {
+            paths.add(shadowClasses.toAbsolutePath().normalize());
+        }
+        paths.addAll(paths(current, ComponentOrigin.WORKSPACE));
+        resourceRoots(module).forEach(paths::add);
+        JavaProjectDescriptor descriptor = environment.descriptor();
+        if (descriptor != null) {
+            Path own = module.root().toAbsolutePath().normalize();
+            for (JavaModule other : descriptor.buildableModules()) {
+                if (other == null || other.isAggregator()
+                        || other.root().toAbsolutePath().normalize().equals(own)) {
+                    continue;
+                }
+                if (other.outputDir() != null && Files.isDirectory(other.outputDir())) {
+                    paths.add(other.outputDir().toAbsolutePath().normalize());
+                }
+                resourceRoots(other).forEach(paths::add);
+            }
+        }
+        return new ArrayList<>(paths);
+    }
+
+    private static List<Path> resourceRoots(JavaModule target) {
+        List<Path> roots = new ArrayList<>();
+        for (Path root : target.sourceRoots()) {
+            Path name = root.getFileName();
+            if (name != null && name.toString().equals("resources") && Files.isDirectory(root)) {
+                roots.add(root.toAbsolutePath().normalize());
+            }
+        }
+        return roots;
     }
 
     public boolean ownsSource(Path file) {
@@ -132,6 +225,22 @@ public final class ModuleSession implements AutoCloseable {
             }
         }
         return false;
+    }
+
+    public Optional<Path> sourceOf(String className) {
+        if (className == null || className.isBlank()) {
+            return Optional.empty();
+        }
+        int dollar = className.indexOf('$');
+        String outer = dollar < 0 ? className : className.substring(0, dollar);
+        String relative = outer.replace('.', '/') + ".java";
+        for (Path root : module.sourceRoots()) {
+            Path candidate = root.resolve(relative);
+            if (Files.isRegularFile(candidate)) {
+                return Optional.of(candidate.toAbsolutePath().normalize());
+            }
+        }
+        return Optional.empty();
     }
 
     public Optional<String> classNameOf(Path javaFile) {
@@ -152,6 +261,7 @@ public final class ModuleSession implements AutoCloseable {
 
     @Override
     public synchronized void close() {
+        clearShadow();
         if (client != null) {
             client.host().close();
             client = null;

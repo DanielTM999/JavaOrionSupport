@@ -13,7 +13,9 @@ public record DescriptorSet(String name,
                             String defaultCategory,
                             List<String> hide,
                             Map<String, ComponentDescriptor> components,
-                            Map<String, LayoutDescriptor> layouts) {
+                            Map<String, LayoutDescriptor> layouts,
+                            List<InjectionRule> injections,
+                            DesignerOptions options) {
 
     public enum Layer {
         JDK,
@@ -28,6 +30,8 @@ public record DescriptorSet(String name,
                 : Collections.unmodifiableMap(new LinkedHashMap<>(components));
         layouts = layouts == null ? Map.of()
                 : Collections.unmodifiableMap(new LinkedHashMap<>(layouts));
+        injections = injections == null ? List.of() : List.copyOf(injections);
+        options = options == null ? DesignerOptions.UNSET : options;
     }
 
     public boolean hides(String className) {

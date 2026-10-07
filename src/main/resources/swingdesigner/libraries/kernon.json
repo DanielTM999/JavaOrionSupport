@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "library": { "name": "kernon" },
+  "injections": [
+    { "annotation": "dtm.di.annotations.settings.Value", "attribute": "defaultValue" }
+  ]
+}

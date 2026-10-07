@@ -1,5 +1,7 @@
 package dtm.ide.swingdesigner.catalog;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -27,7 +29,8 @@ public record ComponentDescriptor(String className,
                                   ContainerSpec container,
                                   Boolean beanInfo,
                                   Boolean spi,
-                                  List<String> designInit) {
+                                  List<String> designInit,
+                                  Map<String, JsonNode> designValues) {
 
     public ComponentDescriptor {
         Objects.requireNonNull(className, "className");
@@ -37,6 +40,8 @@ public record ComponentDescriptor(String className,
                 : Collections.unmodifiableMap(new LinkedHashMap<>(properties));
         events = events == null ? null : List.copyOf(events);
         designInit = designInit == null ? null : List.copyOf(designInit);
+        designValues = designValues == null ? null
+                : Collections.unmodifiableMap(new LinkedHashMap<>(designValues));
     }
 
     public static ComponentDescriptor named(String className) {
@@ -69,6 +74,7 @@ public record ComponentDescriptor(String className,
         builder.beanInfo = beanInfo;
         builder.spi = spi;
         builder.designInit = designInit;
+        builder.designValues = designValues;
         return builder;
     }
 
@@ -99,6 +105,7 @@ public record ComponentDescriptor(String className,
         merged.beanInfo = PropertyDescriptor.pick(top.beanInfo, beanInfo);
         merged.spi = PropertyDescriptor.pick(top.spi, spi);
         merged.designInit = PropertyDescriptor.pick(top.designInit, designInit);
+        merged.designValues = mergeValues(designValues, top.designValues);
         return merged.build();
     }
 
@@ -116,6 +123,7 @@ public record ComponentDescriptor(String className,
         }
         merged.window = PropertyDescriptor.pick(window, parent.window);
         merged.designInit = PropertyDescriptor.pick(designInit, parent.designInit);
+        merged.designValues = mergeValues(parent.designValues, designValues);
         return merged.build();
     }
 
@@ -166,6 +174,22 @@ public record ComponentDescriptor(String className,
         return events == null ? List.of() : events;
     }
 
+    public Map<String, JsonNode> designValuesOrEmpty() {
+        return designValues == null ? Map.of() : designValues;
+    }
+
+    private static Map<String, JsonNode> mergeValues(Map<String, JsonNode> base, Map<String, JsonNode> top) {
+        if (base == null) {
+            return top;
+        }
+        if (top == null) {
+            return base;
+        }
+        Map<String, JsonNode> merged = new LinkedHashMap<>(base);
+        merged.putAll(top);
+        return merged;
+    }
+
     public List<String> designInitOrEmpty() {
         return designInit == null ? List.of() : designInit;
     }
@@ -200,7 +224,7 @@ public record ComponentDescriptor(String className,
             merged.put(event.listenerType(), event);
         }
         for (EventDescriptor event : top) {
-            merged.put(event.listenerType(), event);
+            merged.merge(event.listenerType(), event, EventDescriptor::overlay);
         }
         return new ArrayList<>(merged.values());
     }
@@ -227,6 +251,7 @@ public record ComponentDescriptor(String className,
         private Boolean beanInfo;
         private Boolean spi;
         private List<String> designInit;
+        private Map<String, JsonNode> designValues;
 
         private Builder(String className) {
             this.className = className;
@@ -332,11 +357,16 @@ public record ComponentDescriptor(String className,
             return this;
         }
 
+        public Builder designValues(Map<String, JsonNode> value) {
+            designValues = value;
+            return this;
+        }
+
         public ComponentDescriptor build() {
             return new ComponentDescriptor(className, superClass, typeParameters, displayName,
                     category, icon, description, origin, source, abstractType, window, hidden,
                     described, constructors, preferredConstructor, properties, events, container,
-                    beanInfo, spi, designInit);
+                    beanInfo, spi, designInit, designValues);
         }
     }
 }

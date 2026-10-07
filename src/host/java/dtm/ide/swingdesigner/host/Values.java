@@ -48,6 +48,52 @@ final class Values {
         return Class.forName(name, false, loader);
     }
 
+    static Object fromText(String text, Class<?> type, ClassLoader loader) throws Exception {
+        if (text == null) {
+            return toJava(null, type, loader);
+        }
+        String trimmed = text.trim();
+        if (type == Dimension.class || type == Point.class || type == Insets.class || type == Rectangle.class) {
+            String[] parts = trimmed.split("[,;x\\s]+");
+            int[] numbers = new int[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                numbers[i] = Integer.parseInt(parts[i].trim());
+            }
+            if (type == Dimension.class && numbers.length >= 2) {
+                return new Dimension(numbers[0], numbers[1]);
+            }
+            if (type == Point.class && numbers.length >= 2) {
+                return new Point(numbers[0], numbers[1]);
+            }
+            if (type == Insets.class && numbers.length >= 4) {
+                return new Insets(numbers[0], numbers[1], numbers[2], numbers[3]);
+            }
+            if (type == Rectangle.class && numbers.length >= 4) {
+                return new Rectangle(numbers[0], numbers[1], numbers[2], numbers[3]);
+            }
+            throw new IllegalArgumentException("Valor invalido para " + type.getSimpleName() + ": " + text);
+        }
+        if (type == Font.class) {
+            String[] parts = trimmed.split(",");
+            int style = parts.length > 1 ? Integer.parseInt(parts[1].trim()) : Font.PLAIN;
+            int size = parts.length > 2 ? Integer.parseInt(parts[2].trim()) : 12;
+            return new Font(parts[0].trim(), style, size);
+        }
+        if (type.isPrimitive() || type == Integer.class || type == Long.class || type == Double.class
+                || type == Float.class || type == Short.class || type == Byte.class) {
+            if (trimmed.isEmpty()) {
+                return toJava(null, type, loader);
+            }
+            if (type == boolean.class) {
+                return Boolean.valueOf(trimmed);
+            }
+            if (type == char.class) {
+                return trimmed.isEmpty() ? Character.valueOf('\0') : Character.valueOf(trimmed.charAt(0));
+            }
+        }
+        return toJava(type == String.class ? text : trimmed, type, loader);
+    }
+
     static Object toJava(Object json, Class<?> type, ClassLoader loader) throws Exception {
         if (json == null) {
             return type.isPrimitive() ? primitiveDefault(type) : null;

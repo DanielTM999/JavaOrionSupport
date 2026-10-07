@@ -121,8 +121,15 @@ public final class DescriptorSetReader {
         Map<String, LayoutDescriptor> layouts = new LinkedHashMap<>();
         fields(root.path("layouts")).forEach((className, node) ->
                 layouts.put(className, layout(className, node)));
+        List<InjectionRule> injections = new ArrayList<>();
+        for (JsonNode rule : root.path("injections")) {
+            text(rule, "annotation").ifPresent(annotation -> injections.add(new InjectionRule(annotation,
+                    text(rule, "attribute").orElse(null), text(rule, "pattern").orElse(null))));
+        }
+        JsonNode designer = root.path("designer");
+        DesignerOptions options = new DesignerOptions(bool(designer, "stubs"), bool(designer, "recovery"));
         return new DescriptorSet(name, layer, entry, defaultCategory, strings(root.path("hide")),
-                components, layouts);
+                components, layouts, injections, options);
     }
 
     private static ComponentDescriptor component(String className, JsonNode node) {
@@ -135,7 +142,8 @@ public final class DescriptorSetReader {
                 .hidden(bool(node, "hidden"))
                 .window(bool(node, "window"))
                 .typeParameters(node.has("typeParameters") ? strings(node.path("typeParameters")) : null)
-                .designInit(node.has("designInit") ? strings(node.path("designInit")) : null);
+                .designInit(node.has("designInit") ? strings(node.path("designInit")) : null)
+                .designValues(node.has("designValues") ? new LinkedHashMap<>(fields(node.path("designValues"))) : null);
         if (node.has("constructor")) {
             builder.preferredConstructor(constructor(node.path("constructor")));
         }
@@ -220,14 +228,18 @@ public final class DescriptorSetReader {
                 if (method.isTextual()) {
                     methods.add(new EventDescriptor.EventMethod(method.asText(), null));
                 } else {
+                    List<String> parameters = method.has("params") ? strings(method.path("params")) : null;
                     methods.add(new EventDescriptor.EventMethod(text(method, "name").orElse("handle"),
-                            text(method, "event").orElse(null)));
+                            text(method, "event").orElse(null), parameters, text(method, "returns").orElse(null)));
                 }
             }
             events.add(new EventDescriptor(listener.get(),
                     text(event, "add").orElse("add" + simple),
                     text(event, "remove").orElse("remove" + simple),
-                    methods));
+                    methods,
+                    text(event, "adapter").orElse(null),
+                    text(event, "category").orElse(null),
+                    bool(event, "hidden")));
         }
         return events;
     }
@@ -261,7 +273,7 @@ public final class DescriptorSetReader {
     }
 
     private static DescriptorSet empty(String name, DescriptorSet.Layer layer) {
-        return new DescriptorSet(name, layer, null, null, List.of(), Map.of(), Map.of());
+        return new DescriptorSet(name, layer, null, null, List.of(), Map.of(), Map.of(), List.of(), null);
     }
 
     private static Map<String, JsonNode> fields(JsonNode node) {

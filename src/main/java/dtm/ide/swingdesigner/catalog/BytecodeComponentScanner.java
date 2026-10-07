@@ -195,7 +195,25 @@ public final class BytecodeComponentScanner {
         List<EventDescriptor.EventMethod> methods = new ArrayList<>();
         collectListenerMethods(listenerType, methods, new LinkedHashSet<>());
         return Optional.of(new EventDescriptor(listenerType, adder.name(),
-                remover == null ? null : remover.name(), methods));
+                remover == null ? null : remover.name(), methods, adapterOf(listenerType, methods), null, null));
+    }
+
+    private String adapterOf(String listenerType, List<EventDescriptor.EventMethod> methods) {
+        if (methods.size() < 2 || !listenerType.endsWith("Listener")) {
+            return null;
+        }
+        String candidate = listenerType.substring(0, listenerType.length() - "Listener".length()) + "Adapter";
+        Optional<ClassHeader> header = index.header(candidate);
+        if (header.isEmpty() || header.get().isInterface()) {
+            return null;
+        }
+        for (String type : index.superChain(candidate)) {
+            Optional<ClassHeader> current = index.header(type);
+            if (current.isPresent() && current.get().interfaces().contains(listenerType)) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private void collectListenerMethods(String type, List<EventDescriptor.EventMethod> methods,
@@ -215,8 +233,17 @@ public final class BytecodeComponentScanner {
             MethodTypeDesc methodType = method.methodTypeSymbol();
             String eventType = methodType.parameterCount() == 1
                     ? ClassHeaders.typeName(methodType.parameterType(0)) : null;
-            methods.add(new EventDescriptor.EventMethod(method.methodName().stringValue(),
-                    eventType));
+            List<String> parameterTypes = new ArrayList<>();
+            for (int i = 0; i < methodType.parameterCount(); i++) {
+                parameterTypes.add(ClassHeaders.typeName(methodType.parameterType(i)));
+            }
+            String name = method.methodName().stringValue();
+            if (methods.stream().anyMatch(existing -> existing.name().equals(name)
+                    && existing.parameterTypes().equals(parameterTypes))) {
+                continue;
+            }
+            methods.add(new EventDescriptor.EventMethod(name, eventType, parameterTypes,
+                    ClassHeaders.typeName(methodType.returnType())));
         }
         index.header(type).ifPresent(header -> header.interfaces()
                 .forEach(parent -> collectListenerMethods(parent, methods, visited)));

@@ -144,6 +144,22 @@ class ComponentCatalogTest {
     }
 
     @Test
+    void jdkListenersExposeAdaptersAndFullSignatures() {
+        ComponentDescriptor button = catalog().descriptor("javax.swing.JButton").orElseThrow();
+
+        EventDescriptor mouse = button.eventsOrEmpty().stream()
+                .filter(e -> e.listenerType().equals("java.awt.event.MouseListener")).findFirst().orElseThrow();
+        assertEquals("java.awt.event.MouseAdapter", mouse.adapterType());
+        assertFalse(mouse.functional());
+        EventDescriptor action = button.eventsOrEmpty().stream()
+                .filter(e -> e.listenerType().equals("java.awt.event.ActionListener")).findFirst().orElseThrow();
+        assertTrue(action.functional());
+        assertNull(action.adapterType());
+        assertEquals(List.of("java.awt.event.ActionEvent"), action.methods().getFirst().parameterTypes());
+        assertEquals("void", action.methods().getFirst().returnType());
+    }
+
+    @Test
     void constructorsWithArgumentsKeepTheirParameterNames() {
         ComponentDescriptor labeled = catalog().declared("fx.Labeled").orElseThrow();
 
@@ -212,7 +228,7 @@ class ComponentCatalogTest {
                 .orElseThrow();
 
         assertEquals("Button", button.label());
-        assertEquals("Swing · Controles", button.category());
+        assertEquals("Swing - Controles", button.category());
         assertEquals(ComponentOrigin.JDK, button.origin());
         assertTrue(paletteEntry(catalog(), "javax.swing.JFrame").orElseThrow().window());
         assertTrue(paletteEntry(catalog(), "javax.swing.plaf.basic.BasicArrowButton").isEmpty());
@@ -281,6 +297,49 @@ class ComponentCatalogTest {
 
         assertEquals(List.of("dispatchDrawing"), screen.designInitOrEmpty());
         assertTrue(catalog().descriptor("fx.FluentBox").orElseThrow().designInitOrEmpty().isEmpty());
+    }
+
+    @Test
+    void bundledInjectionRulesCoverKernonAndSpringDefaults() {
+        List<InjectionRule> rules = catalog().injectionRules();
+
+        assertTrue(rules.contains(new InjectionRule("dtm.di.annotations.settings.Value", "defaultValue", null)),
+                rules::toString);
+        InjectionRule spring = rules.stream()
+                .filter(rule -> rule.annotation().equals("org.springframework.beans.factory.annotation.Value"))
+                .findFirst().orElseThrow();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(spring.pattern())
+                .matcher("${app.titulo:Painel principal}");
+        assertTrue(matcher.find());
+        assertEquals("Painel principal", matcher.group(1));
+        assertTrue(catalog().options().stubsEnabled());
+        assertTrue(catalog().options().recoveryEnabled());
+    }
+
+    @Test
+    void projectDeclaresInjectionsDesignValuesAndOptions() throws IOException {
+        Path projectRoot = root.resolve("injections");
+        Files.createDirectories(projectRoot.resolve(".orion"));
+        Files.writeString(projectRoot.resolve(DescriptorSetReader.PROJECT_FILE), """
+                {
+                  "designer": { "stubs": false },
+                  "injections": [ { "annotation": "meu.Config", "attribute": "padrao" } ],
+                  "components": {
+                    "fx.FluentBox": { "designValues": { "titulo": "Base", "colunas": 2 } },
+                    "fx.Deep": { "designValues": { "titulo": "Filho" } }
+                  }
+                }
+                """);
+        ComponentCatalog catalog = ComponentCatalog.standard(index,
+                DescriptorSetReader.project(projectRoot).orElseThrow());
+
+        assertTrue(catalog.injectionRules().contains(new InjectionRule("meu.Config", "padrao", null)));
+        assertFalse(catalog.options().stubsEnabled());
+        assertTrue(catalog.options().recoveryEnabled());
+        Map<String, com.fasterxml.jackson.databind.JsonNode> values =
+                catalog.descriptor("fx.Deep").orElseThrow().designValuesOrEmpty();
+        assertEquals("Filho", values.get("titulo").asText());
+        assertEquals(2, values.get("colunas").asInt());
     }
 
     @Test

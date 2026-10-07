@@ -13,9 +13,11 @@ import java.util.List;
 final class Instantiator {
 
     private final ClassLoader loader;
+    private final boolean stubs;
 
-    Instantiator(ClassLoader loader) {
+    Instantiator(ClassLoader loader, boolean stubs) {
         this.loader = loader;
+        this.stubs = stubs;
     }
 
     Result instantiate(Class<?> type, List<String> explicitTypes, List<Object> explicitValues,
@@ -58,7 +60,7 @@ final class Instantiator {
                 Object json = values != null && i < values.size() ? values.get(i) : null;
                 arguments[i] = values != null && i < values.size()
                         ? Values.toJava(json, parameterTypes[i], loader)
-                        : Values.syntheticDefault(parameterTypes[i], loader, 0);
+                        : synthetic(parameterTypes[i]);
             }
             if (factoryName != null) {
                 Method factory = type.getMethod(factoryName, parameterTypes);
@@ -104,9 +106,17 @@ final class Instantiator {
     private Object[] synthesize(Class<?>[] types) {
         Object[] arguments = new Object[types.length];
         for (int i = 0; i < types.length; i++) {
-            arguments[i] = Values.syntheticDefault(types[i], loader, 0);
+            arguments[i] = synthetic(types[i]);
         }
         return arguments;
+    }
+
+    private Object synthetic(Class<?> type) {
+        Object value = Values.syntheticDefault(type, loader, 0);
+        if (value == null && stubs && DesignStubs.canStub(type)) {
+            return DesignStubs.create(type, loader);
+        }
+        return value;
     }
 
     private static List<Constructor<?>> constructors(Class<?> type) {

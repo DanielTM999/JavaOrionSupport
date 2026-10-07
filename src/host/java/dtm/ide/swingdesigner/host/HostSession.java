@@ -68,6 +68,9 @@ final class HostSession {
         if ("preview".equals(op)) {
             return preview(request);
         }
+        if ("interpret".equals(op)) {
+            return interpret(request, blob);
+        }
         if ("closePreview".equals(op)) {
             closePreview();
             return new LinkedHashMap<String, Object>();
@@ -136,8 +139,10 @@ final class HostSession {
         final List<String> designInit = strings(Json.array(request.get("designInit")));
         final int width = Json.integer(request, "width", -1);
         final int height = Json.integer(request, "height", -1);
+        final boolean stubs = Json.bool(request, "stubs", true);
+        final DesignInjector injector = injector(request, stubs);
         final Map<String, Object> response = new LinkedHashMap<String, Object>();
-        final List<String> warnings = new ArrayList<String>();
+        final List<Object> warnings = new ArrayList<Object>();
         response.put("warnings", warnings);
         final Object instance = onEdt(new Callable<Object>() {
             @Override
@@ -146,7 +151,7 @@ final class HostSession {
                 Thread.currentThread().setContextClassLoader(workspace);
                 Beans.setDesignTime(true);
                 try {
-                    Instantiator.Result created = instantiate(type, constructor);
+                    Instantiator.Result created = instantiate(type, constructor, stubs);
                     response.put("constructor", constructorInfo(created));
                     response.put("attempts", created.attempts);
                     if (created.instance == null) {
@@ -159,6 +164,7 @@ final class HostSession {
                         response.put("error", className + " nao e um java.awt.Component");
                         return null;
                     }
+                    injector.apply(created.instance, warnings);
                     Lifecycle.run(created.instance, designInit, warnings);
                     return created.instance;
                 } finally {
@@ -184,9 +190,9 @@ final class HostSession {
                     response.put("title", title);
                 }
                 if (Lifecycle.looksEmpty(renderRoot) && designInit.isEmpty()) {
-                    warnings.add("Nenhum componente foi montado pelo construtor. Se a tela e criada em um metodo"
-                            + " de ciclo de vida (init, onCreate, onDrawing...), declare-o em \"designInit\" no"
-                            + " .orion/swing-components.json do projeto.");
+                    warnings.add(Warnings.info("Nenhum componente foi montado pelo construtor. Se a tela e"
+                            + " criada em um metodo de ciclo de vida (init, onCreate, onDrawing...), declare-o em"
+                            + " \"designInit\" no .orion/swing-components.json do projeto."));
                 }
                 lastImage = Snapshots.render(renderRoot);
                 return null;
@@ -203,6 +209,9 @@ final class HostSession {
         Map<String, Object> result = onEdt(new Callable<Map<String, Object>>() {
             @Override
             public Map<String, Object> call() throws Exception {
+                if (ownedWindow != null) {
+                    ownedWindow.validate();
+                }
                 renderRoot.validate();
                 Map<String, Object> response = new LinkedHashMap<String, Object>();
                 response.put("root", snapshots.describe(renderRoot, viewInstance));
@@ -288,12 +297,14 @@ final class HostSession {
         final String className = Json.string(request, "className");
         final Class<?> type = Class.forName(className, false, workspace);
         final Map<String, Object> constructor = Json.object(request.get("constructor"));
+        final boolean stubs = Json.bool(request, "stubs", true);
+        final DesignInjector injector = injector(request, stubs);
         return onEdt(new Callable<Map<String, Object>>() {
             @Override
             public Map<String, Object> call() throws Exception {
                 closePreview();
                 Thread.currentThread().setContextClassLoader(workspace);
-                Instantiator.Result created = instantiate(type, constructor);
+                Instantiator.Result created = instantiate(type, constructor, stubs);
                 Map<String, Object> response = new LinkedHashMap<String, Object>();
                 response.put("attempts", created.attempts);
                 if (!(created.instance instanceof Component)) {
@@ -301,7 +312,8 @@ final class HostSession {
                             + className : Instantiator.describe(created.failure));
                     return response;
                 }
-                List<String> warnings = new ArrayList<String>();
+                List<Object> warnings = new ArrayList<Object>();
+                injector.apply(created.instance, warnings);
                 Lifecycle.run(created.instance, strings(Json.array(request.get("designInit"))), warnings);
                 response.put("warnings", warnings);
                 Window window;
@@ -330,12 +342,62 @@ final class HostSession {
         });
     }
 
-    private Instantiator.Result instantiate(Class<?> type, Map<String, Object> constructor) {
+    private Map<String, Object> interpret(final Map<String, Object> request, byte[][] blob) throws Exception {
+        if (viewInstance == null || renderRoot == null) {
+            throw new IllegalStateException("Nenhuma tela carregada para recuperar");
+        }
+        final List<Object> statements = Json.array(request.get("statements"));
+        final List<Object> prior = Json.array(request.get("priorLocals"));
+        final Map<String, Object> bindings = Json.object(request.get("bindings"));
+        final boolean stubs = Json.bool(request, "stubs", true);
+        final List<Object> warnings = new ArrayList<Object>();
+        final List<Object> results = new ArrayList<Object>();
+        final List<String> synthesized = new ArrayList<String>();
+        onEdt(new Callable<Object>() {
+            @Override
+            public Object call() {
+                Thread.currentThread().setContextClassLoader(workspace);
+                Beans.setDesignTime(true);
+                try {
+                    Interpreter interpreter = new Interpreter(viewInstance, workspace, stubs, warnings);
+                    for (Map.Entry<String, Object> binding : bindings.entrySet()) {
+                        Component bound = snapshots.nodes().get(String.valueOf(binding.getValue()));
+                        if (bound != null) {
+                            interpreter.bind(binding.getKey(), bound);
+                        }
+                    }
+                    for (Object entry : prior) {
+                        Map<String, Object> local = Json.object(entry);
+                        interpreter.declarePrior(Json.string(local, "name"), Json.array(local.get("type")));
+                    }
+                    for (Object entry : statements) {
+                        results.add(interpreter.run(Json.object(entry)));
+                    }
+                    synthesized.addAll(interpreter.synthesized());
+                } finally {
+                    Beans.setDesignTime(false);
+                }
+                return null;
+            }
+        });
+        Map<String, Object> response = render(blob);
+        response.put("results", results);
+        response.put("synthesized", synthesized);
+        response.put("warnings", warnings);
+        return response;
+    }
+
+    private DesignInjector injector(Map<String, Object> request, boolean stubs) {
+        return new DesignInjector(Json.array(request.get("injections")),
+                Json.object(request.get("designValues")), stubs, workspace);
+    }
+
+    private Instantiator.Result instantiate(Class<?> type, Map<String, Object> constructor, boolean stubs) {
         List<Object> types = constructor.containsKey("types") ? Json.array(constructor.get("types")) : null;
         List<Object> values = constructor.containsKey("values") ? Json.array(constructor.get("values")) : null;
         String factory = Json.string(constructor, "factory");
         List<String> typeNames = types == null ? null : strings(types);
-        return new Instantiator(workspace).instantiate(type, typeNames, values, factory);
+        return new Instantiator(workspace, stubs).instantiate(type, typeNames, values, factory);
     }
 
     private Component stage(Component component, int width, int height) {

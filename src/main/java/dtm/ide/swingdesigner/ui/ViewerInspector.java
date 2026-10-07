@@ -28,7 +28,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 final class ViewerInspector extends JPanel {
 
@@ -38,6 +40,10 @@ final class ViewerInspector extends JPanel {
     private final JTable table = new JTable(model);
     private BiConsumer<PropertyDescriptor, JsonNode> propertyListener = (property, value) -> { };
     private BiConsumer<Integer, JsonNode> argumentListener = (index, value) -> { };
+    private Consumer<String> nameListener = name -> { };
+    private Consumer<PropertyDescriptor> resetListener = property -> { };
+    private Consumer<PropertyDescriptor> navigateListener = property -> { };
+    private Set<String> definedSetters = Set.of();
 
     ViewerInspector() {
         super(new BorderLayout());
@@ -58,7 +64,52 @@ final class ViewerInspector extends JPanel {
         table.getTableHeader().setReorderingAllowed(false);
         table.setDefaultRenderer(Object.class, new RowRenderer());
         table.putClientProperty("terminateEditOnFocusLost", Boolean.TRUE);
+        table.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mousePressed(java.awt.event.MouseEvent event) {
+                popup(event);
+            }
+
+            @Override
+            public void mouseReleased(java.awt.event.MouseEvent event) {
+                popup(event);
+            }
+        });
         add(UiSupport.plainScroll(new JScrollPane(table)), BorderLayout.CENTER);
+    }
+
+    private void popup(java.awt.event.MouseEvent event) {
+        if (!event.isPopupTrigger()) {
+            return;
+        }
+        int index = table.rowAtPoint(event.getPoint());
+        if (index < 0) {
+            return;
+        }
+        Row row = model.row(index);
+        if (row.kind() != Kind.PROPERTY || !definedSetters.contains(row.property().setter())) {
+            return;
+        }
+        javax.swing.JPopupMenu menu = new javax.swing.JPopupMenu();
+        javax.swing.JMenuItem open = new javax.swing.JMenuItem("Ir para o codigo");
+        open.addActionListener(click -> navigateListener.accept(row.property()));
+        javax.swing.JMenuItem reset = new javax.swing.JMenuItem("Remover do codigo (voltar ao padrao)");
+        reset.addActionListener(click -> resetListener.accept(row.property()));
+        menu.add(open);
+        menu.add(reset);
+        menu.show(table, event.getX(), event.getY());
+    }
+
+    void onNameEdited(Consumer<String> listener) {
+        nameListener = listener == null ? name -> { } : listener;
+    }
+
+    void onPropertyReset(Consumer<PropertyDescriptor> listener) {
+        resetListener = listener == null ? property -> { } : listener;
+    }
+
+    void onPropertyNavigate(Consumer<PropertyDescriptor> listener) {
+        navigateListener = listener == null ? property -> { } : listener;
     }
 
     void onPropertyEdited(BiConsumer<PropertyDescriptor, JsonNode> listener) {
@@ -78,10 +129,23 @@ final class ViewerInspector extends JPanel {
 
     void show(String heading, String className, ComponentDescriptor descriptor, Map<String, JsonNode> values,
               List<ParameterInfo> constructorParameters, List<JsonNode> constructorValues) {
+        show(heading, className, descriptor, values, constructorParameters, constructorValues, null, false,
+                Set.of(), null);
+    }
+
+    void show(String heading, String className, ComponentDescriptor descriptor, Map<String, JsonNode> values,
+              List<ParameterInfo> constructorParameters, List<JsonNode> constructorValues, String variable,
+              boolean nameEditable, Set<String> defined, String readOnlyReason) {
         stopEditing();
+        definedSetters = defined == null ? Set.of() : Set.copyOf(defined);
         title.setText(heading);
-        subtitle.setText(className);
+        subtitle.setText(readOnlyReason == null ? className : "Somente leitura: " + readOnlyReason);
+        subtitle.setToolTipText(className);
         List<Row> rows = new ArrayList<>();
+        if (variable != null) {
+            rows.add(Row.header("Codigo"));
+            rows.add(Row.name(variable, nameEditable));
+        }
         if (constructorParameters != null && !constructorParameters.isEmpty()) {
             rows.add(Row.header("Argumentos do construtor"));
             for (int i = 0; i < constructorParameters.size(); i++) {
@@ -135,7 +199,12 @@ final class ViewerInspector extends JPanel {
             subtitle.setText("Valor invalido: " + error.getMessage());
             return;
         }
-        if (row.kind() == Kind.ARGUMENT) {
+        if (row.kind() == Kind.NAME) {
+            String name = edited == null ? "" : edited.toString().trim();
+            if (!name.isEmpty() && !name.equals(row.value().asText())) {
+                nameListener.accept(name);
+            }
+        } else if (row.kind() == Kind.ARGUMENT) {
             argumentListener.accept(row.argumentIndex(), value);
         } else if (row.kind() == Kind.PROPERTY) {
             propertyListener.accept(row.property(), value);
@@ -144,6 +213,7 @@ final class ViewerInspector extends JPanel {
 
     enum Kind {
         HEADER,
+        NAME,
         ARGUMENT,
         PROPERTY
     }
@@ -153,6 +223,11 @@ final class ViewerInspector extends JPanel {
 
         static Row header(String label) {
             return new Row(Kind.HEADER, label, null, null, -1, null, null);
+        }
+
+        static Row name(String variable, boolean editable) {
+            return new Row(Kind.NAME, "Nome da variavel", editable ? "java.lang.String" : null, null, -1,
+                    JsonNodeFactory.instance.textNode(variable), null);
         }
 
         static Row argument(int index, String name, String type, JsonNode value) {
@@ -302,6 +377,39 @@ final class ViewerInspector extends JPanel {
         }
     }
 
+    private static javax.swing.Icon swatch(String hex) {
+        java.awt.Color color;
+        try {
+            String clean = hex.startsWith("#") ? hex.substring(1) : hex;
+            if (clean.length() < 6) {
+                return null;
+            }
+            color = new java.awt.Color(Integer.parseInt(clean.substring(0, 6), 16));
+        } catch (RuntimeException e) {
+            return null;
+        }
+        int size = UiTokens.scale(12);
+        return new javax.swing.Icon() {
+            @Override
+            public void paintIcon(Component component, java.awt.Graphics graphics, int x, int y) {
+                graphics.setColor(color);
+                graphics.fillRect(x, y, size, size);
+                graphics.setColor(UiTokens.border());
+                graphics.drawRect(x, y, size - 1, size - 1);
+            }
+
+            @Override
+            public int getIconWidth() {
+                return size;
+            }
+
+            @Override
+            public int getIconHeight() {
+                return size;
+            }
+        };
+    }
+
     private static final class DefaultListRendererWithShortNames extends javax.swing.DefaultListCellRenderer {
         @Override
         public Component getListCellRendererComponent(javax.swing.JList<?> list, Object value, int index,
@@ -318,6 +426,7 @@ final class ViewerInspector extends JPanel {
             super.getTableCellRendererComponent(table, value, selected, false, rowIndex, column);
             Row row = model.row(rowIndex);
             setBorder(BorderFactory.createEmptyBorder(0, UiTokens.space(2), 0, UiTokens.space(1)));
+            setIcon(null);
             if (row.kind() == Kind.HEADER) {
                 setFont(UiTokens.fontBold());
                 setForeground(UiTokens.muted());
@@ -326,10 +435,15 @@ final class ViewerInspector extends JPanel {
                 return this;
             }
             setOpaque(selected);
-            setFont(column == 1 && row.kind() == Kind.ARGUMENT
-                    ? UiTokens.font().deriveFont(Font.ITALIC) : UiTokens.font());
+            boolean defined = row.kind() == Kind.PROPERTY && definedSetters.contains(row.property().setter());
+            Font font = column == 1 && row.kind() == Kind.ARGUMENT
+                    ? UiTokens.font().deriveFont(Font.ITALIC) : UiTokens.font();
+            setFont(column == 0 && defined ? font.deriveFont(Font.BOLD) : font);
             setForeground(column == 1 && !row.editable() ? UiTokens.muted() : UiTokens.foreground());
-            setToolTipText(row.type());
+            setToolTipText(defined ? row.type() + " - definido no codigo (botao direito para opcoes)" : row.type());
+            if (column == 1 && "java.awt.Color".equals(row.type()) && row.value() != null && row.value().isTextual()) {
+                setIcon(swatch(row.value().asText()));
+            }
             return this;
         }
     }
