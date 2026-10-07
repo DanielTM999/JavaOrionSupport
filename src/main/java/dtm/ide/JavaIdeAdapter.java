@@ -56,6 +56,7 @@ import dtm.stools.component.popup.ModernComponentDialog;
 import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildToolsSupport;
+import dtm.ide.adapter.CodeLensSupport;
 import dtm.ide.adapter.CompletionEngine;
 import dtm.ide.adapter.DiagnosticsEngine;
 import dtm.ide.adapter.RenameSupport;
@@ -391,7 +392,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long RUN_BUTTONS_REFRESH_DELAY_MS = 300;
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
-    private static final int CODE_LENS_TOOLTIP_TARGETS = 8;
     private static final int NAVIGATION_RETRIES = 2;
     private static final long NAVIGATION_RETRY_DELAY_MS = 80;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
@@ -884,6 +884,61 @@ public class JavaIdeAdapter extends IdeAdapter {
         public IdeEditorContext getEditor(Path file) {
             return JavaIdeAdapter.this.getEditor(file);
         }
+    
+        @Override
+        public CoverageSupport coverage() {
+            return coverageSupport;
+        }
+
+        @Override
+        public String testPanelId() {
+            return testPanelId;
+        }
+
+        @Override
+        public void navigateToLocation(Location location, Path path) {
+            JavaIdeAdapter.this.navigateToLocation(location, path);
+        }
+
+        @Override
+        public void openSpringExplorer() {
+            JavaIdeAdapter.this.openSpringExplorer();
+        }
+
+        @Override
+        public Optional<MainClassScanner.MainClass> currentMainClass() {
+            return JavaIdeAdapter.this.currentMainClass();
+        }
+
+        @Override
+        public RunProcessHandle requestRunConfigurationExecution(String id, boolean debug) {
+            return JavaIdeAdapter.this.requestRunConfigurationExecution(id, debug);
+        }
+
+        @Override
+        public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context) {
+            return JavaIdeAdapter.this.launch(configuration, context);
+        }
+
+        @Override
+        public RunProcessHandle launchDebug(RunConfigurationData configuration, RunExecutionContext context) {
+            return JavaIdeAdapter.this.launchDebug(configuration, context);
+        }
+
+        @Override
+        public JavaModule moduleContaining(JavaProjectDescriptor current, Path file, boolean testRoots) {
+            return JavaIdeAdapter.moduleContaining(current, file, testRoots);
+        }
+
+        @Override
+        public void ensureTestPanel() {
+            JavaIdeAdapter.this.ensureTestPanel();
+        }
+
+        @Override
+        public List<Location> uniqueLocations(List<Location> locations) {
+            return JavaIdeAdapter.uniqueLocations(locations);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -897,6 +952,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final DiagnosticsEngine diagnosticsEngine = new DiagnosticsEngine(adapterHost);
     private final RenameSupport renameSupport = new RenameSupport(adapterHost);
     private final SafeDeleteSupport safeDeleteSupport = new SafeDeleteSupport(adapterHost);
+    private final CodeLensSupport codeLensSupport = new CodeLensSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -2617,397 +2673,11 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<CodeLens> getCodeLenses(IdeCodeLensContext context) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) {
-            return null;
-        }
-        List<CodeLens> lenses = new ArrayList<>();
-        JavaLanguageServer lsp = runningServerFor(context.filePath());
-        if (lsp != null) {
-            for (JavaCodeLens lens : lsp.codeLenses(
-                    context.filePath(), context.text())) {
-                List<Location> targets = uniqueLocations(lens.locations());
-                Kind lensKind = Kind.forLens(lens.command());
-                if (lensKind == null) continue;
-                CodeLensItem item = lensItem(lensKind, lens.status(), targets, context);
-                if (item == null) continue;
-                lenses.add(CodeLens.inline(Math.max(0, lens.range().start().line()), item));
-            }
-        }
-
-        addRunLens(lenses, context);
-        addCoverageLens(lenses, context);
-
-        List<JavaTest> fileTests = JUnitTestDiscovery.discoverInSource(
-                context.filePath(), context.text());
-        for (JavaTest test : fileTests) {
-            int line = Math.max(0, test.line() - 1);
-            lenses.add(CodeLens.inline(line, CodeLensItem.builder()
-                    .text(text("lens.runTest", "Run test"))
-                    .tooltip(test.selector())
-                    .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
-                    .onClick(event -> runTestFromLens(test, false))
-                    .build()));
-            lenses.add(CodeLens.inline(line, CodeLensItem.builder()
-                    .text(text("lens.debugTest", "Debug test"))
-                    .tooltip(test.selector())
-                    .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
-                    .onClick(event -> runTestFromLens(test, true))
-                    .build()));
-        }
-
-        JavaProjectDescriptor current = descriptor;
-        if (current == null || !current.spring() || !settings().isSpringCodeLens()) {
-            return lenses;
-        }
-        SpringIndexSnapshot snapshot = spring.index().snapshot();
-
-        for (SpringBean bean : snapshot.beansIn(context.filePath())) {
-            List<SpringInjection> usages = snapshot.injectionsOf(bean);
-            String label = usages.size() == 1
-                    ? "1 " + text("lens.injection", "injecao")
-                    : usages.size() + " " + text("lens.injections", "injecoes");
-            List<Location> targets = springLocations(new SpringNavigation.Target(
-                    SpringNavigation.Kind.BEAN, bean.simpleName(), usages.stream()
-                    .map(injection -> new SpringNavigation.Anchor(injection.file(),
-                            injection.line(), injection.memberName()))
-                    .<SpringNavigation.Anchor>toList()));
-            int beanLine = Math.max(0, bean.line() - 1);
-
-            lenses.add(CodeLens.inline(beanLine, CodeLensItem.builder()
-                    .text(label)
-                    .tooltip(text("lens.tooltip", "Ver quem injeta") + " " + bean.simpleName())
-                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
-                    .onClick(event -> openSpringTargets(targets, context, event))
-                    .build()));
-        }
-
-        addInjectionLenses(lenses, snapshot, context);
-        addJpaLenses(lenses, snapshot, context);
-        addEndpointLenses(lenses, snapshot, context);
-        return lenses;
+        return codeLensSupport.getCodeLenses(context);
     }
 
-    private void addInjectionLenses(List<CodeLens> lenses, SpringIndexSnapshot snapshot,
-                                    IdeCodeLensContext context) {
-        if (!settings().isSpringNavigation()) {
-            return;
-        }
-        for (SpringInjection injection : snapshot.injectionsIn(context.filePath())) {
-            List<SpringBean> candidates = snapshot.candidatesFor(injection);
-            if (candidates.isEmpty()) {
-                continue;
-            }
-            String label = candidates.size() == 1
-                    ? "-> " + candidates.getFirst().simpleName()
-                    : candidates.size() + " " + text("lens.candidates", "candidatos");
-            List<Location> targets = springLocations(new SpringNavigation.Target(
-                    SpringNavigation.Kind.INJECTION, injection.targetSimpleName(),
-                    candidates.stream()
-                            .map(bean -> new SpringNavigation.Anchor(bean.file(), bean.line(),
-                                    bean.simpleName()))
-                            .toList()));
-            lenses.add(CodeLens.inline(Math.max(0, injection.line() - 1), CodeLensItem.builder()
-                    .text(label)
-                    .tooltip(text("lens.beanTarget", "Ir para o bean injetado"))
-                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
-                    .onClick(event -> openSpringTargets(targets, context, event))
-                    .build()));
-        }
-    }
-
-    private void addEndpointLenses(List<CodeLens> lenses, SpringIndexSnapshot snapshot,
-                                   IdeCodeLensContext context) {
-        String baseUrl = spring.baseUrl();
-        for (SpringEndpoint endpoint : snapshot.endpoints()) {
-            if (!context.filePath().equals(endpoint.file())) {
-                continue;
-            }
-            String url = endpoint.urlOn(baseUrl);
-            int endpointLine = Math.max(0, endpoint.line() - 1);
-            lenses.add(CodeLens.inline(endpointLine, CodeLensItem.builder()
-                    .text(text("lens.openInBrowser", "abrir"))
-                    .tooltip(url)
-                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
-                    .onClick(event -> openWebBrowser(url))
-                    .build()));
-            lenses.add(CodeLens.inline(endpointLine, CodeLensItem.builder()
-                    .text(text("lens.copyUrl", "copiar URL"))
-                    .tooltip(url)
-                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
-                    .onClick(event -> copyToClipboard(url,
-                            text("status.urlCopied", "Java: URL copiada")))
-                    .build()));
-            lenses.add(CodeLens.inline(endpointLine, CodeLensItem.builder()
-                    .text(text("lens.copyCurl", "copiar cURL"))
-                    .tooltip(url)
-                    .cursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
-                    .onClick(event -> copyToClipboard(curlOf(endpoint, url),
-                            text("status.curlCopied", "Java: comando cURL copiado")))
-                    .build()));
-        }
-    }
-
-    private static String curlOf(SpringEndpoint endpoint, String url) {
-        StringBuilder command = new StringBuilder("curl -X ")
-                .append(SpringEndpoint.ANY_METHOD.equals(endpoint.method())
-                        ? "GET" : endpoint.method())
-                .append(" \"").append(url).append('"');
-        if (!endpoint.produces().isEmpty()) {
-            command.append(" -H \"Accept: ").append(endpoint.produces().getFirst()).append('"');
-        }
-        return command.toString();
-    }
-
-    private void copyToClipboard(String value, String status) {
-        try {
-            java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
-                    .setContents(new java.awt.datatransfer.StringSelection(value), null);
-            setStatusBarText(status);
-        } catch (Exception e) {
-            log.debug("Falha ao copiar para a area de transferencia: {}", e.getMessage());
-        }
-    }
-
-    private void addCoverageLens(List<CodeLens> lenses, IdeCodeLensContext context) {
-        FileCoverage coverage = coverageSupport.store().forFile(context.filePath()).orElse(null);
-        if (coverage == null || coverage.isEmpty()) {
-            return;
-        }
-        String branches = CoverageDisplay.branchSummary(coverage);
-        String tooltip = text("lens.coverageTooltip", "Cobertura da ultima execucao de testes");
-        if (!branches.isBlank()) {
-            tooltip = tooltip + " - " + text("lens.coverageBranches", "branches") + ": " + branches;
-        }
-        int line = CoverageDisplay.lensLineOf(lexicalIndex.outline(context.text()));
-        lenses.add(CodeLens.inline(line, CodeLensItem.builder()
-                .text(text("lens.coverage", "Cobertura") + ": " + CoverageDisplay.summary(coverage))
-                .tooltip(tooltip)
-                .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
-                .onClick(event -> requestOpenToolPanel(testPanelId))
-                .build()));
-    }
-
-    private void addJpaLenses(List<CodeLens> lenses, SpringIndexSnapshot snapshot,
-                              IdeCodeLensContext context) {
-        if (!settings().isSpringJpa()) {
-            return;
-        }
-        for (JpaRepositoryInfo repository : snapshot.repositoriesIn(context.filePath())) {
-            snapshot.entityNamed(repository.entityType()).ifPresent(entity -> {
-                List<Location> targets = springLocations(new SpringNavigation.Target(
-                        SpringNavigation.Kind.ENTITY, entity.simpleName(),
-                        List.of(new SpringNavigation.Anchor(entity.file(), entity.line(),
-                                entity.simpleName()))));
-                lenses.add(CodeLens.inline(Math.max(0, repository.line() - 1),
-                        CodeLensItem.builder()
-                                .text(entity.simpleName() + " (" + entity.effectiveTable() + ")")
-                                .tooltip(text("lens.entityTarget", "Ir para a entidade"))
-                                .cursor(java.awt.Cursor.getPredefinedCursor(
-                                        java.awt.Cursor.HAND_CURSOR))
-                                .onClick(event -> openSpringTargets(targets, context, event))
-                                .build()));
-            });
-        }
-    }
-
-    private CodeLensItem lensItem(Kind kind, Status status, List<Location> targets,
-                                  IdeCodeLensContext context) {
-        if (status == Status.COMPLETE) {
-            if (targets.isEmpty()) return null;
-            return CodeLensItem.builder()
-                    .text(countLabel(kind, targets.size()))
-                    .tooltip(codeLensTooltip(targets))
-                    .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
-                    .onClick(event -> openLensTargets(kind, context, targets, event))
-                    .build();
-        }
-        if (status == Status.FAILED) {
-            return CodeLensItem.builder()
-                    .text(text("lens.failed", "Tentar novamente"))
-                    .tooltip(text("status.navigation.failed", "Java: a busca falhou; tente novamente"))
-                    .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
-                    .onClick(event -> requestRefreshCodeLenses(context.filePath()))
-                    .build();
-        }
-        return null;
-    }
-
-    private String countLabel(Kind kind, int count) {
-        boolean one = count == 1;
-        String key = switch (kind) {
-            case IMPLEMENTATION -> one ? "navigation.implementation" : "navigation.implementations";
-            case DEFINITION -> one ? "navigation.definition" : "navigation.definitions";
-            case REFERENCES -> one ? "navigation.usage" : "navigation.usages";
-        };
-        String fallback = switch (kind) {
-            case IMPLEMENTATION -> one ? "implementacao" : "implementacoes";
-            case DEFINITION -> one ? "definicao" : "definicoes";
-            case REFERENCES -> one ? "uso" : "usos";
-        };
-        return count + " " + text(key, fallback);
-    }
-
-    private void openLensTargets(Kind kind, IdeCodeLensContext context, List<Location> targets,
-                                 CodeLensClickEvent event) {
-        if (targets.isEmpty()) return;
-        if (targets.size() == 1 && kind != Kind.REFERENCES) {
-            Location target = targets.getFirst();
-            navigateToLocation(target, JavaNavigation.path(target));
-            return;
-        }
-        IdeEditorContext editor = editorContextFor(context.filePath());
-        MouseEvent mouse = event == null ? null : event.mouseEvent();
-        Point screen = mouse == null ? null : mouse.getLocationOnScreen();
-        showUsagesPopup(targets, context.filePath(),
-                editor == null ? context.text() : editor.getText(), editor, screen, kind);
-    }
-
-    private void openSpringTargets(List<Location> targets, IdeCodeLensContext context,
-                                   CodeLensClickEvent event) {
-        if (targets.isEmpty()) {
-            openSpringExplorer();
-            return;
-        }
-        MouseEvent mouse = event == null ? null : event.mouseEvent();
-        Point screen = mouse == null ? null : mouse.getLocationOnScreen();
-        showUsagesPopup(targets, context.filePath(), context.text(),
-                editorContextFor(context.filePath()), screen, Kind.REFERENCES);
-    }
-
-    private void addRunLens(List<CodeLens> lenses, IdeCodeLensContext context) {
-        MainClassScanner.MainLensAnchor anchor = MainClassScanner.mainLensAnchor(context.text());
-        if (anchor == null) {
-            return;
-        }
-        if (mainClassAt(context.filePath(), context.text()).isEmpty()) {
-            return;
-        }
-        CodeLensItem item = CodeLensItem.builder()
-                .text(text("lens.run", "Run | Debug"))
-                .tooltip(text("lens.run.tooltip", "Executar ou depurar este main"))
-                .cursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
-                .onClick(this::showRunLensMenu)
-                .build();
-        lenses.add(anchor.inline()
-                ? CodeLens.inline(anchor.line(), item)
-                : CodeLens.above(anchor.line(), anchor.col(), item));
-    }
-
-    private void showRunLensMenu(CodeLensClickEvent event) {
-        MouseEvent mouse = event == null ? null : event.mouseEvent();
-        if (mouse == null) {
-            launchCurrentFile(false);
-            return;
-        }
-        ActionMenu menu = ActionMenu.of(new JMenu());
-        menu.item(text("lens.runAction", "Executar"), JavaIcons.run(JavaIcons.SMALL),
-                        action -> launchCurrentFile(false))
-                .item(text("lens.debugAction", "Depurar"), JavaIcons.debug(JavaIcons.SMALL),
-                        action -> launchCurrentFile(true));
-        menu.getMenu().getPopupMenu().show(mouse.getComponent(), mouse.getX(), mouse.getY());
-    }
-
-    private void launchCurrentFile(boolean debug) {
-        if (currentMainClass().isEmpty()) {
-            setStatusBarText("Java: " + text("error.currentFileMain",
-                    "O arquivo atual nao possui um metodo main Java valido."));
-            return;
-        }
-        background.submit(() -> {
-            try {
-                String configurationId = currentFileConfigurationId();
-                if (configurationId != null) {
-                    requestRunConfigurationExecution(configurationId, debug);
-                    return;
-                }
-                RunConfigurationData configuration = RunConfigurationData.builder()
-                        .type(JavaRunSupport.TYPE_CURRENT_FILE)
-                        .build();
-                RunExecutionContext context = RunExecutionContext.builder()
-                        .projectPath(projectRoot)
-                        .debug(debug)
-                        .build();
-                if (debug) {
-                    launchDebug(configuration, context);
-                } else {
-                    launch(configuration, context);
-                }
-            } catch (Exception error) {
-                log.warn("Falha ao executar o arquivo atual pelo code lens.", error);
-                setStatusBarText("Java: " + text("error.runLensFailed",
-                        "Falha ao executar o arquivo atual") + " - " + error.getMessage());
-            }
-        });
-    }
-
-    private String currentFileConfigurationId() {
-        List<RunConfigurationData> configurations = requestRunConfigurations();
-        if (configurations == null) {
-            return null;
-        }
-        for (RunConfigurationData configuration : configurations) {
-            if (configuration == null
-                    || !JavaRunSupport.TYPE_CURRENT_FILE.equalsIgnoreCase(configuration.getType())) {
-                continue;
-            }
-            String id = configuration.getId();
-            if (id != null && !id.isBlank()) {
-                return id;
-            }
-        }
-        return null;
-    }
-
-    private Optional<MainClassScanner.MainClass> mainClassAt(Path filePath, String source) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null || filePath == null || !MainClassScanner.hasValidMain(source)) {
-            return Optional.empty();
-        }
-        Path file = JavaProjectConventions.normalize(filePath);
-        JavaModule module = moduleContaining(current, file, false);
-        boolean test = false;
-        if (module == null) {
-            module = moduleContaining(current, file, true);
-            test = module != null;
-        }
-        return module == null
-                ? Optional.empty()
-                : MainClassScanner.inspect(file, source, module, test);
-    }
-
-    private static String codeLensTooltip(List<Location> locations) {
-        String body = locations.stream()
-                .limit(CODE_LENS_TOOLTIP_TARGETS)
-                .map(location -> escapeHtml(locationLabel(location)))
-                .collect(Collectors.joining("<br>"));
-        return "<html>" + (locations.size() > CODE_LENS_TOOLTIP_TARGETS ? body + "<br>…" : body)
-                + "</html>";
-    }
-
-    private static String escapeHtml(String value) {
-        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
-    }
-
-    private static String locationLabel(Location location) {
-        Path path = JavaNavigation.path(location);
-        String name = path == null ? location.uri() : path.getFileName().toString();
-        return name + ":" + (location.range().start().line() + 1);
-    }
-
-    private void runTestFromLens(JavaTest test, boolean debug) {
-        SwingUtilities.invokeLater(() -> {
-            ensureTestPanel();
-            if (testPanelId != null && !debug) {
-                requestOpenToolPanel(testPanelId);
-            }
-            if (testPanel != null) {
-                if (debug) {
-                    testPanel.debugTests(List.of(test));
-                } else {
-                    testPanel.runTests(List.of(test));
-                }
-            }
-        });
+    private static List<Location> springLocations(SpringNavigation.Target target) {
+        return CodeLensSupport.springLocations(target);
     }
 
     private void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
@@ -3015,7 +2685,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         long session = lifecycle.get();
         background.submit(() -> {
             List<UsagesPopup.Item> items = buildUsageItems(locations, currentFile, currentText);
-            String header = countLabel(kind, items.size());
+            String header = codeLensSupport.countLabel(kind, items.size());
             SwingUtilities.invokeLater(() -> {
                 if (session == lifecycle.get()) openUsagesPopup(context, screen, header, items);
             });
@@ -3874,7 +3544,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             navigateToLocation(target, JavaNavigation.path(target));
             return;
         }
-        openUsagesPopup(context, null, countLabel(kind, items.size()), items);
+        openUsagesPopup(context, null, codeLensSupport.countLabel(kind, items.size()), items);
     }
 
     @Override
@@ -3905,9 +3575,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     private void showTestGutterMenu(MouseEvent event, JavaTest test) {
         ActionMenu menu = ActionMenu.of(new JMenu());
         menu.item(text("lens.runAction", "Executar"), JavaIcons.test(JavaIcons.SMALL),
-                        action -> runTestFromLens(test, false))
+                        action -> codeLensSupport.runTestFromLens(test, false))
                 .item(text("lens.debugAction", "Depurar"), JavaIcons.debug(JavaIcons.SMALL),
-                        action -> runTestFromLens(test, true));
+                        action -> codeLensSupport.runTestFromLens(test, true));
         if (coverageSupport.supportedForProject()) {
             menu.item(text("action.runCoverage", "Rodar com cobertura"),
                     JavaIcons.test(JavaIcons.SMALL), action -> runTestWithCoverage(test));
@@ -4753,22 +4423,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         JavaProjectDescriptor current = descriptor;
         return current != null && current.spring() && settings().isSpringSupport()
                 && settings().isSpringNavigation();
-    }
-
-    private static List<Location> springLocations(SpringNavigation.Target target) {
-        if (target == null || target.isEmpty()) {
-            return List.of();
-        }
-        List<Location> locations = new ArrayList<>();
-        for (SpringNavigation.Anchor anchor : target.anchors()) {
-            if (anchor.file() == null) {
-                continue;
-            }
-            int editorLine = Math.max(0, anchor.line() - 1);
-            locations.add(Location.of(anchor.file().toUri().toString(),
-                    Range.of(editorLine, 0, editorLine, 0)));
-        }
-        return List.copyOf(locations);
     }
 
     private List<Location> resolveReferences(Path filePath, String text, int line, int col) {
