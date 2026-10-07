@@ -208,6 +208,13 @@ class JdtLsWireGoldenTest {
             names.sort(Comparator.naturalOrder());
             for (String name : names) {
                 if (!"processId".equals(name)) {
+                    if ("globalSettings".equals(name)) {
+                        Path globalSettings = new MavenLocalRepositoryResolver().globalSettings();
+                        if (globalSettings != null && Files.isRegularFile(globalSettings)) {
+                            assertEquals(globalSettings.toString(), node.get(name).asText());
+                            continue;
+                        }
+                    }
                     sorted.set(name, canonical(node.get(name), replacements));
                 }
             }
