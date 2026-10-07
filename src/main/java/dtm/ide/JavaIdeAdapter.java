@@ -64,6 +64,7 @@ import dtm.ide.adapter.SafeDeleteSupport;
 import dtm.ide.adapter.UiThreads;
 import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
+import dtm.ide.adapter.NavigationViews;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.ProjectStructureSupport;
 import dtm.ide.adapter.SpringSupport;
@@ -939,6 +940,52 @@ public class JavaIdeAdapter extends IdeAdapter {
         public List<Location> uniqueLocations(List<Location> locations) {
             return JavaIdeAdapter.uniqueLocations(locations);
         }
+    
+        @Override
+        public CodeLensSupport codeLens() {
+            return codeLensSupport;
+        }
+
+        @Override
+        public ClassFileSupport classFileUris() {
+            return classFileUris;
+        }
+
+        @Override
+        public AtomicLong navigationTicket() {
+            return navigationTicket;
+        }
+
+        @Override
+        public JavaEditorRegistry editors() {
+            return editors;
+        }
+
+        @Override
+        public IdeEditorContext getEditor(Path file, boolean focus, Consumer<IdeEditorContext> onReady) {
+            return JavaIdeAdapter.this.getEditor(file, focus, onReady);
+        }
+
+        @Override
+        public boolean closeCenterTab(String id) {
+            return JavaIdeAdapter.this.closeCenterTab(id);
+        }
+
+        @Override
+        public CodeEditor requestEmbeddedCodeEditor(String name, String source,
+                                                    EmbeddedCodeEditorSettings settings) {
+            return JavaIdeAdapter.this.requestEmbeddedCodeEditor(name, source, settings);
+        }
+
+        @Override
+        public String openCenterTab(String id, String title, JComponent component, boolean closable) {
+            return JavaIdeAdapter.this.openCenterTab(id, title, component, closable);
+        }
+
+        @Override
+        public boolean isDebugPaused() {
+            return JavaIdeAdapter.this.isDebugPaused();
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -953,6 +1000,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final RenameSupport renameSupport = new RenameSupport(adapterHost);
     private final SafeDeleteSupport safeDeleteSupport = new SafeDeleteSupport(adapterHost);
     private final CodeLensSupport codeLensSupport = new CodeLensSupport(adapterHost);
+    private final NavigationViews navigationViews = new NavigationViews(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -2680,18 +2728,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return CodeLensSupport.springLocations(target);
     }
 
-    private void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
-                                 IdeEditorContext context, Point screen, Kind kind) {
-        long session = lifecycle.get();
-        background.submit(() -> {
-            List<UsagesPopup.Item> items = buildUsageItems(locations, currentFile, currentText);
-            String header = codeLensSupport.countLabel(kind, items.size());
-            SwingUtilities.invokeLater(() -> {
-                if (session == lifecycle.get()) openUsagesPopup(context, screen, header, items);
-            });
-        });
-    }
-
     private IdeEditorContext editorContextFor(Path file) {
         Path normalized = JavaProjectConventions.normalize(file);
         return normalized == null ? null : javaEditors.get(normalized);
@@ -2712,72 +2748,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return previous == null ? open : previous;
     }
 
-    private void openUsagesPopup(IdeEditorContext context, Point screen, String header,
-                                 List<UsagesPopup.Item> items) {
-        if (!SwingUtilities.isEventDispatchThread()) {
-            SwingUtilities.invokeLater(() -> openUsagesPopup(context, screen, header, items));
-            return;
-        }
-        if (context == null) {
-            javax.swing.JComponent[] content = new javax.swing.JComponent[1];
-            UsagesPopup.Host host = new UsagesPopup.Host() {
-                public void close() {
-                    java.awt.Window window = SwingUtilities.getWindowAncestor(content[0]);
-                    if (window != null) window.dispose();
-                }
-                public void moveTo(int x, int y) {
-                    java.awt.Window window = SwingUtilities.getWindowAncestor(content[0]);
-                    if (window != null) window.setLocation(x, y);
-                }
-            };
-            content[0] = UsagesPopup.content(header, items, host);
-            this.<Boolean>createModernComponentDialogBuilder()
-                    .title(header).component(content[0]).show();
-            return;
-        }
-        Object[] handle = new Object[1];
-        UsagesPopup.Host host = new UsagesPopup.Host() {
-            @Override
-            public void close() {
-                context.closeEditorWindow(handle[0]);
-            }
-            @Override
-            public void moveTo(int screenX, int screenY) {
-                context.moveEditorWindow(handle[0], new Point(screenX, screenY));
-            }
-        };
-        handle[0] = context.openEditorPopup(
-                UsagesPopup.content(header, items, host), screen, true, null);
-    }
-
-    private List<UsagesPopup.Item> buildUsageItems(List<Location> locations, Path currentFile,
-                                                   String currentText) {
-        List<UsagesPopup.Item> items = new ArrayList<>();
-        Map<Path, List<String>> linesByFile = new HashMap<>();
-        Path root = projectRoot;
-        for (Location location : JavaNavigation.unique(locations)) {
-            Path path = JavaNavigation.path(location);
-            if (path == null) {
-                ClassFileSupport classFiles = classFileUris;
-                if (classFiles != null && classFiles.isClassFileUri(location.uri())) {
-                    String name = classFiles.classFileSourceName(location.uri());
-                    items.add(new UsagesPopup.Item(
-                            text("navigation.decompiled", "Fonte de dependencia"),
-                            name,
-                            () -> navigateToLocation(location, null)));
-                }
-                continue;
-            }
-            int line = Math.max(0, location.range().start().line());
-            String snippet = sourceLine(path, currentFile, currentText, line, linesByFile);
-            Path shown = root != null && path.startsWith(root)
-                    ? root.relativize(path) : path.getFileName();
-            String label = (shown == null ? path.toString() : shown.toString()) + ":" + (line + 1) + ":" + (location.range().start().col() + 1);
-            items.add(new UsagesPopup.Item(snippet, label, () -> navigateToLocation(location, path)));
-        }
-        return List.copyOf(items);
-    }
-
     static String locationKey(Location location) {
         return UiThreads.locationKey(location);
     }
@@ -2786,166 +2756,27 @@ public class JavaIdeAdapter extends IdeAdapter {
         return JavaNavigation.unique(locations);
     }
 
-    private String sourceLine(Path path, Path currentFile, String currentText, int line,
-                              Map<Path, List<String>> cache) {
-        List<String> lines = cache.computeIfAbsent(path, file -> {
-            if (currentFile != null && currentText != null
-                    && file.equals(currentFile.toAbsolutePath().normalize())) return currentText.lines().toList();
-            IdeEditorContext open = editorContextFor(file);
-            if (open != null) {
-                String snapshot = onUi(open::getText);
-                if (snapshot != null) return snapshot.lines().toList();
-            }
-            try { return Files.readAllLines(file); }
-            catch (IOException unavailable) { return List.of(); }
-        });
-        return line >= 0 && line < lines.size() ? lines.get(line).strip() : "";
+    private void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
+                                 IdeEditorContext context, Point screen, Kind kind) {
+        navigationViews.showUsagesPopup(locations, currentFile, currentText, context, screen, kind);
     }
 
     private void navigateToLocation(Location location, Path path) {
-        if (location == null || location.range() == null) {
-            return;
-        }
-        ClassFileSupport classFiles = classFileUris;
-        if (path == null && classFiles != null && classFiles.isClassFileUri(location.uri())) {
-            navigateToClassFile(location);
-            return;
-        }
-        if (path == null) {
-            setStatusBarText(text("status.navigation.unsupportedTarget",
-                    "Java: nao foi possivel abrir este destino"));
-            return;
-        }
-        openAt(path, location.range().start().line(), location.range().start().col());
+        navigationViews.navigateToLocation(location, path);
     }
 
     private void openAt(Path path, int line, int col) {
-        if (path == null) return;
-        getEditor(path, true, editor -> {
-            int[] target = clampPosition(editor.getText(), line, col);
-            editor.setCaretPosition(target[0], target[1]);
-        });
+        navigationViews.openAt(path, line, col);
     }
 
     static int[] clampPosition(String text, int line, int col) {
-        if (text == null) return new int[]{Math.max(0, line), Math.max(0, col)};
-        String[] lines = text.split("\\R", -1);
-        int safeLine = Math.max(0, Math.min(line, lines.length - 1));
-        int safeCol = Math.max(0, Math.min(col, lines[safeLine].length()));
-        return new int[]{safeLine, safeCol};
-    }
-
-    private void navigateToClassFile(Location location) {
-        JavaLanguageServer lsp = jdtLs;
-        ClassFileSupport classFiles = lsp == null ? null : lsp.extension(ClassFileSupport.class);
-        if (classFiles == null || !lsp.isInteractive()) return;
-        String uri = location.uri();
-        int line = location.range().start().line();
-        int col = location.range().start().col();
-        long ticket = navigationTicket.incrementAndGet();
-
-        SwingUtilities.invokeLater(() -> showProgress(NAVIGATION_PROGRESS_ID,
-                text("progress.decompiling", "Java: abrindo fonte da dependencia...")));
-        background.submit(() -> {
-            String source = classFiles.classFileContents(uri);
-            SwingUtilities.invokeLater(() -> {
-                if (ticket != navigationTicket.get()) return;
-                hideProgress(NAVIGATION_PROGRESS_ID);
-                if (source == null || source.isBlank()) {
-                    setStatusBarText(text("status.decompileFailed",
-                            "Java: nao foi possivel obter a fonte da dependencia"));
-                    return;
-                }
-                openClassFileEditor(uri, source, line, col);
-            });
-        });
-    }
-
-    private CodeEditor openClassFileEditor(String uri, String source, int line, int col) {
-        ClassFileSupport classFiles = classFileUris;
-        String fileName = classFiles.classFileSourceName(uri);
-        String tabKey = classFiles.classFileTabKey(uri);
-        closeCenterTab(tabKey);
-
-        CodeEditor editor = requestEmbeddedCodeEditor(fileName, source,
-                EmbeddedCodeEditorSettings.highlighted());
-        if (editor == null) {
-            setStatusBarText(text("status.decompileFailed",
-                    "Java: nao foi possivel abrir a fonte da dependencia"));
-            return null;
-        }
-        editor.setReadOnly(true);
-        editor.setSearchEnabled(true);
-        editor.setFoldingEnabled(true);
-        applyClassFileEditorProviders(editor, uri, fileName);
-        editor.setWordClickModifier(InputEvent.CTRL_DOWN_MASK);
-        editor.setWordClickHandler(event -> {
-            MouseEvent mouse = event.mouseEvent();
-            if (mouse == null || mouse.getButton() != MouseEvent.BUTTON1
-                    || (mouse.getModifiersEx() & InputEvent.CTRL_DOWN_MASK) == 0) {
-                return;
-            }
-            navigateFromClassFile(uri, event.line(), event.col());
-        });
-        openCenterTab(tabKey, fileName + " [dependency]", editor, true);
-        editor.setCaretPosition(Math.max(0, line), Math.max(0, col));
-        return editor;
-    }
-
-    private void applyClassFileEditorProviders(CodeEditor editor, String uri, String fileName) {
-        applyClassFileEditorProviders(editor, Path.of(fileName), editors,
-                context -> classFileHover(uri, context));
+        return NavigationViews.clampPosition(text, line, col);
     }
 
     static void applyClassFileEditorProviders(CodeEditor editor, Path virtual,
                                               JavaEditorRegistry editors,
                                               HoverDocumentationProvider hover) {
-        TokenizerCodeEditorProvider tokenizer = editors.tokenizerFor(virtual);
-        if (tokenizer != null) {
-            editor.addProvider(tokenizer);
-            if (editor.getTokenClassifierProvider() == null) {
-                editor.addProvider(new DefaultTokenClassifierProvider());
-            }
-            if (editor.getTokenColorProvider() == null) {
-                editor.addProvider(new DefaultTokenColorProvider());
-            }
-            if (editor.getTokenRenderProvider() == null) {
-                editor.addProvider(new DefaultTokenRenderProvider());
-            }
-            editor.setSyntaxHighlightEnabled(true);
-            editor.applySyntaxHighlight();
-        }
-        Collection<FoldRule> foldRules = editors.foldRulesFor(virtual);
-        if (!foldRules.isEmpty()) {
-            editor.setFoldRules(foldRules);
-        }
-        editor.addProvider(hover);
-    }
-
-    private HoverInfo classFileHover(String uri, HoverDocumentationContext context) {
-        if (context == null || isDebugPaused()) {
-            return null;
-        }
-        JavaLanguageServer lsp = jdtLs;
-        ClassFileSupport classFiles = lsp == null ? null : lsp.extension(ClassFileSupport.class);
-        return classFiles == null || !lsp.isInteractive()
-                ? null : classFiles.hoverAtUri(uri, context.line(), context.col());
-    }
-
-    private void navigateFromClassFile(String uri, int line, int col) {
-        JavaLanguageServer lsp = jdtLs;
-        ClassFileSupport classFiles = lsp == null ? null : lsp.extension(ClassFileSupport.class);
-        if (classFiles == null || !lsp.isInteractive()) return;
-        background.submit(() -> {
-            List<Location> targets = classFiles.definitionsAtUri(uri, line, col);
-            if (targets == null || targets.isEmpty()) {
-                SwingUtilities.invokeLater(() -> setStatusBarText(
-                        text("status.navigation.empty", "Java: nenhum destino encontrado")));
-                return;
-            }
-            Location target = targets.getFirst();
-            SwingUtilities.invokeLater(() -> navigateToLocation(target, JavaNavigation.path(target)));
-        });
+        NavigationViews.applyClassFileEditorProviders(editor, virtual, editors, hover);
     }
 
     @Override
@@ -3305,7 +3136,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                                          Path file, String requestedText, Kind kind, Result result) {
         if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
         List<UsagesPopup.Item> items = needsUsagesPopup(kind, result.locations())
-                ? buildUsageItems(result.locations(), file, requestedText) : List.of();
+                ? navigationViews.buildUsageItems(result.locations(), file, requestedText) : List.of();
         SwingUtilities.invokeLater(() -> {
             if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
             if (editor == null || liveEditorFor(file) == null) {
@@ -3544,7 +3375,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             navigateToLocation(target, JavaNavigation.path(target));
             return;
         }
-        openUsagesPopup(context, null, codeLensSupport.countLabel(kind, items.size()), items);
+        navigationViews.openUsagesPopup(context, null, codeLensSupport.countLabel(kind, items.size()), items);
     }
 
     @Override
@@ -6260,7 +6091,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         CodeEditor editor = debugLibraryEditor;
         int[] target = clampPosition(source, line, 0);
         if (editor == null || !uri.equals(debugLibraryUri) || !editor.isShowing()) {
-            editor = openClassFileEditor(uri, source, target[0], 0);
+            editor = navigationViews.openClassFileEditor(uri, source, target[0], 0);
             if (editor == null) {
                 return;
             }
