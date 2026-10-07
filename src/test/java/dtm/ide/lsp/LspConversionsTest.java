@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.JavaCodeLens;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
@@ -345,7 +346,7 @@ class LspConversionsTest {
 
     @Test
     void readsResolvedCodeLensLocations() {
-        JdtLsService.JavaCodeLens lens = LspConversions.codeLens(json("""
+        JavaCodeLens lens = LspConversions.codeLens(json("""
                 {"range":{"start":{"line":4,"character":2},"end":{"line":4,"character":8}},
                  "command":{"title":"2 referencias","command":"java.show.references",
                  "arguments":["file:///p/A.java",{"line":4,"character":2},[

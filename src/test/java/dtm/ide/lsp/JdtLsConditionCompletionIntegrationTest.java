@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.CompletionTrigger;
 import dtm.ide.api.extension.Resource;
 import dtm.ide.debug.ConditionSyntheticSource;
 import dtm.ide.sdk.DownloadProgressListener;
@@ -81,7 +82,7 @@ class JdtLsConditionCompletionIntegrationTest {
         ConditionSyntheticSource members = ConditionSyntheticSource.build(file, source, 6, "this.");
         List<AutoCompleteItem> items = service.complete(members.path(), members.text(),
                 members.toSyntheticLine(0), members.toSyntheticCol(0, 5),
-                JdtLsService.CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
+                CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
         List<String> labels = items.stream().map(AutoCompleteItem::label).toList();
         assertTrue(labels.stream().anyMatch(label -> label.startsWith("total")), labels.toString());
         assertTrue(labels.stream().anyMatch(label -> label.startsWith("label")), labels.toString());

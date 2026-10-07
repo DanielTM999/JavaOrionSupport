@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.CompletionTrigger;
 import dtm.ide.api.extension.Resource;
 import dtm.ide.navigation.JavaNavigation;
 import dtm.ide.sdk.DownloadProgressListener;
@@ -156,7 +157,7 @@ class JdtLsBenchmarkIntegrationTest {
         String typedWord = source.replace("String text = customer.displayName();", "String text = customer.disp;");
         service.changeDocument(file, cachedWord);
         service.complete(file, cachedWord, customerLine, customerCol + 3,
-                JdtLsService.CompletionTrigger.INVOKED, null, JdtLsService.ANY_VERSION);
+                CompletionTrigger.INVOKED, null, JdtLsService.ANY_VERSION);
         measure(samples, "completion.reusable", round -> service.reusableCompletions(file, typedWord,
                 customerLine, customerCol + 5));
 
@@ -189,7 +190,7 @@ class JdtLsBenchmarkIntegrationTest {
     private List<AutoCompleteItem> completeMember(Path file, String text, int line, int customerCol) {
         service.changeDocument(file, text);
         return service.complete(file, text, line, customerCol + 1,
-                JdtLsService.CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
+                CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
     }
 
     private static String fresh(String text, int round) {

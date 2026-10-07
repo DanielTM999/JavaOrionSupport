@@ -1,5 +1,7 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.CompletionTrigger;
+import dtm.ide.lsp.api.LanguageServerState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
@@ -45,7 +47,7 @@ class JdtLsServiceAsyncTest {
         server = new FakeServer();
         LspJsonRpcClient client = new LspJsonRpcClient(server.clientInput, server.clientOutput, "async-test");
         set("client", client);
-        set("state", JdtLsService.State.READY);
+        set("state", LanguageServerState.READY);
     }
 
     @AfterEach
@@ -60,7 +62,7 @@ class JdtLsServiceAsyncTest {
         String text = "class A { void m() { System.out.pr } }";
 
         CompletableFuture<List<AutoCompleteItem>> pending = service.completeAsync(source, text, 0, 33,
-                JdtLsService.CompletionTrigger.INVOKED, null, -1);
+                CompletionTrigger.INVOKED, null, -1);
 
         assertFalse(pending.isDone(), "a completion nao pode esperar pelo servidor");
         JsonNode request = server.next("textDocument/completion");
@@ -76,7 +78,7 @@ class JdtLsServiceAsyncTest {
     void cancellingTheCompletionCancelsTheRequestOnTheServer() throws Exception {
         Path source = root.resolve("B.java");
         CompletableFuture<List<AutoCompleteItem>> pending = service.completeAsync(source,
-                "class B { }", 0, 9, JdtLsService.CompletionTrigger.INVOKED, null, -1);
+                "class B { }", 0, 9, CompletionTrigger.INVOKED, null, -1);
         JsonNode request = server.next("textDocument/completion");
 
         pending.cancel(false);

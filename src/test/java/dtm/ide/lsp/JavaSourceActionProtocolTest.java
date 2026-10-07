@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.TypeSymbol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -47,12 +48,12 @@ class JavaSourceActionProtocolTest {
                 ]
                 """);
 
-        List<JdtLsService.TypeSymbol> types = JdtLsService.parseWorkspaceTypes(response);
+        List<TypeSymbol> types = JdtLsService.parseWorkspaceTypes(response);
 
         assertEquals(List.of(
-                new JdtLsService.TypeSymbol("org.springframework.boot.CommandLineRunner", true),
-                new JdtLsService.TypeSymbol("demo.base.BaseService", false),
-                new JdtLsService.TypeSymbol("SemPacote", false)), types);
+                new TypeSymbol("org.springframework.boot.CommandLineRunner", true),
+                new TypeSymbol("demo.base.BaseService", false),
+                new TypeSymbol("SemPacote", false)), types);
         assertTrue(JdtLsService.parseWorkspaceTypes(null).isEmpty());
     }
 

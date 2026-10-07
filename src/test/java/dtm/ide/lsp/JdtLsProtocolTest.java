@@ -1,5 +1,8 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.CompletionTrigger;
+import dtm.ide.lsp.api.JavaCodeLens;
+import dtm.ide.lsp.api.LanguageServerState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.stools.component.panels.editor.code.api.Location;
@@ -61,7 +64,7 @@ class JdtLsProtocolTest {
 
         service = new JdtLsService(null, null, null, null);
         set("client", client);
-        set("state", JdtLsService.State.READY);
+        set("state", LanguageServerState.READY);
         set("capabilities", allCapabilities());
 
         server = new Thread(this::serve, "fake-jdtls");
@@ -84,7 +87,7 @@ class JdtLsProtocolTest {
         drainNotifications();
 
         List<AutoCompleteItem> items = service.complete(FILE, TEXT, 1, 20,
-                JdtLsService.CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
+                CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
 
         JsonNode request = awaitRequest("textDocument/completion");
         assertEquals(2, request.path("params").path("context").path("triggerKind").asInt());
@@ -125,7 +128,7 @@ class JdtLsProtocolTest {
         int version = service.documentVersion(FILE);
 
         List<AutoCompleteItem> items = service.complete(FILE, TEXT, 1, 12,
-                JdtLsService.CompletionTrigger.INVOKED, null, version + 5);
+                CompletionTrigger.INVOKED, null, version + 5);
 
         assertTrue(items.isEmpty());
         assertEquals(0, count("textDocument/completion"));
@@ -201,7 +204,7 @@ class JdtLsProtocolTest {
         List<Path> published = new java.util.concurrent.CopyOnWriteArrayList<>();
         service = new JdtLsService(null, null, null, published::add);
         set("client", client);
-        set("state", JdtLsService.State.READY);
+        set("state", LanguageServerState.READY);
         set("capabilities", allCapabilities());
         set("diagnosticsSettled", false);
         service.openDocument(FILE, TEXT);
@@ -342,7 +345,7 @@ class JdtLsProtocolTest {
         responses.put("textDocument/codeLens", lenses.toString());
         responses.put("codeLens/resolve", "echo-lens");
         service.openDocument(FILE, TEXT);
-        List<JdtLsService.JavaCodeLens> result = awaitLenses(130);
+        List<JavaCodeLens> result = awaitLenses(130);
         assertEquals(65, result.stream().filter(l -> l.command().equals("java.show.implementations")).count());
         assertEquals(130, count("codeLens/resolve"));
         assertEquals(1, count("textDocument/codeLens"));
@@ -352,7 +355,7 @@ class JdtLsProtocolTest {
         service.closeDocument(FILE);
     }
 
-    private List<JdtLsService.JavaCodeLens> awaitLenses(int expected) throws Exception {
+    private List<JavaCodeLens> awaitLenses(int expected) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
         while (System.nanoTime() < deadline) {
             var result = service.codeLenses(FILE, TEXT);
@@ -555,13 +558,13 @@ class JdtLsProtocolTest {
     @Test
     void eventosRecebidosAntesDoServidorFicarProntoSaoReenviados() throws Exception {
         service.setExternalResyncDelayMs(40);
-        set("state", JdtLsService.State.STARTING);
+        set("state", LanguageServerState.STARTING);
 
         service.pathCreated(OTHER_FILE);
         Thread.sleep(200);
         assertEquals(0, count("workspace/didChangeWatchedFiles"));
 
-        set("state", JdtLsService.State.READY);
+        set("state", LanguageServerState.READY);
         service.drainPendingWatchedFiles();
 
         JsonNode watched = awaitRequest("workspace/didChangeWatchedFiles");

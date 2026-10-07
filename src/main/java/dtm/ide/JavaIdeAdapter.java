@@ -1,5 +1,11 @@
 package dtm.ide;
 
+import dtm.ide.lsp.api.CompletionTrigger;
+import dtm.ide.lsp.api.JavaCodeLens;
+import dtm.ide.lsp.api.LanguageServerState;
+import dtm.ide.lsp.api.PrepareRenameResult;
+import dtm.ide.lsp.api.ResolvedCodeAction;
+import dtm.ide.lsp.api.TypeSymbol;
 import dtm.di.annotations.Singleton;
 import dtm.ide.api.annotations.PluginReference;
 import dtm.ide.api.context.IdeProjectContext;
@@ -1065,8 +1071,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(STARTUP_BUILD_LSP_WAIT_MS);
         while (current(ticket, root) && System.nanoTime() < deadline) {
-            JdtLsService.State state = lsp.getState();
-            if (state != JdtLsService.State.STARTING && state != JdtLsService.State.INDEXING) {
+            LanguageServerState state = lsp.getState();
+            if (state != LanguageServerState.STARTING && state != LanguageServerState.INDEXING) {
                 return;
             }
             lsp.awaitReady(STARTUP_BUILD_LSP_POLL_MS);
@@ -1306,16 +1312,16 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .build());
     }
 
-    private void refreshLombokStatusAfterServerState(JdtLsService.State state) {
+    private void refreshLombokStatusAfterServerState(LanguageServerState state) {
         LombokSupportStatus current = lombokSupport.status();
         if (current != LombokSupportStatus.STARTING && current != LombokSupportStatus.ACTIVE) {
             return;
         }
-        if (state == JdtLsService.State.READY) {
+        if (state == LanguageServerState.READY) {
             lombokSupport.update(LombokSupportStatus.ACTIVE, lombokSupport.detail());
             return;
         }
-        if (state == JdtLsService.State.ERROR) {
+        if (state == LanguageServerState.ERROR) {
             lombokSupport.update(LombokSupportStatus.ERROR, lombokSupport.detail());
         }
     }
@@ -1341,9 +1347,9 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void publishLanguageServerStatus(String message, int percent) {
         JdtLsService lsp = jdtLs;
-        JdtLsService.State state = lsp == null ? JdtLsService.State.NOT_STARTED : lsp.getState();
+        LanguageServerState state = lsp == null ? LanguageServerState.NOT_STARTED : lsp.getState();
         refreshLombokStatusAfterServerState(state);
-        if (state == JdtLsService.State.STARTING || state == JdtLsService.State.INDEXING) {
+        if (state == LanguageServerState.STARTING || state == LanguageServerState.INDEXING) {
             int effectivePercent = percent >= 0 ? Math.max(1, Math.min(99, percent)) : -1;
             lspProgress.set(Math.max(0, effectivePercent));
             String label = message == null || message.isBlank() || message.strip().equals("Java:")
@@ -1354,7 +1360,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     this::cancelLanguageServerIndexing);
             return;
         }
-        if (state == JdtLsService.State.READY) {
+        if (state == LanguageServerState.READY) {
             lspProgress.set(100);
             updateProgress(LSP_PROGRESS_ID, message, 100);
             hideProgress(LSP_PROGRESS_ID);
@@ -1370,7 +1376,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         hideProgress(LSP_PROGRESS_ID);
         publishLanguageServerWork(null, -1, false);
-        if (state == JdtLsService.State.ERROR) {
+        if (state == LanguageServerState.ERROR) {
             setStatusBarText(message);
         }
     }
@@ -1623,7 +1629,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             List<AutoCompleteItem> semantic = reusableJavaCompletions(lsp, context);
             boolean reused = !semantic.isEmpty();
             if (!reused) {
-                JdtLsService.CompletionTrigger trigger = javaCompletionTrigger(context);
+                CompletionTrigger trigger = javaCompletionTrigger(context);
                 semantic = lsp.complete(context.filePath(), context.text(),
                         context.caretLine(), context.caretCol(), trigger, javaTriggerCharacter(context),
                         lsp.documentVersion(context.filePath()), true);
@@ -1700,10 +1706,10 @@ public class JavaIdeAdapter extends IdeAdapter {
                 JAVA_COMPLETION_TRIGGER_CHARACTERS);
     }
 
-    private static JdtLsService.CompletionTrigger javaCompletionTrigger(IdeCompletionContext context) {
+    private static CompletionTrigger javaCompletionTrigger(IdeCompletionContext context) {
         return context.triggerKind() == IdeCompletionTriggerKind.TYPING && javaTriggerCharacter(context) != null
-                ? JdtLsService.CompletionTrigger.TRIGGER_CHARACTER
-                : JdtLsService.CompletionTrigger.INVOKED;
+                ? CompletionTrigger.TRIGGER_CHARACTER
+                : CompletionTrigger.INVOKED;
     }
 
     private List<AutoCompleteItem> finishSemanticCompletion(JdtLsService lsp, IdeCompletionContext context,
@@ -1878,7 +1884,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (contextual.isEmpty()) {
                 contextual = lsp.complete(context.filePath(), context.text(),
                         context.caretLine(), context.caretCol(),
-                        JdtLsService.CompletionTrigger.INVOKED, null,
+                        CompletionTrigger.INVOKED, null,
                         lsp.documentVersion(context.filePath()));
             }
         }
@@ -3056,7 +3062,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         List<CodeLens> lenses = new ArrayList<>();
         JdtLsService lsp = runningServerFor(context.filePath());
         if (lsp != null) {
-            for (JdtLsService.JavaCodeLens lens : lsp.codeLenses(
+            for (JavaCodeLens lens : lsp.codeLenses(
                     context.filePath(), context.text())) {
                 List<Location> targets = uniqueLocations(lens.locations());
                 Kind lensKind = Kind.forLens(lens.command());
@@ -3969,7 +3975,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     ? text("rename.serverLoading", "Aguarde o servidor Java terminar de carregar para renomear")
                     : text("rename.serverUnavailable", "O servidor Java não está disponível para renomear com segurança"));
         }
-        JdtLsService.PrepareRenameResult prepared = lsp.prepareRename(filePath, text, context.line(), context.col());
+        PrepareRenameResult prepared = lsp.prepareRename(filePath, text, context.line(), context.col());
         if (prepared != null && !prepared.renameable()) {
             return IdeRenamePreparation.rejected(text("rename.notRenameable",
                     "Este elemento não pode ser renomeado"));
@@ -4028,10 +4034,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (lsp == null || !JavaProjectConventions.isJava(filePath)) {
             return false;
         }
-        JdtLsService.State state = lsp.getState();
-        return state == JdtLsService.State.NOT_STARTED
-                || state == JdtLsService.State.STARTING
-                || state == JdtLsService.State.INDEXING;
+        LanguageServerState state = lsp.getState();
+        return state == LanguageServerState.NOT_STARTED
+                || state == LanguageServerState.STARTING
+                || state == LanguageServerState.INDEXING;
     }
 
     private SymbolKind resolveRenameKind(JdtLsService lsp, Path filePath, String text, int line, int col, String name) {
@@ -4168,8 +4174,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                 if (lsp.awaitReady(250)) {
                     return runningServerFor(filePath);
                 }
-                if (lsp.getState() == JdtLsService.State.ERROR
-                        || lsp.getState() == JdtLsService.State.STOPPED) {
+                if (lsp.getState() == LanguageServerState.ERROR
+                        || lsp.getState() == LanguageServerState.STOPPED) {
                     break;
                 }
             }
@@ -4353,9 +4359,9 @@ public class JavaIdeAdapter extends IdeAdapter {
             return null;
         }
         JdtLsService lsp = jdtLs;
-        JdtLsService.State state = lsp == null
-                ? JdtLsService.State.NOT_STARTED : lsp.getState();
-        if (state == JdtLsService.State.ERROR || state == JdtLsService.State.STOPPED) {
+        LanguageServerState state = lsp == null
+                ? LanguageServerState.NOT_STARTED : lsp.getState();
+        if (state == LanguageServerState.ERROR || state == LanguageServerState.STOPPED) {
             return null;
         }
         if (lsp == null || !lsp.isReady()) {
@@ -5501,7 +5507,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void applyResolvedCodeAction(JdtLsService lsp, String rawAction) {
-        JdtLsService.ResolvedCodeAction resolved = lsp.resolveCodeAction(rawAction);
+        ResolvedCodeAction resolved = lsp.resolveCodeAction(rawAction);
         if (resolved == null) {
             setStatusBarText(text("status.codeActionFailed",
                     "Java: nao foi possivel aplicar a correcao"));
@@ -5939,7 +5945,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private boolean isIndexing(Path filePath) {
         JdtLsService lsp = jdtLs;
-        return lsp != null && lsp.getState() == JdtLsService.State.INDEXING
+        return lsp != null && lsp.getState() == LanguageServerState.INDEXING
                 && JavaProjectConventions.isJava(filePath);
     }
 
@@ -6388,7 +6394,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                                 type.kind() == JavaType.Kind.INTERFACE)));
         JdtLsService lsp = jdtLs;
         if (lsp != null && lsp.isInteractive()) {
-            for (JdtLsService.TypeSymbol symbol : lsp.workspaceTypes(term)) {
+            for (TypeSymbol symbol : lsp.workspaceTypes(term)) {
                 found.putIfAbsent(symbol.qualifiedName(), new JavaTypeCreationPanel.TypeCandidate(
                         symbol.qualifiedName(), symbol.isInterface()));
             }
@@ -7389,7 +7395,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             if (generation != debugStartGeneration.get()) {
                 return false;
             }
-            if (lsp.getState() == JdtLsService.State.ERROR) {
+            if (lsp.getState() == LanguageServerState.ERROR) {
                 throw new IllegalStateException(text("debug.lspFailed",
                         "O IntelliSense Java falhou; reinicie-o para depurar."));
             }

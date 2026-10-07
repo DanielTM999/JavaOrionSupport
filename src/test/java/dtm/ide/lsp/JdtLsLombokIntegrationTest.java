@@ -1,5 +1,7 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.CompletionTrigger;
+import dtm.ide.lsp.api.LanguageServerState;
 import dtm.ide.api.extension.Resource;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.ide.project.JavaProjectConventions;
@@ -89,7 +91,7 @@ class JdtLsLombokIntegrationTest {
         service.changeDocument(source, edited);
 
         List<AutoCompleteItem> items = service.complete(source, edited, line, 18,
-                JdtLsService.CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
+                CompletionTrigger.TRIGGER_CHARACTER, '.', JdtLsService.ANY_VERSION);
         List<String> labels = items.stream().map(AutoCompleteItem::label).toList();
 
         assertTrue(labels.stream().anyMatch(label -> label.startsWith("getName")),
@@ -118,7 +120,7 @@ class JdtLsLombokIntegrationTest {
         service.closeDocument(source);
         assertEquals(JdtLsService.ANY_VERSION, service.documentVersion(source));
         service.stop();
-        assertEquals(JdtLsService.State.STOPPED, service.getState());
+        assertEquals(LanguageServerState.STOPPED, service.getState());
 
         service.start(project, jdk.get(), DownloadProgressListener.NOOP).join();
         assumeTrue(service.awaitReady(READY_TIMEOUT_MS),

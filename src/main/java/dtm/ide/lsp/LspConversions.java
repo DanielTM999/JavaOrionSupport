@@ -1,5 +1,7 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.JavaCodeLens;
+import dtm.ide.lsp.api.PrepareRenameResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
@@ -547,7 +549,7 @@ final class LspConversions {
         return 1;
     }
 
-    static JdtLsService.JavaCodeLens codeLens(JsonNode node) {
+    static JavaCodeLens codeLens(JsonNode node) {
         if (node == null || node.isNull()) {
             return null;
         }
@@ -563,7 +565,7 @@ final class LspConversions {
         if (arguments != null && arguments.isArray() && arguments.size() > 2) {
             targets = locations(arguments.get(2));
         }
-        return new JdtLsService.JavaCodeLens(range(node.get("range")), title, commandId, targets);
+        return new JavaCodeLens(range(node.get("range")), title, commandId, targets);
     }
 
     static InlayHint inlayHint(JsonNode node) {
@@ -698,21 +700,21 @@ final class LspConversions {
         return new IdeWorkspaceEdit(operations);
     }
 
-    static JdtLsService.PrepareRenameResult prepareRename(JsonNode node) {
+    static PrepareRenameResult prepareRename(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
-            return JdtLsService.PrepareRenameResult.rejected(null);
+            return PrepareRenameResult.rejected(null);
         }
         if (node.path("defaultBehavior").asBoolean(false)) {
-            return JdtLsService.PrepareRenameResult.of(null, null);
+            return PrepareRenameResult.of(null, null);
         }
         if (node.hasNonNull("range")) {
             String placeholder = node.hasNonNull("placeholder") ? node.get("placeholder").asText() : null;
-            return JdtLsService.PrepareRenameResult.of(range(node.get("range")), placeholder);
+            return PrepareRenameResult.of(range(node.get("range")), placeholder);
         }
         if (node.hasNonNull("start") && node.hasNonNull("end")) {
-            return JdtLsService.PrepareRenameResult.of(range(node), null);
+            return PrepareRenameResult.of(range(node), null);
         }
-        return JdtLsService.PrepareRenameResult.rejected(null);
+        return PrepareRenameResult.rejected(null);
     }
 
     static String errorMessage(Throwable error) {

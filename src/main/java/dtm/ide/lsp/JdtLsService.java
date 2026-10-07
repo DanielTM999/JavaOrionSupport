@@ -8,6 +8,15 @@ import dtm.ide.api.hierarchy.TypeHierarchyItem;
 import dtm.stools.component.panels.editor.code.documenthighlight.DocumentHighlight;
 import dtm.ide.api.project.editor.SemanticToken;
 import dtm.ide.inspection.DiagnosticRanges;
+import dtm.ide.lsp.api.CompletionTrigger;
+import dtm.ide.lsp.api.JavaCodeLens;
+import dtm.ide.lsp.api.LanguageServerState;
+import dtm.ide.lsp.api.LateCompletionListener;
+import dtm.ide.lsp.api.PrepareRenameResult;
+import dtm.ide.lsp.api.ResolvedCodeAction;
+import dtm.ide.lsp.api.StatusListener;
+import dtm.ide.lsp.api.TypeSymbol;
+import dtm.ide.lsp.api.WorkListener;
 import dtm.ide.inspection.JavaDiagnosticEdits;
 import dtm.ide.navigation.JavaNavigation;
 import dtm.ide.navigation.JavaNavigation.Kind;
@@ -64,27 +73,6 @@ public class JdtLsService {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    public enum State {
-        NOT_STARTED,
-        STARTING,
-        INDEXING,
-        READY,
-        STOPPED,
-        ERROR
-    }
-
-    public interface StatusListener {
-        void onStatus(String message, int percent);
-    }
-
-    public interface WorkListener {
-        void onWork(String message, int percent, boolean active);
-    }
-
-    public interface LateCompletionListener {
-        void onLateCompletion(Path filePath, int line, int col);
-    }
-
     enum ResyncMode {
         REOPEN,
         TOUCH
@@ -97,22 +85,6 @@ public class JdtLsService {
     public static final String GENERATE_ACCESSORS_PROMPT = "java.action.generateAccessorsPrompt";
     public static final String GENERATE_CONSTRUCTORS_PROMPT = "java.action.generateConstructorsPrompt";
     public static final String GENERATE_DELEGATE_METHODS_PROMPT = "java.action.generateDelegateMethodsPrompt";
-
-    public enum CompletionTrigger {
-        INVOKED(1),
-        TRIGGER_CHARACTER(2),
-        INCOMPLETE(3);
-
-        private final int lspKind;
-
-        CompletionTrigger(int lspKind) {
-            this.lspKind = lspKind;
-        }
-
-        public int lspKind() {
-            return lspKind;
-        }
-    }
 
     public record SourceItem(JsonNode value, String label, String detail, boolean selected) {
     }
@@ -220,7 +192,7 @@ public class JdtLsService {
     private final AtomicLong lastCodeLensWorkRefresh = new AtomicLong();
     private final Object processLock = new Object();
 
-    private volatile State state = State.NOT_STARTED;
+    private volatile LanguageServerState state = LanguageServerState.NOT_STARTED;
     private volatile String lastError;
     private volatile String startupFailure;
     private volatile Path projectRoot;
@@ -318,19 +290,6 @@ public class JdtLsService {
         }
     }
 
-    public record JavaCodeLens(Range range, String title, String command,
-                               List<Location> locations, Status status) {
-        public JavaCodeLens(Range range, String title, String command, List<Location> locations) {
-            this(range, title, command, locations, Status.COMPLETE);
-        }
-        public JavaCodeLens {
-            range = range == null ? Range.point(0, 0) : range;
-            title = title == null ? "" : title;
-            command = command == null ? "" : command;
-            locations = JavaNavigation.unique(locations);
-        }
-    }
-
     private record SymbolCache(String text, List<DocumentSymbol> symbols) { }
 
     private static final class LensWork {
@@ -352,7 +311,7 @@ public class JdtLsService {
     record CompletionAnswer(List<AutoCompleteItem> items, boolean incomplete) {
     }
 
-    public State getState() {
+    public LanguageServerState getState() {
         return state;
     }
 
@@ -365,17 +324,17 @@ public class JdtLsService {
     }
 
     public boolean isInteractive() {
-        State current = state;
+        LanguageServerState current = state;
         return isInteractiveState(current)
                 && client != null && !client.isClosed();
     }
 
-    static boolean isInteractiveState(State state) {
-        return state == State.INDEXING || state == State.READY;
+    static boolean isInteractiveState(LanguageServerState state) {
+        return state == LanguageServerState.INDEXING || state == LanguageServerState.READY;
     }
 
     public boolean isReady() {
-        return state == State.READY && client != null && !client.isClosed();
+        return state == LanguageServerState.READY && client != null && !client.isClosed();
     }
 
     public String getLastError() {
@@ -501,7 +460,7 @@ public class JdtLsService {
             if (terminated) {
                 return;
             }
-            boolean active = state == State.STARTING || state == State.INDEXING || isRunning();
+            boolean active = state == LanguageServerState.STARTING || state == LanguageServerState.INDEXING || isRunning();
             if (active && normalizedRoot.equals(projectRoot)) {
                 return;
             }
@@ -512,11 +471,11 @@ public class JdtLsService {
         }
         long launchGeneration;
         synchronized (processLock) {
-            if (terminated || state == State.STARTING || state == State.INDEXING || isRunning()) {
+            if (terminated || state == LanguageServerState.STARTING || state == LanguageServerState.INDEXING || isRunning()) {
                 return;
             }
             launchGeneration = generation.incrementAndGet();
-            state = State.STARTING;
+            state = LanguageServerState.STARTING;
             lastError = null;
             startupFailure = null;
             projectRoot = normalizedRoot;
@@ -588,7 +547,7 @@ public class JdtLsService {
 
             initialize(rpc, owned, launchGeneration, root, runtime, jdk, bundlePaths.join());
             long initialized = System.nanoTime();
-            if (!advanceState(launchGeneration, State.INDEXING)) {
+            if (!advanceState(launchGeneration, LanguageServerState.INDEXING)) {
                 return;
             }
             publishProgress(progressAggregator.initialized("indexando projeto..."));
@@ -599,7 +558,7 @@ public class JdtLsService {
             if (startupFailure != null) {
                 throw new IllegalStateException(startupFailure);
             }
-            if (!advanceState(launchGeneration, State.READY)) {
+            if (!advanceState(launchGeneration, LanguageServerState.READY)) {
                 return;
             }
             warmUpDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WARM_UP_TIMEOUT_MS);
@@ -634,7 +593,7 @@ public class JdtLsService {
             }
             log.warn("Falha ao iniciar o Eclipse JDT LS: {}", message, e);
             finishRetired(retire(), 0, 0);
-            state = State.ERROR;
+            state = LanguageServerState.ERROR;
             lastError = message;
             if (!(rootCause(e) instanceof TimeoutException)
                     || !scheduleRestart("Java: o JDT LS nao respondeu; tentando de novo...")) {
@@ -654,7 +613,7 @@ public class JdtLsService {
         return generation.get() == launchGeneration && !terminated;
     }
 
-    private boolean advanceState(long launchGeneration, State next) {
+    private boolean advanceState(long launchGeneration, LanguageServerState next) {
         synchronized (processLock) {
             if (!isCurrent(launchGeneration)) {
                 return false;
@@ -682,13 +641,13 @@ public class JdtLsService {
         if (!isCurrent(launchGeneration)) {
             return;
         }
-        State before = state;
+        LanguageServerState before = state;
         int code = server.exitValue();
         log.warn("O processo do JDT LS encerrou inesperadamente com codigo {} (estado {})", code, before);
         finishRetired(retire(), 0, 0);
-        state = State.ERROR;
+        state = LanguageServerState.ERROR;
         lastError = "o processo do JDT LS encerrou com codigo " + code;
-        boolean restartable = before == State.READY || before == State.STARTING || before == State.INDEXING;
+        boolean restartable = before == LanguageServerState.READY || before == LanguageServerState.STARTING || before == LanguageServerState.INDEXING;
         if (!restartable || !scheduleRestart(
                 "Java: o IntelliSense encerrou (codigo " + code + "); reiniciando...")) {
             statusListener.onStatus("Java: IntelliSense indisponivel - " + lastError, -1);
@@ -1069,7 +1028,7 @@ public class JdtLsService {
 
     private Retired detach() {
         synchronized (processLock) {
-            state = State.STOPPED;
+            state = LanguageServerState.STOPPED;
             generation.incrementAndGet();
             Retired retired = new Retired(process, client, workspaceLease);
             process = null;
@@ -1526,7 +1485,7 @@ public class JdtLsService {
     }
 
     private void scheduleDiagnosticsSettle() {
-        if (diagnosticsSettled || state != State.READY) {
+        if (diagnosticsSettled || state != LanguageServerState.READY) {
             return;
         }
         long ticket = diagnosticsSettleTicket.incrementAndGet();
@@ -1537,7 +1496,7 @@ public class JdtLsService {
     }
 
     private void trySettleDiagnostics(long ticket) {
-        if (ticket != diagnosticsSettleTicket.get() || diagnosticsSettled || state != State.READY) {
+        if (ticket != diagnosticsSettleTicket.get() || diagnosticsSettled || state != LanguageServerState.READY) {
             return;
         }
         boolean expired = System.nanoTime() - diagnosticsSettleDeadline >= 0;
@@ -1584,8 +1543,8 @@ public class JdtLsService {
     }
 
     private void publishProgress(LspProgressAggregator.Snapshot snapshot) {
-        State current = state;
-        if (current == State.READY) {
+        LanguageServerState current = state;
+        if (current == LanguageServerState.READY) {
             String label = snapshot.label().isBlank() ? "" : "Java: " + snapshot.label();
             workListener.onWork(label, snapshot.workPercent(), snapshot.visibleWork());
             if (snapshot.idle()) {
@@ -1594,7 +1553,7 @@ public class JdtLsService {
             scheduleDiagnosticsSettle();
             return;
         }
-        if (current == State.STARTING || current == State.INDEXING) {
+        if (current == LanguageServerState.STARTING || current == LanguageServerState.INDEXING) {
             statusListener.onStatus("Java: " + snapshot.label(), snapshot.percent());
         }
     }
@@ -1963,9 +1922,9 @@ public class JdtLsService {
     }
 
     private boolean canSyncDocuments() {
-        State current = state;
+        LanguageServerState current = state;
         LspJsonRpcClient rpc = client;
-        return (current == State.INDEXING || current == State.READY)
+        return (current == LanguageServerState.INDEXING || current == LanguageServerState.READY)
                 && rpc != null && !rpc.isClosed();
     }
 
@@ -2078,7 +2037,7 @@ public class JdtLsService {
             return;
         }
         int version = documents.ensureVersion(uri);
-        if (state != State.READY) {
+        if (state != LanguageServerState.READY) {
             openedDuringImport.add(uri);
         }
         rpc.notify("textDocument/didOpen", Map.of("textDocument", Map.of(
@@ -3125,17 +3084,6 @@ public class JdtLsService {
         return LspConversions.prepareRename(result);
     }
 
-    public record PrepareRenameResult(boolean renameable, Range range, String placeholder, String message) {
-
-        public static PrepareRenameResult rejected(String message) {
-            return new PrepareRenameResult(false, null, null, message);
-        }
-
-        public static PrepareRenameResult of(Range range, String placeholder) {
-            return new PrepareRenameResult(true, range, placeholder, null);
-        }
-    }
-
     public List<CodeAction> codeActions(Path filePath, String text, Range range,
                                         List<Diagnostic> diagnostics) {
         if (!capabilities.codeAction()) {
@@ -3181,9 +3129,6 @@ public class JdtLsService {
             }
         }
         return matching;
-    }
-
-    public record ResolvedCodeAction(IdeWorkspaceEdit edit, String commandJson) {
     }
 
     public ResolvedCodeAction resolveCodeAction(String rawJson) {
@@ -3232,9 +3177,6 @@ public class JdtLsService {
             ImportCandidates.merge(candidates, ImportCandidates.fromActions(result));
         }
         return new ImportCandidates.Lookup(true, candidates, unresolved.keySet());
-    }
-
-    public record TypeSymbol(String qualifiedName, boolean isInterface) {
     }
 
     public List<TypeSymbol> workspaceTypes(String query) {

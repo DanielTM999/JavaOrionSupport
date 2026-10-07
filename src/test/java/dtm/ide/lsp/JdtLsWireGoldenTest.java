@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.CompletionTrigger;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -107,7 +108,7 @@ class JdtLsWireGoldenTest {
         service.openDocument(file, source);
         String edited = source.replace("int size = name.length();", "int size = name.;");
         service.changeDocument(file, edited);
-        service.complete(file, edited, line, col + 4, JdtLsService.CompletionTrigger.TRIGGER_CHARACTER, '.',
+        service.complete(file, edited, line, col + 4, CompletionTrigger.TRIGGER_CHARACTER, '.',
                 JdtLsService.ANY_VERSION);
         service.changeDocument(file, source);
         service.hover(file, source, line, col);

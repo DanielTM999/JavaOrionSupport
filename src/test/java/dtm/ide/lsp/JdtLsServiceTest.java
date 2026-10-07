@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.LanguageServerState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkVendor;
@@ -38,10 +39,10 @@ class JdtLsServiceTest {
 
     @Test
     void exposesEssentialEditingWhileTheWorkspaceIsIndexing() {
-        assertFalse(JdtLsService.isInteractiveState(JdtLsService.State.STARTING));
-        assertTrue(JdtLsService.isInteractiveState(JdtLsService.State.INDEXING));
-        assertTrue(JdtLsService.isInteractiveState(JdtLsService.State.READY));
-        assertFalse(JdtLsService.isInteractiveState(JdtLsService.State.ERROR));
+        assertFalse(JdtLsService.isInteractiveState(LanguageServerState.STARTING));
+        assertTrue(JdtLsService.isInteractiveState(LanguageServerState.INDEXING));
+        assertTrue(JdtLsService.isInteractiveState(LanguageServerState.READY));
+        assertFalse(JdtLsService.isInteractiveState(LanguageServerState.ERROR));
     }
 
     @TempDir
