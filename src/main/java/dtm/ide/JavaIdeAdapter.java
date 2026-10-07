@@ -52,6 +52,7 @@ import dtm.ide.api.project.editor.IdeDocumentSymbolContext;
 import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
 import dtm.ide.api.extension.Resource;
+import dtm.ide.api.extension.runconfig.RunBreakpointData;
 import dtm.stools.component.popup.ModernComponentDialog;
 import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
@@ -62,6 +63,7 @@ import dtm.ide.adapter.DebugSupport;
 import dtm.ide.adapter.ConditionalBreakpointSupport;
 import dtm.ide.adapter.DiagnosticsEngine;
 import dtm.ide.adapter.RenameSupport;
+import dtm.ide.adapter.RunLauncher;
 import dtm.ide.adapter.SafeDeleteSupport;
 import dtm.ide.adapter.SourceActionSupport;
 import dtm.ide.adapter.UiThreads;
@@ -393,7 +395,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
-    private static final long RUN_BUTTONS_REFRESH_DELAY_MS = 300;
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final int NAVIGATION_RETRIES = 2;
@@ -405,12 +406,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
     private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
     private static final String BUILD_PROGRESS_ID = "javaBuild";
-    private static final String RUN_BUILD_PROGRESS_ID = "javaRunBuild";
     private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
     private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
     private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
-    private static final long BUILD_SLOT_WAIT_MS = 600_000;
-    private static final long BUILD_SLOT_POLL_MS = 100;
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String LSP_PROGRESS_ID = "javaLanguageServer";
@@ -521,7 +519,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public void refreshRunButtonsForCurrentFile() {
-            JavaIdeAdapter.this.refreshRunButtonsForCurrentFile();
+            runLauncher.refreshRunButtonsForCurrentFile();
         }
 
         @Override
@@ -652,7 +650,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public BuildToolDebugListener openBuildDebugListener(JavaModule module, Runnable cancelProcess)
                 throws IOException {
-            return JavaIdeAdapter.this.openBuildDebugListener(module, cancelProcess);
+            return runLauncher.openBuildDebugListener(module, cancelProcess);
         }
 
         @Override
@@ -728,7 +726,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public BuildToolDebugListener openBuildDebugListener(JavaModule module, Runnable cancelProcess,
                                                              Runnable onAttach) throws IOException {
-            return JavaIdeAdapter.this.openBuildDebugListener(module, cancelProcess, onAttach);
+            return runLauncher.openBuildDebugListener(module, cancelProcess, onAttach);
         }
 
         @Override
@@ -758,7 +756,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public boolean hasRunningProcess() {
-            return JavaIdeAdapter.this.hasRunningProcess();
+            return runLauncher.hasRunningProcess();
         }
 
         @Override
@@ -899,7 +897,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public Optional<MainClassScanner.MainClass> currentMainClass() {
-            return JavaIdeAdapter.this.currentMainClass();
+            return runLauncher.currentMainClass();
         }
 
         @Override
@@ -1037,12 +1035,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public void closeDebugRelay() {
-            JavaIdeAdapter.this.closeDebugRelay();
+            runLauncher.closeDebugRelay();
         }
 
         @Override
         public boolean supportsHotReloadForSelection() {
-            return JavaIdeAdapter.this.supportsHotReloadForSelection();
+            return runLauncher.supportsHotReloadForSelection();
         }
 
         @Override
@@ -1053,6 +1051,56 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public void requestRepaintCodeEditorBreakpointLine(Path file) {
             JavaIdeAdapter.this.requestRepaintCodeEditorBreakpointLine(file);
+        }
+    
+        @Override
+        public DebugSupport debug() {
+            return debugSupport;
+        }
+
+        @Override
+        public AtomicBoolean buildRunning() {
+            return buildRunning;
+        }
+
+        @Override
+        public boolean isUnloaded() {
+            return unloaded;
+        }
+
+        @Override
+        public String buildProgressAction(BuildSystem.BuildAction action) {
+            return JavaIdeAdapter.this.buildProgressAction(action);
+        }
+
+        @Override
+        public void updateProgress(String id, String message, int percent) {
+            JavaIdeAdapter.this.updateProgress(id, message, percent);
+        }
+
+        @Override
+        public List<RunBreakpointData> requestWorkspaceBreakpoints() {
+            return JavaIdeAdapter.this.requestWorkspaceBreakpoints();
+        }
+
+        @Override
+        public void requestSetRunButtonEnabled(boolean enabled) {
+            JavaIdeAdapter.this.requestSetRunButtonEnabled(enabled);
+        }
+
+        @Override
+        public void requestSetDebugButtonEnabled(boolean enabled) {
+            JavaIdeAdapter.this.requestSetDebugButtonEnabled(enabled);
+        }
+
+        @Override
+        public void requestSetCoverageButtonVisible(boolean visible) {
+            JavaIdeAdapter.this.requestSetCoverageButtonVisible(visible);
+        }
+
+        @Override
+        public void requestSetCoverageButtonEnabled(boolean enabled) {
+            JavaIdeAdapter.this.requestSetCoverageButtonEnabled(enabled);
         }
     }
 
@@ -1072,6 +1120,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final SourceActionSupport sourceActions = new SourceActionSupport(adapterHost);
     private final ConditionalBreakpointSupport conditionalBreakpoints = new ConditionalBreakpointSupport(adapterHost);
     private final DebugSupport debugSupport = new DebugSupport(adapterHost);
+    private final RunLauncher runLauncher = new RunLauncher(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1088,10 +1137,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicInteger lspProgress = new AtomicInteger();
     private final AtomicBoolean buildRunning = new AtomicBoolean();
     private final AtomicBoolean debugActive = new AtomicBoolean();
-    private final Map<RunConfigurationKey, RunProcessHandle> runningProcesses =
-            new ConcurrentHashMap<>();
-    private final Map<RunConfigurationKey, AtomicBoolean> pendingLaunches =
-            new ConcurrentHashMap<>();
     private final PluginTaskExecutor background =
             new PluginTaskExecutor("java-orion-support");
     private final AutoCompleteIdleTrigger autoCompleteIdle = new AutoCompleteIdleTrigger(
@@ -1104,11 +1149,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     );
 
     
-    private final AtomicLong runButtonsTicket = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object fileWatcherLock = new Object();
     private volatile Path fileWatcherRoot;
-    private volatile MainClassMemo mainClassMemo;
     private volatile Path projectRoot;
     private volatile JavaProjectDescriptor descriptor;
     private final JavaPathTransferRefactoring pathTransfers = new JavaPathTransferRefactoring(new PathTransferHost());
@@ -1142,13 +1185,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile DependencyService dependencyService;
     private volatile DependencyManagerCoordinator dependencyCoordinator;
     private volatile DependencyManagerPanel dependencyPanel;
-    private volatile JavaRunSupport runSupport;
-    private final AtomicReference<BuildProgressTracker> runBuildProgress = new AtomicReference<>();
     private final AtomicReference<IncrementalJavaBuilder> startupBuilder = new AtomicReference<>();
     private final AtomicReference<JavaTestRunner> activeTestRunner = new AtomicReference<>();
     private final AtomicReference<Runnable> pendingTestDebug = new AtomicReference<>();
-    private volatile JdwpRelay debugRelay;
-    private volatile RunFormChoicesLoader runFormChoicesLoader;
     private volatile JavaTestExplorerPanel testPanel;
     private volatile String testPanelId;
     private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
@@ -1180,7 +1219,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
     private final AtomicBoolean languageServerReadyHandled = new AtomicBoolean();
     private final AtomicBoolean languageServerWorkVisible = new AtomicBoolean();
-    private volatile RunConfigurationData selectedRunConfig;
     private volatile List<RunConfigurationData> staticRunConfigurations = List.of();
 
     @Override
@@ -1249,15 +1287,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         projectJdk = null;
         buildSystem = null;
         dependencyService = null;
-        runSupport = null;
+        runLauncher.clearRunSupport();
         closeSwingDesigner();
-        runBuildProgress.set(null);
+        runLauncher.clearRunBuildProgress();
         cancelStartupBuild();
         hideProgress(STARTUP_BUILD_PROGRESS_ID);
         debugSupport.closeDebugSession();
         activeJavaEditor = null;
-        selectedRunConfig = null;
-        mainClassMemo = null;
+        runLauncher.clearSelectedRunConfig();
+        runLauncher.clearMainClassMemo();
         unregisterFileWatcher();
         DependencyManagerCoordinator coordinator = dependencyCoordinator;
         if (coordinator != null) {
@@ -1266,7 +1304,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         lexicalIndex.clear();
         spring.index().clear();
         todoSupport.reset();
-        RunFormChoicesLoader choicesLoader = runFormChoicesLoader;
+        RunFormChoicesLoader choicesLoader = runLauncher.currentRunFormChoicesLoader();
         if (choicesLoader != null) {
             choicesLoader.invalidate();
         }
@@ -1304,7 +1342,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         closeSwingDesigner();
         dtm.ide.run.OwnedRunProcesses.shutdownAll();
         debugSupport.startGeneration().incrementAndGet();
-        closeDebugRelay();
+        runLauncher.closeDebugRelay();
         JavaDebugSession session = debugSupport.session();
         debugSupport.clearSession();
         debugActive.set(false);
@@ -1431,7 +1469,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 : context.getProjectPath().map(JavaProjectConventions::normalize).orElse(null);
         if (nextRoot != null && nextRoot.equals(projectRoot) && descriptor != null) {
             this.projectContext = context;
-            refreshRunButtonsForCurrentFile();
+            runLauncher.refreshRunButtonsForCurrentFile();
             logSlowBind(started, callerThread);
             return;
         }
@@ -1452,7 +1490,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         refreshProblemsPanel();
         Path root = nextRoot;
         if (root == null) {
-            refreshRunButtonsForCurrentFile();
+            runLauncher.refreshRunButtonsForCurrentFile();
             logSlowBind(started, callerThread);
             return;
         }
@@ -1477,7 +1515,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     SwingUtilities.invokeLater(() -> {
                         if (current(ticket, root)) {
                             hideProgress(LSP_PROGRESS_ID);
-                            refreshRunButtonsForCurrentFile();
+                            runLauncher.refreshRunButtonsForCurrentFile();
                         }
                     });
                     return;
@@ -1507,7 +1545,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             ensureBuildToolsPanel();
         }
         ensureTestPanel();
-        refreshRunButtonsForCurrentFile();
+        runLauncher.refreshRunButtonsForCurrentFile();
         requestJavaTreeIconRefresh(null);
     }
 
@@ -2035,7 +2073,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             descriptor = described;
             staticRunConfigurations = configurations;
-            mainClassMemo = null;
+            runLauncher.clearMainClassMemo();
             return true;
         }
     }
@@ -3475,7 +3513,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (debugActive.get()) {
             debugSupport.setDebugEditorAssistEnabled(false);
         }
-        refreshRunButtonsForCurrentFile();
+        runLauncher.refreshRunButtonsForCurrentFile();
     }
 
     private void installCodeActionCommandHandler(IdeEditorContext context) {
@@ -3563,7 +3601,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 lsp.changeDocument(editorContext.filePath(), currentText);
             }
             if (problems.move(edited, previousText, currentText)) refreshProblemsPanel();
-            scheduleRunButtonsRefresh();
+            runLauncher.scheduleRunButtonsRefresh();
         }
     }
 
@@ -3576,7 +3614,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (active != null && Objects.equals(JavaProjectConventions.normalize(active.filePath()),
                 JavaProjectConventions.normalize(filePath))) {
             activeJavaEditor = null;
-            refreshRunButtonsForCurrentFile();
+            runLauncher.refreshRunButtonsForCurrentFile();
         }
         JavaLanguageServer lsp = jdtLs;
         if (JavaProjectConventions.isJava(filePath)) {
@@ -4528,54 +4566,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<RunConfigurationContribution> getRunConfigurationContributions() {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null) {
-            return List.of();
-        }
-        RunFormContext formContext = RunFormContext.sharing(() -> descriptor, runFormChoicesLoader(),
-                this::requestRunConfigurations, this::createModernDialogBuilder,
-                () -> this.<Boolean>createModernComponentDialogBuilder());
-        List<RunConfigurationContribution> contributions = new ArrayList<>();
-        contributions.add(new JavaRunConfigurationContribution(
-                JavaRunTypes.APPLICATION, formContext));
-        if (current.springBoot()) {
-            contributions.add(new JavaRunConfigurationContribution(
-                    JavaRunTypes.SPRING_BOOT, formContext));
-        }
-        contributions.add(new JavaRunConfigurationContribution(JavaRunTypes.JAR, formContext));
-        if (current.isMaven()) {
-            contributions.add(new JavaRunConfigurationContribution(
-                    JavaRunTypes.MAVEN, formContext));
-        }
-        if (current.isGradle()) {
-            contributions.add(new JavaRunConfigurationContribution(
-                    JavaRunTypes.GRADLE, formContext));
-        }
-        if (current.isMaven() || current.isGradle()) {
-            contributions.add(new JavaRunConfigurationContribution(
-                    JavaRunTypes.TEST, formContext));
-        }
-        contributions.add(new JavaRunConfigurationContribution(JavaRunTypes.REMOTE, formContext));
-        return contributions;
-    }
-
-    private List<JdkInstallation> availableJdks() {
-        JdkService service = jdkService;
-        return service == null ? List.of() : service.available();
-    }
-
-    private synchronized RunFormChoicesLoader runFormChoicesLoader() {
-        RunFormChoicesLoader existing = runFormChoicesLoader;
-        if (existing != null) {
-            return existing;
-        }
-        RunFormChoicesLoader created = new RunFormChoicesLoader(() -> descriptor,
-                this::availableJdks, background, SwingUtilities::invokeLater,
-                dtm.stools.i18n.I18n.getText(
-                        dtm.ide.run.form.RunConfigurationFormBase.class,
-                        "field.jdk.project", "JDK do projeto"));
-        runFormChoicesLoader = created;
-        return created;
+        return runLauncher.getRunConfigurationContributions();
     }
 
     @Override
@@ -4605,231 +4596,24 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onRunConfigurationChanged(RunConfigurationData configuration) {
-        selectedRunConfig = configuration;
-        refreshCoverageButton();
-        if (JavaRunSupport.isCurrentFileType(configuration)) {
-            refreshRunButtonsForCurrentFile();
-            return;
-        }
-        if (configuration == null || !JavaRunTypes.isJavaType(configuration)) {
-            return;
-        }
-        String type = configuration.getType();
-        boolean valid = JavaRunValidation.validate(configuration,
-                JavaRunValidation.Context.of(descriptor)).isValid();
-        boolean runnable = valid && JavaRunTypes.supportsRun(type);
-        boolean debuggable = valid && JavaRunTypes.supportsDebug(type);
-        SwingUtilities.invokeLater(() -> {
-            requestSetRunButtonEnabled(runnable);
-            requestSetDebugButtonEnabled(debuggable);
-        });
+        runLauncher.onRunConfigurationChanged(configuration);
     }
 
     @Override
     public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context) {
-        if (configuration != null && JavaRunTypes.REMOTE.equals(configuration.getType())) {
-            return ensureRunSupport().failure(text("error.remoteIsDebugOnly",
-                    "Remote JVM so pode ser iniciado pelo botao Debug."));
-        }
-        RunConfigurationData resolved = resolveCurrentFileConfiguration(configuration).orElse(null);
-        if (resolved == null) {
-            return ensureRunSupport().failure(text("error.currentFileMain",
-                    "O arquivo atual nao possui um metodo main Java valido."));
-        }
-        RunProcessHandle handle = launchWithBuildProgress(resolved,
-                cancelled -> ensureRunSupport().launch(resolved, context, 0, cancelled));
-        trackRunningProcess(configuration, handle);
-        return handle;
+        return runLauncher.launch(configuration, context);
     }
 
     @Override
     public RunProcessHandle launchCoverage(RunConfigurationData configuration,
                                            RunExecutionContext context) {
-        RunConfigurationData resolved = resolveCurrentFileConfiguration(configuration).orElse(null);
-        if (resolved == null) {
-            return ensureRunSupport().failure(text("error.currentFileMain",
-                    "O arquivo atual nao possui um metodo main Java valido."));
-        }
-        String coverageArgument = coverageArgumentFor(resolved);
-        if (coverageArgument == null) {
-            return ensureRunSupport().failure(text("coverage.unsupportedRunType",
-                    "Java: cobertura no Run so vale para Aplicacao, Spring Boot e JAR"));
-        }
-        RunProcessHandle handle = launchWithBuildProgress(resolved,
-                cancelled -> ensureRunSupport().launchWithCoverage(resolved, context,
-                        coverageArgument, cancelled));
-        trackRunningProcess(configuration, handle);
-        coverageSupport.awaitRun(handle, CoverageAgent.execFileFor(descriptor.root()), descriptor);
-        return handle;
-    }
-
-    private String coverageArgumentFor(RunConfigurationData configuration) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null || configuration == null) {
-            return null;
-        }
-        if (!JavaRunTypes.LOCAL_JVM.contains(configuration.getType())) {
-            return null;
-        }
-        CoverageProvisioner provisioner = coverageSupport.provisioner();
-        Path agent = provisioner == null ? null : provisioner.ensureAgent().orElse(null);
-        Path execFile = CoverageAgent.execFileFor(current.root());
-        if (agent == null || execFile == null) {
-            setStatusBarText(text("coverage.agentMissing",
-                    "Java: nao foi possivel preparar o agente de cobertura"));
-            return null;
-        }
-        try {
-            Files.createDirectories(execFile.getParent());
-            Files.deleteIfExists(execFile);
-        } catch (Exception error) {
-            setStatusBarText(text("coverage.agentMissing",
-                    "Java: nao foi possivel preparar o agente de cobertura"));
-            return null;
-        }
-        return CoverageAgent.agentArgument(agent, execFile, false);
+        return runLauncher.launchCoverage(configuration, context);
     }
 
     @Override
     public RunProcessHandle launchDebug(RunConfigurationData configuration,
                                         RunExecutionContext context) {
-        if (configuration != null && JavaRunTypes.REMOTE.equals(configuration.getType())) {
-            return launchRemoteDebug(configuration, context);
-        }
-        if (configuration != null && JavaRunTypes.BUILD_TOOL.contains(configuration.getType())
-                && !JavaRunTypes.TEST.equals(configuration.getType())) {
-            return launchBuildToolDebug(configuration, context);
-        }
-        RunConfigurationData resolved = resolveCurrentFileConfiguration(configuration).orElse(null);
-        if (resolved == null) {
-            return ensureRunSupport().failure(text("error.currentFileMain",
-                    "O arquivo atual nao possui um metodo main Java valido."));
-        }
-        RunExecutionContext debugContext = context == null
-                ? RunExecutionContext.builder().projectPath(projectRoot).debug(true).build()
-                : context;
-        debugContext.setDebug(true);
-        if (debugContext.getBreakpoints() == null || debugContext.getBreakpoints().isEmpty()) {
-            debugContext.setBreakpoints(requestWorkspaceBreakpoints());
-        }
-        debugSupport.warmUpDebugAdapter();
-        int jdwpPort = DebugPorts.allocate();
-        JavaModule targetModule = resolveDebugModule(resolved);
-        RunProcessHandle handle = launchWithBuildProgress(resolved,
-                cancelled -> ensureRunSupport().launch(resolved, debugContext, jdwpPort, cancelled));
-        if (handle.isAlive()) {
-            trackRunningProcess(configuration, handle);
-            debugSupport.startDebugSession(jdwpPort, debugContext, handle::terminate, targetModule, handle);
-            requestSetRunButtonRunning(true);
-        }
-        return handle;
-    }
-
-    private RunProcessHandle launchRemoteDebug(RunConfigurationData configuration,
-                                               RunExecutionContext context) {
-        JavaRunValidation.Report report = JavaRunValidation.validate(configuration,
-                JavaRunValidation.Context.of(descriptor));
-        if (!report.isValid()) {
-            return ensureRunSupport().failure(report.firstMessage());
-        }
-        Optional<String> chainFailure = ensureRunSupport().runBeforeLaunchChain(configuration);
-        if (chainFailure.isPresent()) {
-            return ensureRunSupport().failure(chainFailure.get());
-        }
-        RemoteDebugSettings settings = RemoteDebugSettings.from(configuration);
-        RunExecutionContext debugContext = debugContextOf(context);
-        JavaModule targetModule = resolveDebugModule(configuration);
-
-        if (!settings.listen()) {
-            debugSupport.startDebugSession(settings.attachTarget(), debugContext, null, targetModule, null);
-            return ProcessLauncher.message(text("remote.attaching", "Conectando a")
-                    + " " + settings.host() + ":" + settings.port());
-        }
-
-        JdwpRelay relay;
-        try {
-            relay = JdwpRelay.open(settings.host(), settings.port());
-        } catch (IOException error) {
-            return ensureRunSupport().failure(text("error.remoteBind",
-                    "Nao foi possivel escutar em") + " " + settings.host() + ":"
-                    + settings.port() + " - " + rootMessage(error));
-        }
-        debugRelay = relay;
-        background.submit(() -> {
-            try {
-                relay.awaitTarget(settings.timeoutMillis());
-                debugSupport.startDebugSession(settings.relayTarget(relay.adapterPort()), debugContext,
-                        null, targetModule, null);
-            } catch (SocketTimeoutException timeout) {
-                closeDebugRelay();
-                setStatusBarText(text("error.remoteTimeout",
-                        "Java Debug: nenhuma JVM conectou dentro do tempo limite."));
-            } catch (IOException error) {
-                closeDebugRelay();
-                setStatusBarText("Java Debug: " + rootMessage(error));
-            }
-        });
-        return ProcessLauncher.message(text("remote.listening", "Aguardando a JVM conectar em")
-                + " " + settings.host() + ":" + settings.port());
-    }
-
-    private RunProcessHandle launchBuildToolDebug(RunConfigurationData configuration,
-                                                  RunExecutionContext context) {
-        debugSupport.warmUpDebugAdapter();
-        JavaModule targetModule = resolveDebugModule(configuration);
-        AtomicReference<RunProcessHandle> launched = new AtomicReference<>();
-        BuildToolDebugListener listener;
-        try {
-            listener = openBuildDebugListener(targetModule, () -> {
-                RunProcessHandle running = launched.get();
-                if (running != null) {
-                    running.terminate();
-                }
-            });
-        } catch (IOException error) {
-            return ensureRunSupport().failure(text("error.buildDebugListen",
-                    "Nao foi possivel abrir a porta de debug:") + " " + rootMessage(error));
-        }
-        RunProcessHandle handle = launchWithBuildProgress(configuration,
-                cancelled -> ensureRunSupport().launch(configuration, context,
-                        listener.listenPort(), cancelled));
-        if (!handle.isAlive()) {
-            listener.close();
-            return handle;
-        }
-        launched.set(handle);
-        trackRunningProcess(configuration, handle);
-        requestSetRunButtonRunning(true);
-        background.submit(() -> {
-            try {
-                while (handle.isAlive() && !listener.isClosed()) {
-                    Thread.sleep(200);
-                }
-            } catch (InterruptedException error) {
-                Thread.currentThread().interrupt();
-            } finally {
-                listener.close();
-            }
-        });
-        return handle;
-    }
-
-    private BuildToolDebugListener openBuildDebugListener(JavaModule targetModule,
-                                                          Runnable cancelProcess) throws IOException {
-        return openBuildDebugListener(targetModule, cancelProcess, () -> {
-        });
-    }
-
-    private BuildToolDebugListener openBuildDebugListener(JavaModule targetModule,
-                                                          Runnable cancelProcess,
-                                                          Runnable onAttach) throws IOException {
-        return BuildToolDebugListener.open((target, detached) -> {
-                    onAttach.run();
-                    debugSupport.startDebugSession(target, debugContextOf(null),
-                            () -> detached.accept(!debugSupport.naturalDebugEnd().getAndSet(false)),
-                            targetModule, null);
-                },
-                cancelProcess, background);
+        return runLauncher.launchDebug(configuration, context);
     }
 
     private Path pluginRepository() {
@@ -4843,178 +4627,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         pluginRepositoryRoot = root;
         pluginRepositoryPath = resolved;
         return resolved;
-    }
-
-    private RunExecutionContext debugContextOf(RunExecutionContext context) {
-        RunExecutionContext debugContext = context == null
-                ? RunExecutionContext.builder().projectPath(projectRoot).debug(true).build()
-                : context;
-        debugContext.setDebug(true);
-        if (debugContext.getBreakpoints() == null || debugContext.getBreakpoints().isEmpty()) {
-            debugContext.setBreakpoints(requestWorkspaceBreakpoints());
-        }
-        return debugContext;
-    }
-
-    private boolean supportsHotReloadForSelection() {
-        RunConfigurationData selected = selectedRunConfig;
-        String type = selected == null ? null : selected.getType();
-        return type == null || JavaRunTypes.supportsHotReload(type);
-    }
-
-    private void closeDebugRelay() {
-        JdwpRelay relay = debugRelay;
-        debugRelay = null;
-        if (relay != null) {
-            relay.close();
-        }
-    }
-
-    private void trackRunningProcess(RunConfigurationData configuration,
-                                     RunProcessHandle handle) {
-        if (handle == null || !handle.isAlive()) {
-            return;
-        }
-        RunConfigurationKey key = RunConfigurationKey.of(configuration);
-        runningProcesses.put(key, handle);
-        background.submit(() -> {
-            try {
-                while (handle.isAlive()) {
-                    Thread.sleep(100);
-                }
-            } catch (InterruptedException error) {
-                Thread.currentThread().interrupt();
-            } finally {
-                runningProcesses.remove(key, handle);
-                requestSetRunButtonRunning(hasRunningProcess());
-            }
-        });
-    }
-
-    private RunProcessHandle runningProcess(RunConfigurationData configuration) {
-        RunConfigurationKey key = RunConfigurationKey.of(configuration);
-        RunProcessHandle handle = runningProcesses.get(key);
-        if (handle != null && !handle.isAlive()) {
-            runningProcesses.remove(key, handle);
-            return null;
-        }
-        return handle;
-    }
-
-    private boolean hasRunningProcess() {
-        return runningProcesses.values().stream().anyMatch(RunProcessHandle::isAlive);
-    }
-
-    private record RunConfigurationKey(String type, String title, Map<String, Object> properties) {
-
-        private static RunConfigurationKey of(RunConfigurationData configuration) {
-            if (configuration == null) {
-                return new RunConfigurationKey("", "", Map.of());
-            }
-            Map<String, Object> properties = configuration.getProperties() == null
-                    ? Map.of() : new LinkedHashMap<>(configuration.getProperties());
-            return new RunConfigurationKey(
-                    Objects.toString(configuration.getType(), ""),
-                    Objects.toString(configuration.getTitle(), ""), properties);
-        }
-    }
-
-    private void scheduleRunButtonsRefresh() {
-        long ticket = runButtonsTicket.incrementAndGet();
-        background.schedule(() -> {
-            if (runButtonsTicket.get() == ticket) {
-                refreshRunButtonsForCurrentFile();
-            }
-        }, RUN_BUTTONS_REFRESH_DELAY_MS, TimeUnit.MILLISECONDS);
-    }
-
-    private void refreshRunButtonsForCurrentFile() {
-        refreshCoverageButton();
-        if (!JavaRunSupport.isCurrentFileType(selectedRunConfig)) {
-            return;
-        }
-        boolean runnable = currentMainClass().isPresent();
-        SwingUtilities.invokeLater(() -> {
-            requestSetRunButtonEnabled(runnable);
-            requestSetDebugButtonEnabled(runnable);
-        });
-    }
-
-    private void refreshCoverageButton() {
-        boolean available = coverageSupport.supportedForProject() && coverageRunnableConfiguration();
-        SwingUtilities.invokeLater(() -> {
-            requestSetCoverageButtonVisible(available);
-            requestSetCoverageButtonEnabled(available);
-        });
-    }
-
-    private boolean coverageRunnableConfiguration() {
-        RunConfigurationData configuration = selectedRunConfig;
-        if (JavaRunSupport.isCurrentFileType(configuration)) {
-            return currentMainClass().isPresent();
-        }
-        return configuration != null && JavaRunTypes.LOCAL_JVM.contains(configuration.getType());
-    }
-
-    private Optional<RunConfigurationData> resolveCurrentFileConfiguration(
-            RunConfigurationData configuration) {
-        if (!JavaRunSupport.isCurrentFileType(configuration)) {
-            return Optional.ofNullable(configuration);
-        }
-        return currentMainClass().map(mainClass -> {
-            Map<String, Object> properties = new LinkedHashMap<>();
-            if (configuration.getProperties() != null) {
-                properties.putAll(configuration.getProperties());
-            }
-            properties.put(JavaRunSupport.PROPERTY_MAIN_CLASS, mainClass.qualifiedName());
-            properties.put(JavaRunSupport.PROPERTY_MODULE, mainClass.module().name());
-            if (mainClass.test()) {
-                properties.put(JavaRunSupport.PROPERTY_TEST_CLASSPATH, Boolean.TRUE.toString());
-            }
-            return RunConfigurationData.builder()
-                    .type(mainClass.springBoot() ? JavaRunSupport.TYPE_SPRING_BOOT
-                            : JavaRunSupport.TYPE_RUN)
-                    .title(mainClass.simpleName())
-                    .properties(properties)
-                    .build();
-        });
-    }
-
-    private Optional<MainClassScanner.MainClass> currentMainClass() {
-        IdeEditorContext editor = activeJavaEditor;
-        JavaProjectDescriptor current = descriptor;
-        if (editor == null || current == null || editor.filePath() == null) {
-            return Optional.empty();
-        }
-        Path file = JavaProjectConventions.normalize(editor.filePath());
-        JavaModule module = moduleContaining(current, file, false);
-        boolean test = false;
-        if (module == null) {
-            module = moduleContaining(current, file, true);
-            test = module != null;
-        }
-        if (module == null) {
-            return Optional.empty();
-        }
-        String source = Objects.toString(editor.getText(), "");
-        MainClassMemo memo = mainClassMemo;
-        if (memo != null && memo.matches(file, module, test, source)) {
-            return memo.result();
-        }
-        Optional<MainClassScanner.MainClass> result = MainClassScanner.hasValidMain(source)
-                ? MainClassScanner.inspect(file, source, module, test)
-                : Optional.empty();
-        mainClassMemo = new MainClassMemo(file, module, test, source, result);
-        return result;
-    }
-
-    private record MainClassMemo(Path file, JavaModule module, boolean test, String source,
-                                 Optional<MainClassScanner.MainClass> result) {
-
-        boolean matches(Path otherFile, JavaModule otherModule, boolean otherTest, String otherSource) {
-            return test == otherTest && file.equals(otherFile) && Objects.equals(module, otherModule)
-                    && (source == otherSource || source.equals(otherSource));
-        }
     }
 
     static JavaModule mostSpecificModule(Collection<JavaModule> modules, Path file) {
@@ -5048,25 +4660,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void stop(RunConfigurationData configuration) {
-        RunProcessHandle process = runningProcess(configuration);
-        boolean cancelledPreparation = process == null && cancelPendingLaunch(configuration);
-        Runnable pendingTest = process == null ? pendingTestDebug.getAndSet(null) : null;
-        if (pendingTest != null) {
-            pendingTest.run();
-        }
-        if (process != null && process == debugSupport.processHandle()
-                && (debugSupport.session() != null || debugActive.get())) {
-            debugSupport.closeDebugSession();
-        } else {
-            if (process == null && (debugSupport.session() != null || debugActive.get())) {
-                debugSupport.closeDebugSession();
-            } else if (process != null) {
-                process.terminate();
-            }
-        }
-        if (!cancelledPreparation) {
-            requestSetRunButtonRunning(hasRunningProcess());
-        }
+        runLauncher.stop(configuration);
     }
 
     @Override
@@ -5114,97 +4708,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         conditionalBreakpoints.configureConditionalBreakpointDialog(dialogView);
     }
 
-    private synchronized JavaRunSupport ensureRunSupport() {
-        JavaRunSupport existing = runSupport;
-        if (existing != null) {
-            return existing;
-        }
-        JavaRunSupport created = new JavaRunSupport(
-                () -> descriptor,
-                this::getProjectJdk,
-                this::ensureBuildSystem,
-                line -> {
-                    BuildProgressTracker progress = runBuildProgress.get();
-                    if (progress != null) {
-                        progress.accept(line);
-                    }
-                })
-                .withChainHost(this::chainHost)
-                .withIncrementalBuild(() -> settings().isIncrementalBuild())
-                .withModuleProgress((module, index, total) -> {
-                    BuildProgressTracker progress = runBuildProgress.get();
-                    if (progress != null) {
-                        progress.moduleStarted(module, index, total);
-                    }
-                })
-                .withBuildResultListener(result -> publishBuildDiagnostics(result, true));
-        runSupport = created;
-        return created;
-    }
-
-    private RunProcessHandle launchWithBuildProgress(RunConfigurationData configuration,
-                                                     Function<BooleanSupplier, RunProcessHandle> launcher) {
-        if (unloaded) {
-            return ProcessLauncher.message("Plugin Java descarregado.");
-        }
-        RunConfigurationKey key = RunConfigurationKey.of(configuration);
-        AtomicBoolean cancelled = new AtomicBoolean();
-        pendingLaunches.put(key, cancelled);
-        try {
-            return launchWithBuildProgress(configuration, () -> launcher.apply(cancelled::get));
-        } finally {
-            pendingLaunches.remove(key, cancelled);
-        }
-    }
-
-    private boolean cancelPendingLaunch(RunConfigurationData configuration) {
-        if (pendingLaunches.isEmpty()) {
-            return false;
-        }
-        AtomicBoolean matching = configuration == null ? null
-                : pendingLaunches.get(RunConfigurationKey.of(configuration));
-        if (matching != null) {
-            matching.set(true);
-        } else {
-            pendingLaunches.values().forEach(flag -> flag.set(true));
-        }
-        ensureRunSupport().cancelPreparation();
-        return true;
-    }
-
-    private RunProcessHandle launchWithBuildProgress(RunConfigurationData configuration,
-                                                     Supplier<RunProcessHandle> launcher) {
-        Optional<BuildSystem.BuildAction> action =
-                JavaRunSupport.buildBeforeRunAction(configuration);
-        if (action.isEmpty()) {
-            return unloaded ? ProcessLauncher.message("Plugin Java descarregado.") : launcher.get();
-        }
-        JavaModule module = resolveDebugModule(configuration);
-        BuildProgressTracker progress = new BuildProgressTracker(
-                buildProgressAction(action.get()), descriptor, module,
-                update -> updateProgress(RUN_BUILD_PROGRESS_ID,
-                        update.label(), update.percent()));
-        if (!runBuildProgress.compareAndSet(null, progress)) {
-            return unloaded ? ProcessLauncher.message("Plugin Java descarregado.") : launcher.get();
-        }
-        BuildProgressTracker.Update initial = progress.initial();
-        showProgress(RUN_BUILD_PROGRESS_ID, initial.label());
-        if (initial.percent() >= 0) {
-            updateProgress(RUN_BUILD_PROGRESS_ID, initial.label(), initial.percent());
-        }
-        boolean slot = false;
-        try {
-            slot = awaitBuildSlot();
-            return unloaded ? ProcessLauncher.message("Plugin Java descarregado.") : launcher.get();
-        } finally {
-            if (slot) {
-                buildRunning.set(false);
-            }
-            runBuildProgress.compareAndSet(progress, null);
-            hideProgress(RUN_BUILD_PROGRESS_ID);
-        }
-    }
-
     private JavaTestRunner newTestRunner(JavaProjectDescriptor current, BuildSystem build) {
         JdkService jdks = jdkService;
         JavaTestRunner runner = new JavaTestRunner(current, build, this::getProjectJdk,
@@ -5214,55 +4717,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                         : null);
         activeTestRunner.set(runner);
         return runner;
-    }
-
-    private boolean awaitBuildSlot() {
-        if (buildRunning.compareAndSet(false, true)) {
-            return true;
-        }
-        updateProgress(RUN_BUILD_PROGRESS_ID, text("progress.waitingBuild",
-                "Aguardando o build em andamento"), -1);
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(BUILD_SLOT_WAIT_MS);
-        while (System.nanoTime() < deadline) {
-            if (buildRunning.compareAndSet(false, true)) {
-                return true;
-            }
-            try {
-                Thread.sleep(BUILD_SLOT_POLL_MS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-        log.info("Build anterior nao terminou em {} ms; seguindo com o Run", BUILD_SLOT_WAIT_MS);
-        return false;
-    }
-
-    private RunChainHost chainHost() {
-        return new RunChainHost() {
-
-            @Override
-            public List<RunConfigurationData> configurations() {
-                return requestRunConfigurations();
-            }
-
-            @Override
-            public RunProcessHandle execute(String configurationId, boolean debug) {
-                return requestRunConfigurationExecution(configurationId, debug);
-            }
-        };
-    }
-
-    private JavaModule resolveDebugModule(RunConfigurationData configuration) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null) {
-            return null;
-        }
-        Object configured = configuration == null || configuration.getProperties() == null
-                ? null : configuration.getProperties().get(JavaRunSupport.PROPERTY_MODULE);
-        String name = configured == null ? "" : configured.toString().trim();
-        return current.modules().stream().filter(module -> module.name().equals(name))
-                .findFirst().orElse(current.rootModule());
     }
 
     public void openTestExplorer() {

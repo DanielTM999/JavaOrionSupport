@@ -4,6 +4,7 @@ import dtm.ide.BuildProblemsCoordinator;
 import dtm.ide.JavaEditorRegistry;
 import dtm.ide.api.extension.PlatformPopupBuilder;
 import dtm.ide.api.extension.Resource;
+import dtm.ide.api.extension.runconfig.RunBreakpointData;
 import dtm.ide.api.extension.editor.EmbeddedCodeEditorSettings;
 import dtm.ide.api.extension.output.OutputPanelHandle;
 import dtm.ide.api.extension.output.OutputPanelOptions;
@@ -178,4 +179,14 @@ public interface AdapterHost extends AdapterContext {
     boolean supportsHotReloadForSelection();
     void requestRepaintCodeEditor(Path file);
     void requestRepaintCodeEditorBreakpointLine(Path file);
+    DebugSupport debug();
+    AtomicBoolean buildRunning();
+    boolean isUnloaded();
+    String buildProgressAction(BuildSystem.BuildAction action);
+    void updateProgress(String id, String message, int percent);
+    List<RunBreakpointData> requestWorkspaceBreakpoints();
+    void requestSetRunButtonEnabled(boolean enabled);
+    void requestSetDebugButtonEnabled(boolean enabled);
+    void requestSetCoverageButtonVisible(boolean visible);
+    void requestSetCoverageButtonEnabled(boolean enabled);
 }
