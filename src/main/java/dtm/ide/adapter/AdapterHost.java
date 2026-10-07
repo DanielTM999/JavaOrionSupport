@@ -7,13 +7,16 @@ import dtm.ide.api.extension.runconfig.RunConfigurationData;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.build.MavenPluginGoals;
+import dtm.ide.coverage.CoverageProvisioner;
 import dtm.ide.debug.BuildToolDebugListener;
+import dtm.ide.lsp.api.JavaLanguageServer;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.sdk.DownloadProgressListener;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
 import dtm.ide.settings.JavaPluginSettings;
+import dtm.ide.test.JavaTestRunner;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaTodoPanel;
 
@@ -21,8 +24,10 @@ import javax.swing.Icon;
 import javax.swing.JComponent;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 public interface AdapterHost extends AdapterContext {
@@ -66,4 +71,22 @@ public interface AdapterHost extends AdapterContext {
     void writeOutput(OutputPanelHandle panel, String line);
     void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure);
     JavaBuildToolsPanel buildToolsPanel();
+    JavaLanguageServer languageServer();
+    void requestShowRunOutput();
+    JavaTestRunner newTestRunner(JavaProjectDescriptor current, BuildSystem build);
+    void publishTestDiagnostics(BuildResult result);
+    void clearCoverage();
+    CoverageProvisioner coverageProvisioner();
+    void readCoverage(Path execFile, JavaProjectDescriptor current);
+    AtomicReference<Runnable> pendingTestDebug();
+    JavaTestRunner activeTestRunner();
+    JavaModule mostSpecificModule(Collection<JavaModule> modules, Path file);
+    BuildToolDebugListener openBuildDebugListener(JavaModule module, Runnable cancelProcess, Runnable onAttach)
+            throws IOException;
+    void showProgress(String id, String message, boolean cancellable, Runnable onCancel);
+    void hideProgress(String id);
+    void requestSetRunButtonLoading(boolean loading);
+    void requestSetRunButtonRunning(boolean running);
+    void warmUpDebugAdapter();
+    boolean hasRunningProcess();
 }

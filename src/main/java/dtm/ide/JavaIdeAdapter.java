@@ -58,6 +58,7 @@ import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.ProjectStructureSupport;
 import dtm.ide.adapter.SpringSupport;
+import dtm.ide.adapter.TestExplorerSupport;
 import dtm.ide.adapter.TodoPanelHost;
 import dtm.ide.api.project.editor.IdeInlayHintContext;
 import dtm.ide.api.project.editor.IdeRenameContext;
@@ -411,7 +412,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             "volatile", "while", "true", "false", "null", "_");
     private static final String BUILD_PROGRESS_ID = "javaBuild";
     private static final String RUN_BUILD_PROGRESS_ID = "javaRunBuild";
-    private static final String TEST_DEBUG_PROGRESS_ID = "javaTestDebugBuild";
     private static final long LSP_DEBUG_POLL_MS = 250;
     private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
     private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
@@ -692,6 +692,92 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public JavaBuildToolsPanel buildToolsPanel() {
             return buildToolsPanel;
+        }
+
+        @Override
+        public JavaLanguageServer languageServer() {
+            return jdtLs;
+        }
+
+        @Override
+        public void requestShowRunOutput() {
+            JavaIdeAdapter.this.requestShowRunOutput();
+        }
+
+        @Override
+        public JavaTestRunner newTestRunner(JavaProjectDescriptor current, BuildSystem build) {
+            return JavaIdeAdapter.this.newTestRunner(current, build);
+        }
+
+        @Override
+        public void publishTestDiagnostics(BuildResult result) {
+            JavaIdeAdapter.this.publishTestDiagnostics(result);
+        }
+
+        @Override
+        public void clearCoverage() {
+            JavaIdeAdapter.this.clearCoverage();
+        }
+
+        @Override
+        public CoverageProvisioner coverageProvisioner() {
+            return JavaIdeAdapter.this.coverageProvisioner();
+        }
+
+        @Override
+        public void readCoverage(Path execFile, JavaProjectDescriptor current) {
+            JavaIdeAdapter.this.readCoverage(execFile, current);
+        }
+
+        @Override
+        public AtomicReference<Runnable> pendingTestDebug() {
+            return pendingTestDebug;
+        }
+
+        @Override
+        public JavaTestRunner activeTestRunner() {
+            return activeTestRunner.get();
+        }
+
+        @Override
+        public JavaModule mostSpecificModule(Collection<JavaModule> modules, Path file) {
+            return JavaIdeAdapter.mostSpecificModule(modules, file);
+        }
+
+        @Override
+        public BuildToolDebugListener openBuildDebugListener(JavaModule module, Runnable cancelProcess,
+                                                             Runnable onAttach) throws IOException {
+            return JavaIdeAdapter.this.openBuildDebugListener(module, cancelProcess, onAttach);
+        }
+
+        @Override
+        public void showProgress(String id, String message, boolean cancellable, Runnable onCancel) {
+            JavaIdeAdapter.this.showProgress(id, message, cancellable, onCancel);
+        }
+
+        @Override
+        public void hideProgress(String id) {
+            JavaIdeAdapter.this.hideProgress(id);
+        }
+
+        @Override
+        public void requestSetRunButtonLoading(boolean loading) {
+            JavaIdeAdapter.this.requestSetRunButtonLoading(loading);
+        }
+
+        @Override
+        public void requestSetRunButtonRunning(boolean running) {
+            JavaIdeAdapter.this.requestSetRunButtonRunning(running);
+        }
+
+        @Override
+        public void warmUpDebugAdapter() {
+            JavaIdeAdapter.this.warmUpDebugAdapter();
+        }
+
+        @Override
+        public boolean hasRunningProcess() {
+            return JavaIdeAdapter.this.hasRunningProcess();
         }
     }
 
@@ -8185,7 +8271,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void ensureTestPanel() {
         if (testPanel == null) {
-            JavaTestExplorerPanel panel = new JavaTestExplorerPanel(new TestExplorerHost(), background);
+            JavaTestExplorerPanel panel = new JavaTestExplorerPanel(new TestExplorerSupport(adapterHost), background);
             testPanel = panel;
             Icon icon = JavaIcons.test(JavaIcons.SMALL);
             testPanelId = icon == null
@@ -8375,206 +8461,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         ensureBuildToolsPanel();
         if (buildToolsPanelId != null) {
             requestOpenToolPanel(buildToolsPanelId);
-        }
-    }
-
-    private final class TestExplorerHost implements JavaTestExplorerPanel.Host {
-
-        @Override
-        public List<JavaTest> discover() {
-            return JUnitTestDiscovery.discover(descriptor);
-        }
-
-        @Override
-        public void discoverSemantic(List<JavaTest> provisional,
-                                     java.util.function.Consumer<List<JavaTest>> onFinished) {
-            JavaProjectDescriptor current = descriptor;
-            JavaLanguageServer lsp = jdtLs;
-            TestDiscoverySupport discovery = lsp == null ? null : lsp.extension(TestDiscoverySupport.class);
-            if (current == null || discovery == null || !discovery.isTestRunnerAvailable()) {
-                onFinished.accept(provisional);
-                return;
-            }
-            background.submit(() -> onFinished.accept(
-                    JavaSemanticTestDiscovery.enrich(current, discovery, provisional)));
-        }
-
-        @Override
-        public void run(List<JavaTest> tests,
-                        java.util.function.Consumer<JavaTestRunner.TestRun> onFinished) {
-            JavaProjectDescriptor current = descriptor;
-            BuildSystem build = ensureBuildSystem();
-            if (current == null || build == null) {
-                onFinished.accept(null);
-                return;
-            }
-            OutputPanelHandle panel = requestOutputPanel("Tests", OutputPanelOptions.interactive(null));
-            if (panel != null) {
-                panel.clear();
-                panel.show();
-            }
-            requestShowRunOutput();
-
-            background.submit(() -> {
-                JavaTestRunner runner = newTestRunner(current, build);
-                JavaTestRunner.TestRun run = runner.run(tests, current.rootModule(),
-                        line -> writeOutput(panel, line));
-                publishTestDiagnostics(JavaTestProblems.withTestFailures(run, tests));
-                setStatusBarText("Java: " + run.summary());
-                onFinished.accept(run);
-            });
-        }
-
-        @Override
-        public void clearCoverage() {
-            JavaIdeAdapter.this.clearCoverage();
-            Path root = projectRoot;
-            if (root != null) {
-                requestRefreshCodeLenses(root);
-            }
-        }
-
-        @Override
-        public boolean supportsCoverage() {
-            JavaProjectDescriptor current = descriptor;
-            return current != null && (current.isMaven() || current.isGradle());
-        }
-
-        @Override
-        public void runWithCoverage(List<JavaTest> tests,
-                                    java.util.function.Consumer<JavaTestRunner.TestRun> onFinished) {
-            JavaProjectDescriptor current = descriptor;
-            BuildSystem build = ensureBuildSystem();
-            CoverageProvisioner provisioner = coverageProvisioner();
-            if (current == null || build == null || provisioner == null) {
-                onFinished.accept(null);
-                return;
-            }
-            if (!current.isMaven() && !current.isGradle()) {
-                setStatusBarText(text("coverage.unsupportedProject",
-                        "Java: cobertura requer Maven ou Gradle"));
-                onFinished.accept(null);
-                return;
-            }
-            OutputPanelHandle panel = requestOutputPanel("Tests", OutputPanelOptions.interactive(null));
-            if (panel != null) {
-                panel.clear();
-                panel.show();
-            }
-            requestShowRunOutput();
-
-            background.submit(() -> {
-                Path agent = provisioner.ensureAgent().orElse(null);
-                if (agent == null) {
-                    setStatusBarText(text("coverage.agentMissing",
-                            "Java: nao foi possivel preparar o agente de cobertura"));
-                    onFinished.accept(null);
-                    return;
-                }
-                JavaTestRunner runner = newTestRunner(current, build);
-                JavaTestRunner.CoverageRun coverageRun = runner.runWithCoverage(
-                        tests, moduleOf(tests, current), agent, line -> writeOutput(panel, line));
-                JavaTestRunner.TestRun run = coverageRun.testRun();
-                publishTestDiagnostics(JavaTestProblems.withTestFailures(run, tests));
-                setStatusBarText("Java: " + run.summary());
-                onFinished.accept(run);
-                readCoverage(coverageRun.execFile(), current);
-            });
-        }
-
-        @Override
-        public void debug(List<JavaTest> tests,
-                          java.util.function.Consumer<JavaTestRunner.TestRun> onFinished) {
-            JavaProjectDescriptor current = descriptor;
-            BuildSystem build = ensureBuildSystem();
-            if (current == null || build == null) {
-                onFinished.accept(null);
-                return;
-            }
-            OutputPanelHandle panel = requestOutputPanel("Tests", OutputPanelOptions.interactive(null));
-            if (panel != null) {
-                panel.clear();
-                panel.show();
-            }
-            requestShowRunOutput();
-            Runnable previous = pendingTestDebug.getAndSet(null);
-            if (previous != null) {
-                previous.run();
-            }
-            JavaModule targetModule = moduleOf(tests, current);
-            JavaModule sourceModule = tests == null || tests.isEmpty() ? null
-                    : mostSpecificModule(current.modules(), tests.getFirst().file());
-            JavaTestRunner runner = newTestRunner(current, build);
-            BuildToolDebugListener listener;
-            try {
-                listener = openBuildDebugListener(
-                        sourceModule == null ? targetModule : sourceModule, runner::cancel,
-                        () -> hideProgress(TEST_DEBUG_PROGRESS_ID));
-            } catch (IOException error) {
-                String message = text("error.buildDebugListen",
-                        "Nao foi possivel abrir a porta de debug:") + " " + rootMessage(error);
-                writeOutput(panel, message);
-                setStatusBarText("Java Debug: " + message);
-                onFinished.accept(null);
-                return;
-            }
-            Runnable abort = () -> {
-                listener.close();
-                runner.cancel();
-            };
-            pendingTestDebug.set(abort);
-            showProgress(TEST_DEBUG_PROGRESS_ID, text("progress.testDebugBuild",
-                    "Compilando testes para depurar"), true, abort);
-            requestSetRunButtonLoading(true);
-            warmUpDebugAdapter();
-            background.submit(() -> {
-                try {
-                    JavaTestRunner.TestRun run = runner.debug(tests, targetModule,
-                            listener.listenPort(), line -> writeOutput(panel, line));
-                    if (runner.isCancelled()) {
-                        setStatusBarText(text("status.testDebugStopped",
-                                "Java: depuracao de teste interrompida"));
-                    } else {
-                        publishTestDiagnostics(JavaTestProblems.withTestFailures(run, tests));
-                        setStatusBarText("Java: " + run.summary());
-                    }
-                    onFinished.accept(run);
-                } finally {
-                    listener.close();
-                    pendingTestDebug.compareAndSet(abort, null);
-                    hideProgress(TEST_DEBUG_PROGRESS_ID);
-                    requestSetRunButtonRunning(hasRunningProcess() || debugActive.get());
-                }
-            });
-        }
-
-        private JavaModule moduleOf(List<JavaTest> tests, JavaProjectDescriptor current) {
-            if (tests == null || tests.isEmpty()) {
-                return current.rootModule();
-            }
-            return current.modules().stream()
-                    .filter(module -> module.contains(tests.getFirst().file()))
-                    .findFirst().orElse(current.rootModule());
-        }
-
-        @Override
-        public void cancel() {
-            JavaTestRunner running = activeTestRunner.get();
-            if (running != null) {
-                running.cancel();
-            }
-            BuildSystem build = buildSystem;
-            if (build != null) {
-                build.cancel();
-            }
-        }
-
-        @Override
-        public void openFile(Path file, int line) {
-            if (file == null) {
-                return;
-            }
-            openAt(file, Math.max(0, line - 1), 0);
         }
     }
 
