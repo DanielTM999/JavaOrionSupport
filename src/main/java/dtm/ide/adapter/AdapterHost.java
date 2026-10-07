@@ -16,6 +16,7 @@ import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.editor.JavaFastCompletionProvider;
 import dtm.ide.index.JavaLexicalIndex;
 import dtm.ide.lsp.api.JavaLanguageServer;
+import dtm.ide.navigation.JavaNavigation.Kind;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.sdk.DownloadProgressListener;
@@ -26,7 +27,11 @@ import dtm.ide.test.JavaTestRunner;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaTodoPanel;
+import dtm.stools.component.panels.editor.code.api.Location;
+import dtm.stools.component.popup.ModernComponentDialog;
+import dtm.stools.component.popup.ModernDialog;
 
+import java.awt.Point;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collection;
@@ -116,4 +121,10 @@ public interface AdapterHost extends AdapterContext {
     JavaLanguageServer runningServerFor(Path file);
     void showProgress(String id, String message);
     void updateProgress(String id, String message, int percent, boolean cancellable, Runnable onCancel);
+    <T> ModernComponentDialog.ModernComponentDialogBuilder<T> createModernComponentDialogBuilder();
+    ModernDialog.ModernDialogBuilder createModernDialogBuilder();
+    void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
+                         IdeEditorContext context, Point screen, Kind kind);
+    IdeEditorContext editorContextFor(Path file);
+    IdeEditorContext getEditor(Path file);
 }
