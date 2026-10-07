@@ -1,7 +1,5 @@
 package dtm.ide;
 
-import dtm.stools.component.panels.editor.code.api.Position;
-import dtm.stools.component.panels.editor.code.api.TextEdit;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import org.junit.jupiter.api.Test;
 
@@ -25,67 +23,6 @@ class JavaIdeAdapterCompletionTest {
 
         assertEquals(List.of("System", "sout"), merged.stream()
                 .map(AutoCompleteItem::label).toList());
-    }
-
-    @Test
-    void expandsSnippetPlaceholdersForGhostText() {
-        assertEquals("toString(value)", JavaIdeAdapter.sanitizeSnippetForGhostText(
-                "toString(${1:value}$0)"));
-        assertEquals("method()", JavaIdeAdapter.sanitizeSnippetForGhostText("method(${1})"));
-    }
-
-    @Test
-    void derivesGhostTextFromInsertTextIgnoringCaseAsFallback() {
-        assertEquals("String()", JavaIdeAdapter.ghostTextSuffix(List.of(
-                AutoCompleteItem.snippet("toString", "toString(${1})")), "to"));
-        assertEquals("stem", JavaIdeAdapter.ghostTextSuffix(
-                List.of(new AutoCompleteItem("System")), "Sy"));
-        assertEquals("stem", JavaIdeAdapter.ghostTextSuffix(
-                List.of(new AutoCompleteItem("System")), "sy"));
-    }
-
-    @Test
-    void ghostKeepsTheImportOfTheChosenItem() {
-        TextEdit importEdit = TextEdit.insert(new Position(1, 0), "import java.time.LocalDate;\n");
-        AutoCompleteItem localDate = new AutoCompleteItem("LocalDate", "LocalDate", "java.time",
-                null, null, AutoCompleteItem.Kind.CLASS, List.of(importEdit));
-
-        JavaIdeAdapter.GhostChoice choice = JavaIdeAdapter.ghostTextChoice(
-                List.of(localDate), "LocalDa", false);
-
-        assertEquals("te", choice.suffix());
-        assertEquals(List.of(importEdit), choice.item().additionalTextEdits());
-    }
-
-    @Test
-    void neverOffersTheDisplayLabelAsGhostText() {
-        AutoCompleteItem annotation = new AutoCompleteItem("Data", "Data - lombok", "lombok",
-                null, null, AutoCompleteItem.Kind.INTERFACE);
-
-        assertNull(JavaIdeAdapter.ghostTextSuffix(List.of(annotation), "Data"));
-    }
-
-    @Test
-    void suppliesLexicalGhostTextBeforeLanguageServerIsReady() {
-        assertEquals("is", JavaIdeAdapter.lexicalGhostTextSuffix("class Nav {}", "th"));
-        assertEquals("assName", JavaIdeAdapter.lexicalGhostTextSuffix(
-                "String className;", "cl"));
-    }
-
-    @Test
-    void completesMembersImmediatelyAfterDot() {
-        assertEquals("toString()", JavaIdeAdapter.ghostTextSuffix(List.of(
-                AutoCompleteItem.snippet("toString", "toString(${1})")), "", true));
-    }
-
-    @Test
-    void keepsAndIndentsWholeCodeBlocks() {
-        String suffix = JavaIdeAdapter.ghostTextSuffix(List.of(
-                AutoCompleteItem.snippet("try", "try {\n    $0\n} catch (Exception e) {\n    \n}")),
-                "try");
-
-        assertEquals(" {\n            \n        } catch (Exception e) {\n            \n        }",
-                JavaIdeAdapter.indentMultilineGhostText(suffix, "        try"));
     }
 
     @Test

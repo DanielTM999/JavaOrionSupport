@@ -51,6 +51,7 @@ import dtm.ide.api.project.editor.IdeDocumentHighlightContext;
 import dtm.ide.api.project.editor.IdeDocumentSymbolContext;
 import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
+import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.api.project.editor.IdeInlayHintContext;
 import dtm.ide.api.project.editor.IdeRenameContext;
 import dtm.ide.api.project.editor.IdeRenamePolicy;
@@ -429,20 +430,33 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long SYNC_WORK_MAX_MS = 120_000;
     private static final String DEPENDENCIES_TAB_ID = "javaDependencies";
     private static final Color DEBUG_LINE_COLOR = new Color(227, 100, 100, 80);
-    private static final Pattern SNIPPET_DEFAULT = Pattern.compile("\\$\\{\\d+:([^}]*)}");
-    private static final Pattern SNIPPET_PLACEHOLDER = Pattern.compile("\\$\\{?\\d+}?");
-    private static final List<String> JAVA_GHOST_KEYWORDS = List.of(
-            "this", "throw", "throws", "true", "try", "return", "public", "private",
-            "protected", "static", "final", "class", "interface", "record", "extends",
-            "implements", "new", "null", "super", "switch", "synchronized", "instanceof",
-            "import", "package", "void", "boolean");
-
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
     private final MavenCentralClient mavenCentral = new MavenCentralClient();
     private final SpringBeanIndex springIndex = new SpringBeanIndex();
     private final SpringActuatorClient actuator = new SpringActuatorClient();
     private final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
     private final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
+    private final GhostTextSupport ghostTextSupport = new GhostTextSupport(new GhostTextSupport.Host() {
+        @Override
+        public boolean debugActive() {
+            return debugActive.get();
+        }
+
+        @Override
+        public JavaLanguageServer interactiveServerFor(Path file) {
+            return JavaIdeAdapter.this.interactiveServerFor(file);
+        }
+
+        @Override
+        public JavaProjectDescriptor descriptor() {
+            return descriptor;
+        }
+
+        @Override
+        public JavaSnippetCompletionProvider snippets() {
+            return snippets;
+        }
+    });
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
             new JavaFastCompletionProvider(lexicalIndex);
@@ -1854,19 +1868,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                 + "|" + item.kind();
     }
 
-    private static boolean blockedByFollowingText(String line, int caretCol) {
-        if (line == null || caretCol < 0 || caretCol >= line.length()) {
-            return false;
-        }
-        char next = line.charAt(caretCol);
-        return Character.isJavaIdentifierPart(next)
-                || next == '"'
-                || next == '\''
-                || next == '('
-                || next == '.'
-                || next == '@';
-    }
-
     @Override
     public String getGhostText(IdeGhostTextContext context) {
         GhostTextSuggestion suggestion = getGhostSuggestion(context);
@@ -1875,197 +1876,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public GhostTextSuggestion getGhostSuggestion(IdeGhostTextContext context) {
-        if (debugActive.get() || context == null) {
-            return null;
-        }
-        if (blockedByFollowingText(context.currentLine(), context.caretCol())) {
-            return null;
-        }
-        String prefix = identifierPrefix(context.currentLine(), context.caretCol());
-        boolean memberAccess = isMemberAccess(context.currentLine(), context.caretCol(), prefix);
-        if (prefix.isEmpty() && !memberAccess) {
-            return null;
-        }
-        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
-        List<AutoCompleteItem> contextual = List.of();
-        if (lsp != null) {
-            contextual = lsp.reusableCompletions(context.filePath(), context.text(),
-                    context.caretLine(), context.caretCol());
-            if (contextual.isEmpty()) {
-                contextual = lsp.complete(context.filePath(), context.text(),
-                        context.caretLine(), context.caretCol(),
-                        CompletionTrigger.INVOKED, null,
-                        lsp.documentVersion(context.filePath()));
-            }
-        }
-        JavaProjectDescriptor current = descriptor;
-        List<AutoCompleteItem> local = memberAccess ? List.of() : snippets.suggestions(prefix,
-                current != null && current.spring());
-        List<AutoCompleteItem> ghostCandidates = new ArrayList<>(contextual);
-        ghostCandidates.addAll(local);
-        GhostChoice choice = ghostTextChoice(ghostCandidates, prefix, memberAccess);
-        if (choice != null) {
-            return new GhostTextSuggestion(indentMultilineGhostText(choice.suffix(), context.currentLine()),
-                    choice.item().additionalTextEdits());
-        }
-        return GhostTextSuggestion.of(lexicalGhostTextSuffix(context.text(), prefix));
-    }
-
-    record GhostChoice(String suffix, AutoCompleteItem item) {
-    }
-
-    static String ghostTextSuffix(List<AutoCompleteItem> items, String prefix) {
-        return ghostTextSuffix(items, prefix, false);
-    }
-
-    static String ghostTextSuffix(List<AutoCompleteItem> items, String prefix,
-                                  boolean allowEmptyPrefix) {
-        GhostChoice choice = ghostTextChoice(items, prefix, allowEmptyPrefix);
-        return choice == null ? null : choice.suffix();
-    }
-
-    static GhostChoice ghostTextChoice(List<AutoCompleteItem> items, String prefix,
-                                       boolean allowEmptyPrefix) {
-        if (items == null || prefix == null || (prefix.isEmpty() && !allowEmptyPrefix)) {
-            return null;
-        }
-        GhostChoice insensitive = null;
-        for (AutoCompleteItem item : items) {
-            if (item == null) {
-                continue;
-            }
-            String insert = sanitizeSnippetForGhostText(item.insertText());
-            if (insert == null || insert.isBlank() || insert.length() <= prefix.length()) {
-                continue;
-            }
-            insert = limitGhostText(insert);
-            if (insert.startsWith(prefix)) {
-                return new GhostChoice(insert.substring(prefix.length()), item);
-            }
-            if (insensitive == null && insert.regionMatches(true, 0, prefix, 0,
-                    prefix.length())) {
-                insensitive = new GhostChoice(insert.substring(prefix.length()), item);
-            }
-        }
-        return insensitive;
-    }
-
-    private static boolean isMemberAccess(String line, int col, String prefix) {
-        if (line == null || col <= 0 || col > line.length() || !prefix.isEmpty()) {
-            return false;
-        }
-        int index = col - 1;
-        while (index >= 0 && Character.isWhitespace(line.charAt(index))) {
-            index--;
-        }
-        return index >= 0 && line.charAt(index) == '.';
-    }
-
-    static String indentMultilineGhostText(String suffix, String currentLine) {
-        if (suffix == null || suffix.indexOf('\n') < 0) {
-            return suffix;
-        }
-        String line = currentLine == null ? "" : currentLine;
-        int indentEnd = 0;
-        while (indentEnd < line.length()) {
-            char value = line.charAt(indentEnd);
-            if (value != ' ' && value != '\t') {
-                break;
-            }
-            indentEnd++;
-        }
-        String indent = line.substring(0, indentEnd);
-        return suffix.replace("\r\n", "\n").replace("\n", "\n" + indent);
-    }
-
-    private static String limitGhostText(String value) {
-        String normalized = value.replace("\r\n", "\n").replace('\r', '\n');
-        int lines = 1;
-        int end = Math.min(normalized.length(), 2_000);
-        for (int index = 0; index < end; index++) {
-            if (normalized.charAt(index) == '\n' && ++lines > 24) {
-                end = index;
-                break;
-            }
-        }
-        return normalized.substring(0, end);
-    }
-
-    static String lexicalGhostTextSuffix(String text, String prefix) {
-        if (prefix == null || prefix.isEmpty()) {
-            return null;
-        }
-        String exact = shortestIdentifierSuffix(text, prefix, false);
-        if (exact != null) {
-            return exact;
-        }
-        for (String keyword : JAVA_GHOST_KEYWORDS) {
-            if (keyword.startsWith(prefix) && keyword.length() > prefix.length()) {
-                return keyword.substring(prefix.length());
-            }
-        }
-        String insensitive = shortestIdentifierSuffix(text, prefix, true);
-        if (insensitive != null) {
-            return insensitive;
-        }
-        for (String keyword : JAVA_GHOST_KEYWORDS) {
-            if (keyword.length() > prefix.length()
-                    && keyword.regionMatches(true, 0, prefix, 0, prefix.length())) {
-                return keyword.substring(prefix.length());
-            }
-        }
-        return null;
-    }
-
-    private static String shortestIdentifierSuffix(String text, String prefix,
-                                                   boolean ignoreCase) {
-        if (text == null || text.isEmpty()) {
-            return null;
-        }
-        String best = null;
-        int identifiers = 0;
-        for (int index = 0; index < text.length() && identifiers < 512;) {
-            if (!Character.isJavaIdentifierStart(text.charAt(index))) {
-                index++;
-                continue;
-            }
-            int end = index + 1;
-            while (end < text.length() && Character.isJavaIdentifierPart(text.charAt(end))) {
-                end++;
-            }
-            identifiers++;
-            String candidate = text.substring(index, end);
-            boolean matches = ignoreCase
-                    ? candidate.regionMatches(true, 0, prefix, 0, prefix.length())
-                    : candidate.startsWith(prefix);
-            if (matches && candidate.length() > prefix.length()) {
-                String suffix = candidate.substring(prefix.length());
-                if (best == null || suffix.length() < best.length()) {
-                    best = suffix;
-                }
-            }
-            index = end;
-        }
-        return best;
-    }
-
-    static String sanitizeSnippetForGhostText(String value) {
-        if (value == null) {
-            return null;
-        }
-        String expanded = SNIPPET_DEFAULT.matcher(value).replaceAll("$1");
-        return SNIPPET_PLACEHOLDER.matcher(expanded).replaceAll("");
-    }
-
-    private static String identifierPrefix(String line, int col) {
-        if (line == null || col <= 0 || col > line.length()) {
-            return "";
-        }
-        int start = col;
-        while (start > 0 && Character.isJavaIdentifierPart(line.charAt(start - 1))) {
-            start--;
-        }
-        return line.substring(start, col);
+        return ghostTextSupport.getGhostSuggestion(context);
     }
 
     @Override
