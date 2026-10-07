@@ -56,6 +56,7 @@ import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.ProjectStructureSupport;
+import dtm.ide.adapter.SpringSupport;
 import dtm.ide.adapter.TodoPanelHost;
 import dtm.ide.api.project.editor.IdeInlayHintContext;
 import dtm.ide.api.project.editor.IdeRenameContext;
@@ -595,15 +596,44 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void syncProject() {
             JavaIdeAdapter.this.syncProject();
         }
+
+        @Override
+        public void requestRefreshCodeLenses(Path file) {
+            JavaIdeAdapter.this.requestRefreshCodeLenses(file);
+        }
+
+        @Override
+        public void refreshDiagnosticsOfOpenJavaEditors() {
+            javaEditors.keySet().forEach(JavaIdeAdapter.this::requestRefreshDiagnostics);
+        }
+
+        @Override
+        public BuildSystem buildSystem() {
+            return ensureBuildSystem();
+        }
+
+        @Override
+        public java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module) {
+            return JavaIdeAdapter.this.runtimeClasspathOf(build, module);
+        }
+
+        @Override
+        public String registerBottomPanel(String title, Icon icon, JComponent panel) {
+            return registerToolPanel(DockRegion.BOTTOM, title, icon, panel);
+        }
+
+        @Override
+        public void openWebBrowser(String url) {
+            JavaIdeAdapter.this.openWebBrowser(url);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
     private final MavenCentralClient mavenCentral = new MavenCentralClient();
-    private final SpringBeanIndex springIndex = new SpringBeanIndex();
-    private final SpringActuatorClient actuator = new SpringActuatorClient();
     private final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
     private final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
     private final AdapterHost adapterHost = new HostBridge();
+    private final SpringSupport spring = new SpringSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -730,15 +760,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JavaProjectStructurePanel structurePanel;
     private volatile JavaBuildToolsPanel buildToolsPanel;
     private volatile String buildToolsPanelId;
-    private volatile SpringExplorerPanel springPanel;
-    private volatile String springPanelId;
-    private volatile SpringConfigMetadata springMetadata = SpringConfigMetadata.builtIn();
-    private volatile SpringConfigIndex springConfigIndex = SpringConfigIndex.empty();
     private volatile InspectionSuppressionStore suppressionStore;
     private volatile JavaFileChangeRouter fileChangeRouter;
     private volatile IdeProjectFileWatcher projectFileWatcher;
     private volatile String fileWatcherListenerId;
-    private volatile String springBaseUrl = JavaPluginSettings.DEFAULT_SPRING_BASE_URL;
     private volatile JavaPluginSettings settings;
     private volatile Object codeActionLampHandle;
     private volatile IdeEditorContext codeActionLampContext;
@@ -836,15 +861,14 @@ public class JavaIdeAdapter extends IdeAdapter {
             coordinator.resetLocalRepository();
         }
         lexicalIndex.clear();
-        springIndex.clear();
+        spring.index().clear();
         todoSupport.reset();
         RunFormChoicesLoader choicesLoader = runFormChoicesLoader;
         if (choicesLoader != null) {
             choicesLoader.invalidate();
         }
         buildToolsSyncPending.set(false);
-        springConfigIndex = SpringConfigIndex.empty();
-        springMetadata = SpringConfigMetadata.builtIn();
+        spring.resetConfiguration();
         problems.clearAll();
         diagnosticReanalysisRunning.set(false);
         refreshProblemsPanel();
@@ -927,14 +951,14 @@ public class JavaIdeAdapter extends IdeAdapter {
             SwingUtilities.invokeLater(popup::hide);
         }
         unregisterToolPanels();
-        springIndex.shutdown();
+        spring.index().shutdown();
         lexicalIndex.shutdown();
         dtm.ide.build.JavacDaemons.shutdownAll();
     }
 
     private void unregisterToolPanels() {
         for (String panelId : java.util.Arrays.asList(
-                debugPanelId, testPanelId, todoSupport.panelId(), buildToolsPanelId, springPanelId)) {
+                debugPanelId, testPanelId, todoSupport.panelId(), buildToolsPanelId, spring.panelId())) {
             if (panelId == null) {
                 continue;
             }
@@ -948,7 +972,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         testPanelId = null;
         todoSupport.clearPanelId();
         buildToolsPanelId = null;
-        springPanelId = null;
+        spring.clearPanelId();
     }
 
     @Override
@@ -991,7 +1015,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 ensureLanguageServer();
             }
             resolveProjectJdk(ticket, root);
-            setupSpring(ticket, root, sources);
+            spring.setup(ticket, root, sources);
             SwingUtilities.invokeLater(() -> refreshUiAfterDescribe(ticket, root));
         });
     }
@@ -1064,7 +1088,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     ensureLanguageServer();
                 }
                 resolveProjectJdk(ticket, root);
-                setupSpring(ticket, root, sources);
+                spring.setup(ticket, root, sources);
                 SwingUtilities.invokeLater(() -> refreshUiAfterDescribe(ticket, root));
             } finally {
                 logSlowBind(started, callerThread);
@@ -1320,7 +1344,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 JavaProjectDescriptor activeDescriptor = descriptor;
                 if (activeDescriptor != null && activeDescriptor.spring()
                         && settings().isSpringSupport()) {
-                    loadSpringMetadata(ticket, root);
+                    spring.loadMetadata(ticket, root);
                 }
             }
             finishDiagnosticReanalysis(ticket, root, error == null && lsp.isReady());
@@ -1534,7 +1558,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 JavaProjectDescriptor current = descriptor;
                 if (root != null && current != null && current.spring()
                         && settings().isSpringSupport()) {
-                    loadSpringMetadata(lifecycle.get(), root);
+                    spring.loadMetadata(lifecycle.get(), root);
                 }
             }
             return;
@@ -1762,12 +1786,12 @@ public class JavaIdeAdapter extends IdeAdapter {
             return null;
         }
         if (SpringConfigSupport.isConfigFile(context.filePath())) {
-            List<AutoCompleteItem> values = SpringConfigSupport.completeValues(springConfigIndex,
+            List<AutoCompleteItem> values = SpringConfigSupport.completeValues(spring.configIndex(),
                     context.filePath(), context.text(), context.caretLine(), context.caretCol());
             if (!values.isEmpty()) {
                 return values;
             }
-            return SpringConfigSupport.complete(springMetadata, context.filePath(),
+            return SpringConfigSupport.complete(spring.metadata(), context.filePath(),
                     context.text(), context.caretLine(), context.caretCol());
         }
         List<AutoCompleteItem> query = jpaQueryCompletion(context);
@@ -1964,7 +1988,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private List<Diagnostic> pluginDiagnostics(Path filePath, String text) {
         if (SpringConfigSupport.isConfigFile(filePath)) {
             return DiagnosticRanges.clamp(InspectionSuppressions.filter(
-                    SpringConfigSupport.validate(springMetadata, filePath, text),
+                    SpringConfigSupport.validate(spring.metadata(), filePath, text),
                     text, settings().getDisabledInspections(), occurrenceFilterFor(filePath)), text);
         }
         JavaProjectDescriptor current = descriptor;
@@ -1972,7 +1996,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 || !settings().isSpringSupport()) {
             return List.of();
         }
-        SpringIndexSnapshot snapshot = springIndex.snapshot();
+        SpringIndexSnapshot snapshot = spring.index().snapshot();
         List<Diagnostic> plugin = new ArrayList<>(
                 SpringDiagnostics.analyze(snapshot, filePath, text));
         if (settings().isSpringJpa()) {
@@ -1980,8 +2004,8 @@ public class JavaIdeAdapter extends IdeAdapter {
             plugin.addAll(JpqlDiagnostics.analyze(snapshot, filePath));
         }
         if (settings().isSpringConfigNavigation()) {
-            plugin.addAll(SpringValueDiagnostics.analyze(snapshot, springConfigIndex,
-                    springMetadata, filePath));
+            plugin.addAll(SpringValueDiagnostics.analyze(snapshot, spring.configIndex(),
+                    spring.metadata(), filePath));
         }
         if (settings().isSpringInfra()) {
             plugin.addAll(SpringInfraDiagnostics.analyze(snapshot.infra(), filePath));
@@ -2049,7 +2073,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return null;
         }
         if (SpringConfigSupport.isConfigFile(context.filePath())) {
-            return SpringConfigSupport.hover(springMetadata, context.filePath(),
+            return SpringConfigSupport.hover(spring.metadata(), context.filePath(),
                     context.text(), context.line());
         }
         JavaLanguageServer lsp = interactiveServerFor(context.filePath());
@@ -2394,7 +2418,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (current == null || root == null || !current.spring()) {
             return;
         }
-        loadSpringConfigIndex(lifecycle.get(), root);
+        spring.loadConfigIndex(lifecycle.get(), root);
     }
 
     private void onWatchedBuildFile(Path file, JavaFileChangeRouter.Change change) {
@@ -2421,12 +2445,12 @@ public class JavaIdeAdapter extends IdeAdapter {
                 || !settings().isSpringSupport()) {
             return;
         }
-        springIndex.refreshFile(file, content).thenAccept(snapshot -> {
+        spring.index().refreshFile(file, content).thenAccept(snapshot -> {
             if (!current(ticket, root)) {
                 return;
             }
             requestRefreshCodeLenses(file);
-            SpringExplorerPanel panel = springPanel;
+            SpringExplorerPanel panel = spring.panel();
             if (panel != null) {
                 panel.reload();
             }
@@ -2881,7 +2905,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (current == null || !current.spring() || !settings().isSpringCodeLens()) {
             return lenses;
         }
-        SpringIndexSnapshot snapshot = springIndex.snapshot();
+        SpringIndexSnapshot snapshot = spring.index().snapshot();
 
         for (SpringBean bean : snapshot.beansIn(context.filePath())) {
             List<SpringInjection> usages = snapshot.injectionsOf(bean);
@@ -2939,7 +2963,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void addEndpointLenses(List<CodeLens> lenses, SpringIndexSnapshot snapshot,
                                    IdeCodeLensContext context) {
-        String baseUrl = springBaseUrl;
+        String baseUrl = spring.baseUrl();
         for (SpringEndpoint endpoint : snapshot.endpoints()) {
             if (!context.filePath().equals(endpoint.file())) {
                 continue;
@@ -3539,7 +3563,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return defaultResult;
         }
         List<GlobalSearchMatch> matches =
-                SpringSearchContributor.search(springIndex.snapshot(), query.term());
+                SpringSearchContributor.search(spring.index().snapshot(), query.term());
         if (matches.isEmpty()) {
             return defaultResult;
         }
@@ -3589,7 +3613,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return List.of();
         }
         List<SpringNavigation.Anchor> anchors = new ArrayList<>();
-        for (SpringPropertyUsage usage : springIndex.snapshot().usagesOfProperty(key)) {
+        for (SpringPropertyUsage usage : spring.index().snapshot().usagesOfProperty(key)) {
             anchors.add(new SpringNavigation.Anchor(usage.file(), usage.line(), usage.key()));
         }
         return springLocations(new SpringNavigation.Target(
@@ -3607,7 +3631,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return List.of();
         }
         List<SpringNavigation.Anchor> anchors = new ArrayList<>();
-        for (SpringConfigIndex.Entry entry : springConfigIndex.definitionsOf(key)) {
+        for (SpringConfigIndex.Entry entry : spring.configIndex().definitionsOf(key)) {
             anchors.add(new SpringNavigation.Anchor(entry.file(), entry.line(), entry.key()));
         }
         return springLocations(new SpringNavigation.Target(
@@ -5807,7 +5831,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!isJpaCompletionEnabled(context)) {
             return null;
         }
-        return JpaQueryCompletionProvider.suggestions(springIndex.snapshot(), context.filePath(),
+        return JpaQueryCompletionProvider.suggestions(spring.index().snapshot(), context.filePath(),
                 context.text(), context.caretOffset());
     }
 
@@ -5823,7 +5847,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 || !JavaProjectConventions.isJava(context.filePath())) {
             return null;
         }
-        return SpringAnnotationCompletionProvider.suggestions(springIndex.snapshot(),
+        return SpringAnnotationCompletionProvider.suggestions(spring.index().snapshot(),
                 context.filePath(), context.currentLine(), context.caretCol(),
                 context.caretLine());
     }
@@ -5832,7 +5856,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!isSpringNavigationEnabled()) {
             return null;
         }
-        return SpringNavigation.definitions(springIndex.snapshot(), filePath, text, line, col)
+        return SpringNavigation.definitions(spring.index().snapshot(), filePath, text, line, col)
                 .orElse(null);
     }
 
@@ -6177,7 +6201,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         String lower = term.toLowerCase(Locale.ROOT);
         Map<String, JavaTypeCreationPanel.TypeCandidate> found = new LinkedHashMap<>();
-        springIndex.snapshot().types().stream()
+        spring.index().snapshot().types().stream()
                 .filter(type -> type.kind() == JavaType.Kind.CLASS
                         || type.kind() == JavaType.Kind.INTERFACE)
                 .filter(type -> type.simpleName().toLowerCase(Locale.ROOT).contains(lower))
@@ -6276,7 +6300,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
         java.util.function.Function<JpaEntity, JavaModule> moduleOf = entity -> entity.file() == null
                 ? null : current.moduleOf(entity.file()).orElse(null);
-        List<JpaEntity> entities = springIndex.snapshot().entities().stream()
+        List<JpaEntity> entities = spring.index().snapshot().entities().stream()
                 .filter(JpaEntity::persistent)
                 .sorted(Comparator.comparing((JpaEntity entity) -> module != null
                                 && !Objects.equals(module, moduleOf.apply(entity)))
@@ -8241,7 +8265,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     refreshProblemsPanel();
                 }
             });
-            setupSpring(ticket, root);
+            spring.setup(ticket, root);
 
             if (settings().getLanguageServerMode().startsServer()) {
                 resolveProjectJdk(ticket, root);
@@ -8710,91 +8734,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private void setupSpring(long ticket, Path root) {
-        setupSpring(ticket, root, null);
-    }
-
-    private void setupSpring(long ticket, Path root, JavaProjectSources sources) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null || !current.spring() || !settings().isSpringSupport()) {
-            return;
-        }
-        springIndex.rebuild(current, sources).thenAccept(snapshot -> {
-            if (!current(ticket, root)) {
-                return;
-            }
-            springMetadata = springMetadata.withProjectProperties(projectConfigProperties());
-            snapshot.beans().stream().map(SpringBean::file).distinct()
-                    .forEach(this::requestRefreshCodeLenses);
-            javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
-            SwingUtilities.invokeLater(() -> {
-                if (!current(ticket, root)) {
-                    return;
-                }
-                SpringExplorerPanel panel = springPanel;
-                if (panel != null) {
-                    panel.reload();
-                }
-                setStatusBarText("Spring: " + snapshot.beans().size() + " bean(s), "
-                        + snapshot.endpoints().size() + " endpoint(s)");
-            });
-        });
-        if (!settings().getLanguageServerMode().startsServer()) {
-            loadSpringMetadata(ticket, root);
-        }
-        loadSpringConfigIndex(ticket, root);
-        SwingUtilities.invokeLater(() -> {
-            if (current(ticket, root)) {
-                setupSpringPanel();
-            }
-        });
-    }
-
-    private void loadSpringMetadata(long ticket, Path root) {
-        background.submit(() -> {
-            BuildSystem build = ensureBuildSystem();
-            JavaProjectDescriptor current = descriptor;
-            if (build == null || current == null) {
-                return;
-            }
-            List<Path> classpath = new ArrayList<>();
-            for (JavaModule module : springConfigModules(current)) {
-                runtimeClasspathOf(build, module).ifPresent(entries -> {
-                    for (String entry : entries.split(java.io.File.pathSeparator)) {
-                        if (!entry.isBlank()) {
-                            classpath.add(Path.of(entry));
-                        }
-                    }
-                });
-                if (!current(ticket, root)) {
-                    return;
-                }
-            }
-            if (classpath.isEmpty()) {
-                return;
-            }
-            SpringConfigMetadata metadata = SpringConfigMetadata.fromClasspath(classpath);
-            if (!metadata.fromClasspath()) {
-                log.info("Nenhum metadado de configuracao do Spring encontrado no classpath");
-                return;
-            }
-            springMetadata = metadata.withProjectProperties(projectConfigProperties());
-            log.info("Catalogo de configuracao do Spring carregado de {} entrada(s): {} chave(s)",
-                    classpath.size(), metadata.size());
-        });
-    }
-
-    private List<SpringConfigProperty> projectConfigProperties() {
-        List<SpringConfigProperty> properties = new ArrayList<>();
-        for (SpringPropertyUsage usage : springIndex.snapshot().propertyUsages()) {
-            if (usage.isPrefix() && !usage.key().isBlank()) {
-                properties.add(SpringConfigProperty.of(usage.key(), "",
-                        SpringBean.simpleNameOf(usage.ownerType())));
-            }
-        }
-        return properties;
-    }
-
     private java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module) {
         JavaLanguageServer lsp = jdtLs;
         ProjectModelSupport model = lsp == null ? null : lsp.extension(ProjectModelSupport.class);
@@ -8810,138 +8749,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         return build.resolveRuntimeClasspath(module);
     }
 
-    private void loadSpringConfigIndex(long ticket, Path root) {
-        background.submit(() -> {
-            JavaProjectDescriptor current = descriptor;
-            if (current == null || !current(ticket, root)) {
-                return;
-            }
-            List<Path> resourceRoots = new ArrayList<>();
-            for (JavaModule module : springConfigModules(current)) {
-                resourceRoots.add(module.root().resolve("src").resolve("main").resolve("resources"));
-                resourceRoots.add(module.root().resolve("src").resolve("test").resolve("resources"));
-            }
-            SpringConfigIndex index = SpringConfigIndex.scan(resourceRoots);
-            if (!current(ticket, root)) {
-                return;
-            }
-            springConfigIndex = index;
-            log.info("Indice de configuracao do Spring: {} chave(s) em {} raiz(es)",
-                    index.entries().size(), resourceRoots.size());
-        });
-    }
-
-    private List<JavaModule> springConfigModules(JavaProjectDescriptor current) {
-        List<JavaModule> withConfig = current.buildableModules().stream()
-                .filter(JavaIdeAdapter::hasSpringConfigFile)
-                .toList();
-        if (!withConfig.isEmpty()) {
-            return withConfig;
-        }
-        List<JavaModule> buildable = current.buildableModules();
-        if (!buildable.isEmpty()) {
-            return buildable;
-        }
-        JavaModule rootModule = current.rootModule();
-        return rootModule == null ? List.of() : List.of(rootModule);
-    }
-
-    private static boolean hasSpringConfigFile(JavaModule module) {
-        Path resources = module.root().resolve("src").resolve("main").resolve("resources");
-        if (!Files.isDirectory(resources)) {
-            return false;
-        }
-        try (java.util.stream.Stream<Path> files = Files.list(resources)) {
-            return files.anyMatch(file -> Files.isRegularFile(file)
-                    && SpringConfigSupport.isConfigFile(file));
-        } catch (Exception e) {
-            log.debug("Falha ao inspecionar os recursos de {}: {}", module.root(), e.getMessage());
-            return false;
-        }
-    }
-
-    private void setupSpringPanel() {
-        if (springPanelId != null) {
-            return;
-        }
-        SpringExplorerPanel panel = new SpringExplorerPanel(new SpringExplorerHost());
-        springPanel = panel;
-        springPanelId = registerToolPanel(DockRegion.BOTTOM, "Spring",
-                JavaIcons.springExplorer(JavaIcons.SMALL), panel);
-    }
-
-    private final class SpringExplorerHost implements SpringExplorerPanel.Host {
-
-        @Override
-        public SpringIndexSnapshot snapshot() {
-            return springIndex.snapshot();
-        }
-
-        @Override
-        public void openFile(Path file, int line) {
-            if (file == null) {
-                return;
-            }
-            openAt(file, Math.max(0, line - 1), 0);
-        }
-
-        @Override
-        public void openInBrowser(String url) {
-            openWebBrowser(url);
-        }
-
-        @Override
-        public String applicationBaseUrl() {
-            return springBaseUrl;
-        }
-
-        @Override
-        public void loadLive(java.util.function.Consumer<SpringExplorerPanel.LiveData> onResult) {
-            background.submit(() -> {
-                SpringExplorerPanel.LiveData data = SpringExplorerPanel.LiveData.unavailable();
-                try {
-                    String baseUrl = springBaseUrl;
-                    if (actuator.isAvailable(baseUrl)) {
-                        data = new SpringExplorerPanel.LiveData(true,
-                                actuator.health(baseUrl),
-                                actuator.beans(baseUrl),
-                                actuator.environment(baseUrl),
-                                actuator.mappings(baseUrl));
-                         adoptRuntimeBeans(data.beans());
-                    }
-                } catch (Exception e) {
-                    log.debug("Falha ao consultar o Actuator: {}", e.getMessage());
-                } finally {
-                    onResult.accept(data);
-                }
-            });
-        }
-
-        @Override
-        public void refreshIndex(Runnable onDone) {
-            JavaProjectDescriptor current = descriptor;
-            springIndex.rebuild(current).thenRun(() -> SwingUtilities.invokeLater(onDone));
-        }
-    }
-
-    private void adoptRuntimeBeans(List<SpringActuatorClient.LiveBean> liveBeans) {
-        if (!settings().isSpringRuntimeBeans()) {
-            return;
-        }
-        List<SpringBean> runtime = SpringRuntimeBeans.from(liveBeans, springIndex.snapshot());
-        springIndex.applyRuntimeBeans(runtime);
-        log.info("Beans de runtime adotados do Actuator: {}", runtime.size());
-    }
-
     public void openSpringExplorer() {
         JavaProjectDescriptor current = descriptor;
         if (current == null || !current.spring()) {
             setStatusBarText(text("status.noSpring", "Java: este projeto nao usa Spring"));
             return;
         }
-        setupSpringPanel();
-        if (springPanelId != null) {
-            requestOpenToolPanel(springPanelId);
+        spring.setupPanel();
+        if (spring.panelId() != null) {
+            requestOpenToolPanel(spring.panelId());
         }
     }
 
@@ -9349,7 +9165,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (current == null) {
             return;
         }
-        springBaseUrl = current.getSpringBaseUrl();
+        spring.baseUrl(current.getSpringBaseUrl());
         applyDependencySearchSettings(current);
         JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {

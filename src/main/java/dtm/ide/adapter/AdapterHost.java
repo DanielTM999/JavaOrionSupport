@@ -1,5 +1,7 @@
 package dtm.ide.adapter;
 
+import dtm.ide.build.BuildSystem;
+import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.sdk.DownloadProgressListener;
 import dtm.ide.sdk.JdkInstallation;
@@ -34,4 +36,10 @@ public interface AdapterHost extends AdapterContext {
     JavaPluginSettings settings();
     JComponent dependencyLibrariesView();
     void syncProject();
+    void requestRefreshCodeLenses(Path file);
+    void refreshDiagnosticsOfOpenJavaEditors();
+    BuildSystem buildSystem();
+    java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module);
+    String registerBottomPanel(String title, Icon icon, JComponent panel);
+    void openWebBrowser(String url);
 }
