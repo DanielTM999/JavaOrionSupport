@@ -53,6 +53,7 @@ import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
 import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
+import dtm.ide.adapter.BuildToolsSupport;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.ProjectStructureSupport;
@@ -625,6 +626,72 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public void openWebBrowser(String url) {
             JavaIdeAdapter.this.openWebBrowser(url);
+        }
+
+        @Override
+        public MavenPluginGoals pluginGoals() {
+            return pluginGoals;
+        }
+
+        @Override
+        public void clearPluginRepositoryPath() {
+            pluginRepositoryPath = null;
+        }
+
+        @Override
+        public BuildSystem currentBuildSystem() {
+            return buildSystem;
+        }
+
+        @Override
+        public List<RunConfigurationData> requestRunConfigurations() {
+            return JavaIdeAdapter.this.requestRunConfigurations();
+        }
+
+        @Override
+        public RunConfigurationData requestSaveRunConfiguration(RunConfigurationData configuration) {
+            return JavaIdeAdapter.this.requestSaveRunConfiguration(configuration);
+        }
+
+        @Override
+        public boolean requestRemoveRunConfiguration(String id) {
+            return JavaIdeAdapter.this.requestRemoveRunConfiguration(id);
+        }
+
+        @Override
+        public Set<Path> migratedBuildRunConfigurations() {
+            return migratedBuildRunConfigurations;
+        }
+
+        @Override
+        public void showPopup(PlatformPopupBuilder popup) {
+            JavaIdeAdapter.this.showPopup(popup);
+        }
+
+        @Override
+        public BuildToolDebugListener openBuildDebugListener(JavaModule module, Runnable cancelProcess)
+                throws IOException {
+            return JavaIdeAdapter.this.openBuildDebugListener(module, cancelProcess);
+        }
+
+        @Override
+        public OutputPanelHandle requestOutputPanel(String title, OutputPanelOptions options) {
+            return JavaIdeAdapter.this.requestOutputPanel(title, options);
+        }
+
+        @Override
+        public void writeOutput(OutputPanelHandle panel, String line) {
+            JavaIdeAdapter.this.writeOutput(panel, line);
+        }
+
+        @Override
+        public void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure) {
+            JavaIdeAdapter.this.publishBuildDiagnostics(result, revealOnFailure);
+        }
+
+        @Override
+        public JavaBuildToolsPanel buildToolsPanel() {
+            return buildToolsPanel;
         }
     }
 
@@ -8294,7 +8361,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             buildToolsPanel.reload();
             return;
         }
-        JavaBuildToolsPanel panel = new JavaBuildToolsPanel(new BuildToolsHost(), background);
+        JavaBuildToolsPanel panel = new JavaBuildToolsPanel(new BuildToolsSupport(adapterHost), background);
         buildToolsPanel = panel;
         Icon icon = JavaIcons.buildTool(descriptor, JavaIcons.SMALL);
         buildToolsPanelId = icon == null
@@ -8308,229 +8375,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         ensureBuildToolsPanel();
         if (buildToolsPanelId != null) {
             requestOpenToolPanel(buildToolsPanelId);
-        }
-    }
-
-    private final class BuildToolsHost implements JavaBuildToolsPanel.Host {
-        @Override
-        public BuildToolModel load() {
-            pluginGoals.clearCache();
-            return BuildToolModel.load(descriptor);
-        }
-
-        @Override
-        public void sync() {
-            pluginRepositoryPath = null;
-            syncProject();
-        }
-
-        @Override
-        public void profilesChanged(java.util.Set<String> profiles) {
-            new BuildRunConfigurations(projectRoot).saveActiveProfiles(profiles);
-            BuildSystem build = buildSystem;
-            if (build != null) {
-                build.invalidateClasspathCache();
-            }
-        }
-
-        @Override
-        public java.util.Set<String> activeProfiles() {
-            return new BuildRunConfigurations(projectRoot).activeProfiles();
-        }
-
-        @Override
-        public BuildRunConfigurations.ToolOptions toolOptions() {
-            return new BuildRunConfigurations(projectRoot).toolOptions();
-        }
-
-        @Override
-        public void toolOptionsChanged(BuildRunConfigurations.ToolOptions options) {
-            new BuildRunConfigurations(projectRoot).saveToolOptions(options);
-        }
-
-        @Override
-        public List<BuildRunConfigurations.Entry> runConfigurations() {
-            migrateLegacyBuildRunConfigurations();
-            return BuildRunConfigurationBridge.entries(requestRunConfigurations(), buildToolIsGradle());
-        }
-
-        @Override
-        public void saveRunConfiguration(BuildRunConfigurations.Entry entry) {
-            if (entry == null || !entry.isValid()) {
-                return;
-            }
-            boolean gradle = buildToolIsGradle();
-            String existingId = BuildRunConfigurationBridge.idOf(requestRunConfigurations(), entry.name(), gradle)
-                    .orElse(null);
-            requestSaveRunConfiguration(BuildRunConfigurationBridge.toRunConfiguration(entry, gradle, existingId));
-        }
-
-        @Override
-        public void removeRunConfiguration(String name) {
-            BuildRunConfigurationBridge.idOf(requestRunConfigurations(), name, buildToolIsGradle())
-                    .ifPresent(JavaIdeAdapter.this::requestRemoveRunConfiguration);
-        }
-
-        private boolean buildToolIsGradle() {
-            JavaProjectDescriptor current = descriptor;
-            return current != null && current.isGradle();
-        }
-
-        private void migrateLegacyBuildRunConfigurations() {
-            Path root = projectRoot;
-            if (root == null || !migratedBuildRunConfigurations.add(root.toAbsolutePath().normalize())) {
-                return;
-            }
-            BuildRunConfigurations legacy = new BuildRunConfigurations(root);
-            List<RunConfigurationData> current = requestRunConfigurations();
-            boolean gradle = buildToolIsGradle();
-            for (BuildRunConfigurations.Entry entry : legacy.all()) {
-                String existingId = BuildRunConfigurationBridge.idOf(current, entry.name(), gradle).orElse(null);
-                RunConfigurationData saved = existingId != null
-                        ? RunConfigurationData.builder().id(existingId).build()
-                        : requestSaveRunConfiguration(BuildRunConfigurationBridge.toRunConfiguration(entry, gradle, null));
-                if (BuildRunConfigurationBridge.saved(saved)) {
-                    legacy.remove(entry.name());
-                } else {
-                    migratedBuildRunConfigurations.remove(root.toAbsolutePath().normalize());
-                }
-            }
-        }
-
-        @Override
-        public boolean supportsDebug() {
-            return true;
-        }
-
-        @Override
-        public boolean showPrompt(BuildPromptPanel prompt, String title) {
-            showPopup(PlatformPopupBuilder.builder()
-                    .component(prompt)
-                    .title(title)
-                    .size(prompt.popupSize())
-                    .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
-                    .onLoad(component -> prompt.focusField())
-                    .onClose(component -> prompt.closed())
-                    .build());
-            return true;
-        }
-
-        @Override
-        public void executeGoals(BuildToolModel.Node context, List<String> goals) {
-            runToolGoals(context == null ? null : context.module(), goals, false);
-        }
-
-        @Override
-        public void debugGoals(BuildToolModel.Node context, List<String> goals) {
-            runToolGoals(context == null ? null : context.module(), goals, true);
-        }
-
-        @Override
-        public void execute(BuildToolModel.Node command) {
-            if (command == null || !command.executable()) {
-                reject(text("status.nothingToRun", "Nada para executar"));
-                return;
-            }
-            runToolGoals(command.module(), command.command(), false);
-        }
-
-        @Override
-        public List<MavenPluginGoals.Goal> goalsOf(BuildToolModel.Coordinate coordinate) {
-            return coordinate == null
-                    ? List.of()
-                    : pluginGoals.goalsOf(coordinate.groupId(), coordinate.artifactId(),
-                            coordinate.version());
-        }
-
-        @Override
-        public void cancel() {
-            BuildSystem build = buildSystem;
-            if (build != null) {
-                build.cancel();
-            }
-        }
-
-        private void reject(String message) {
-            JavaBuildToolsPanel panel = buildToolsPanel;
-            if (panel != null) {
-                panel.warning(message);
-            }
-        }
-
-        private void runToolGoals(JavaModule module, List<String> goals, boolean debug) {
-            BuildSystem build = ensureBuildSystem();
-            if (build == null || goals == null || goals.isEmpty()) {
-                reject(text("status.buildToolUnavailable", "Nenhum build tool disponivel"));
-                return;
-            }
-            if (build.isRunning()) {
-                reject(text("status.buildRunning", "Ja existe um build em andamento"));
-                return;
-            }
-            JavaProjectDescriptor current = descriptor;
-            boolean gradle = current != null && current.isGradle();
-            BuildRunConfigurations.ToolOptions toolOptions =
-                    new BuildRunConfigurations(projectRoot).toolOptions();
-            List<String> arguments = new ArrayList<>();
-            if (toolOptions.skipTests()) {
-                arguments.addAll(gradle ? List.of("-x", "test") : List.of("-DskipTests"));
-            }
-            Map<String, String> environment = new LinkedHashMap<>();
-            BuildToolDebugListener listener = null;
-            if (debug) {
-                try {
-                    listener = openBuildDebugListener(module, build::cancel);
-                    BuildToolDebug.Plan plan = gradle
-                            ? BuildToolDebug.gradle(goals, arguments, listener.listenPort())
-                            : BuildToolDebug.maven(goals, arguments, listener.listenPort(),
-                                    System.getenv());
-                    if (!plan.debuggable()) {
-                        listener.close();
-                        reject(text("status.noDebuggableJvm",
-                                "Nenhuma JVM depuravel nessas tasks (use run, bootRun ou test)"));
-                        return;
-                    }
-                    arguments.addAll(plan.arguments());
-                    environment.putAll(plan.environment());
-                } catch (Exception error) {
-                    if (listener != null) {
-                        listener.close();
-                    }
-                    reject(text("error.buildDebugListen", "Nao foi possivel abrir a porta de debug:")
-                            + " " + rootMessage(error));
-                    return;
-                }
-            }
-            BuildCommand.Options options = new BuildCommand.Options(List.of(), arguments,
-                    toolOptions.offline(), environment);
-            OutputPanelHandle output = requestOutputPanel("Build", OutputPanelOptions.interactive(null));
-            if (output != null) {
-                output.clear();
-                output.show();
-            }
-            BuildToolDebugListener debugListener = listener;
-            background.submit(() -> {
-                BuildResult result;
-                try {
-                    result = build.executeToolCommand(module, goals, options,
-                            line -> writeOutput(output, line));
-                } catch (RuntimeException error) {
-                    writeOutput(output, rootMessage(error));
-                    result = BuildResult.failed(build.name(), rootMessage(error));
-                } finally {
-                    if (debugListener != null) {
-                        debugListener.close();
-                    }
-                }
-                publishBuildDiagnostics(result, true);
-                if (!result.summary().isEmpty()) {
-                    writeOutput(output, result.summary());
-                }
-                JavaBuildToolsPanel panel = buildToolsPanel;
-                if (panel != null) {
-                    panel.finished(result.summary(), result.successful());
-                }
-            });
         }
     }
 

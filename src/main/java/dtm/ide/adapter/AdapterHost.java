@@ -1,17 +1,28 @@
 package dtm.ide.adapter;
 
+import dtm.ide.api.extension.PlatformPopupBuilder;
+import dtm.ide.api.extension.output.OutputPanelHandle;
+import dtm.ide.api.extension.output.OutputPanelOptions;
+import dtm.ide.api.extension.runconfig.RunConfigurationData;
+import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
+import dtm.ide.build.MavenPluginGoals;
+import dtm.ide.debug.BuildToolDebugListener;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.sdk.DownloadProgressListener;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
 import dtm.ide.settings.JavaPluginSettings;
+import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaTodoPanel;
 
 import javax.swing.Icon;
 import javax.swing.JComponent;
+import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Set;
 import java.util.function.Supplier;
 
 public interface AdapterHost extends AdapterContext {
@@ -42,4 +53,17 @@ public interface AdapterHost extends AdapterContext {
     java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module);
     String registerBottomPanel(String title, Icon icon, JComponent panel);
     void openWebBrowser(String url);
+    MavenPluginGoals pluginGoals();
+    void clearPluginRepositoryPath();
+    BuildSystem currentBuildSystem();
+    List<RunConfigurationData> requestRunConfigurations();
+    RunConfigurationData requestSaveRunConfiguration(RunConfigurationData configuration);
+    boolean requestRemoveRunConfiguration(String id);
+    Set<Path> migratedBuildRunConfigurations();
+    void showPopup(PlatformPopupBuilder popup);
+    BuildToolDebugListener openBuildDebugListener(JavaModule module, Runnable cancelProcess) throws IOException;
+    OutputPanelHandle requestOutputPanel(String title, OutputPanelOptions options);
+    void writeOutput(OutputPanelHandle panel, String line);
+    void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure);
+    JavaBuildToolsPanel buildToolsPanel();
 }
