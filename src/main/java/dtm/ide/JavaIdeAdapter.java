@@ -358,6 +358,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static dtm.ide.adapter.AdapterText.text;
+
 @Slf4j
 @Singleton
 @PluginReference(id = "java-ide-adapter")
@@ -413,10 +415,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private record PendingPasteImport(Path file, int offset, String pasted, Range range, long deadline,
                                       int round, Set<String> handled) {
-    }
-
-    private static String text(String key, String fallback) {
-        return dtm.stools.i18n.I18n.getText(JavaIdeAdapter.class, key, fallback);
     }
 
     private static final String JDK_TAB_ID = "javaJdkManager";
