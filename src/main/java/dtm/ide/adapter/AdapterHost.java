@@ -16,6 +16,7 @@ import dtm.ide.build.BuildSystem;
 import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.coverage.CoverageProvisioner;
 import dtm.ide.debug.BuildToolDebugListener;
+import dtm.ide.debug.JavaDebugSession;
 import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.editor.JavaFastCompletionProvider;
 import dtm.ide.index.JavaLexicalIndex;
@@ -160,4 +161,5 @@ public interface AdapterHost extends AdapterContext {
     DiagnosticsEngine diagnostics();
     IdeEditorContext getEditor(Path file, boolean focus);
     <T> ModernComponentDialog.ModernComponentDialogBuilder<T> createModernComponentDialogBuilder(Class<T> type);
+    JavaDebugSession debugSession();
 }
