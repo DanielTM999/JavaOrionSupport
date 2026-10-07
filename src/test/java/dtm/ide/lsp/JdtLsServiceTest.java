@@ -112,9 +112,9 @@ class JdtLsServiceTest {
     void theCompletionCacheIsKeyedByTheTextBeforeTheWordBeingTyped() {
         String text = "class A {\n    void m() { lista.st }\n}";
 
-        assertEquals("    void m() { lista.", JdtLsService.linePrefixAtWordStart(text, 1, 22));
-        assertEquals("    void m() { lista.", JdtLsService.linePrefixAtWordStart(text, 1, 21));
-        assertEquals("    void m() { ", JdtLsService.linePrefixAtWordStart(text, 1, 20));
+        assertEquals("    void m() { lista.", LspCompletion.linePrefixAtWordStart(text, 1, 22));
+        assertEquals("    void m() { lista.", LspCompletion.linePrefixAtWordStart(text, 1, 21));
+        assertEquals("    void m() { ", LspCompletion.linePrefixAtWordStart(text, 1, 20));
     }
 
     @Test
@@ -122,15 +122,15 @@ class JdtLsServiceTest {
         String cached = "class A {\n    void m() { Str }\n}";
         String typed = "class A {\n    void m() { Strin }\n}";
 
-        assertTrue(JdtLsService.extendsCachedWord(cached, 1, 18, typed, 20));
-        assertTrue(JdtLsService.extendsCachedWord(cached, 1, 18, cached, 18));
-        assertFalse(JdtLsService.extendsCachedWord(cached, 1, 18,
+        assertTrue(LspCompletion.extendsCachedWord(cached, 1, 18, typed, 20));
+        assertTrue(LspCompletion.extendsCachedWord(cached, 1, 18, cached, 18));
+        assertFalse(LspCompletion.extendsCachedWord(cached, 1, 18,
                 "class A {\n    void m() { Str. }\n}", 19));
-        assertFalse(JdtLsService.extendsCachedWord(cached, 1, 18,
+        assertFalse(LspCompletion.extendsCachedWord(cached, 1, 18,
                 "import x.Y;\nclass A {\n    void m() { Strin }\n}", 20));
-        assertFalse(JdtLsService.extendsCachedWord(cached, 1, 18,
+        assertFalse(LspCompletion.extendsCachedWord(cached, 1, 18,
                 "class A {\n    void m() { St }\n}", 17));
-        assertFalse(JdtLsService.extendsCachedWord(cached, 1, 18,
+        assertFalse(LspCompletion.extendsCachedWord(cached, 1, 18,
                 "class A {\n    void m() { Strin }\n}\n", 20));
     }
 
@@ -532,7 +532,7 @@ class JdtLsServiceTest {
         json.append(",{\"label\":\"first\",\"kind\":6,\"sortText\":\"000000001\"}");
         json.append("]}");
 
-        JdtLsService.CompletionAnswer answer = JdtLsService.completionItems(
+        LspCompletion.CompletionAnswer answer = LspCompletion.completionItems(
                 new ObjectMapper().readTree(json.toString()));
 
         assertEquals("first", answer.items().get(0).label());
@@ -544,7 +544,7 @@ class JdtLsServiceTest {
 
     @Test
     void completionItemsFallBackToLabelWhenSortTextIsMissing() throws Exception {
-        JdtLsService.CompletionAnswer answer = JdtLsService.completionItems(new ObjectMapper().readTree(
+        LspCompletion.CompletionAnswer answer = LspCompletion.completionItems(new ObjectMapper().readTree(
                 "[{\"label\":\"beta\",\"kind\":6},{\"label\":\"alpha\",\"kind\":6}]"));
 
         assertEquals(List.of("alpha", "beta"), answer.items().stream().map(item -> item.label()).toList());

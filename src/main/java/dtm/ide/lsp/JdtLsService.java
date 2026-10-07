@@ -87,6 +87,7 @@ import static dtm.ide.lsp.LspRequests.positionParams;
 import static dtm.ide.lsp.LspRequests.rangeParam;
 import static dtm.ide.lsp.LspRequests.rootCause;
 import static dtm.ide.lsp.LspRequests.rootMessage;
+import static dtm.ide.lsp.LspText.offsetIn;
 
 @Slf4j
 public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport, TypeMoveSupport,
@@ -107,8 +108,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     private volatile String lastRenameProblem;
     private volatile String lastMoveProblem;
-    private static final long INDEXING_COMPLETION_TIMEOUT_MS = 750;
-    private static final long READY_COMPLETION_TIMEOUT_MS = 1_500;
     private static final long INITIALIZE_CEILING_MS = 900_000;
     private static final long INITIALIZE_WAIT_SLICE_MS = 5_000;
     private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
@@ -134,7 +133,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static final int MAX_PENDING_WATCHED_FILES = 50_000;
     private static final int WATCHED_FILES_PER_NOTIFICATION = 512;
     private static final int MAX_REOPEN_DOCUMENTS = 30;
-    private static final int MAX_COMPLETION_ITEMS = 80;
     private static final long WARM_UP_TIMEOUT_MS = 8_000;
     private static final long DIAGNOSTICS_SETTLE_QUIET_MS = 2_000;
     private static final long DIAGNOSTICS_SETTLE_TIMEOUT_MS = 90_000;
@@ -149,7 +147,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private final JdtDocumentStore documents = new JdtDocumentStore();
     private final Map<Path, List<Diagnostic>> diagnosticsByPath = new ConcurrentHashMap<>();
     private final Map<Path, List<JsonNode>> rawDiagnosticsByPath = new ConcurrentHashMap<>();
-    private final Map<String, CompletionCache> completionCache = new ConcurrentHashMap<>();
     private final Set<String> workspaceWorkTokens = ConcurrentHashMap.newKeySet();
     private final Set<String> openedDuringImport = ConcurrentHashMap.newKeySet();
     private final AtomicLong workspaceRevision = new AtomicLong();
@@ -340,6 +337,43 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
     });
 
+    private final LspCompletion completion = new LspCompletion(requests, executor, new LspCompletion.Host() {
+        @Override
+        public ServerCapabilities capabilities() {
+            return capabilities;
+        }
+
+        @Override
+        public boolean isInteractive() {
+            return JdtLsService.this.isInteractive();
+        }
+
+        @Override
+        public boolean isReady() {
+            return JdtLsService.this.isReady();
+        }
+
+        @Override
+        public boolean syncBeforeRequest(Path filePath, String text) {
+            return JdtLsService.this.syncBeforeRequest(filePath, text);
+        }
+
+        @Override
+        public JdtDocumentStore documents() {
+            return documents;
+        }
+
+        @Override
+        public LspJsonRpcClient client() {
+            return client;
+        }
+
+        @Override
+        public void lateCompletion(Path filePath, int line, int col) {
+            lateCompletionListener.onLateCompletion(filePath, line, col);
+        }
+    });
+
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
         this.jdkService = jdkService;
@@ -352,13 +386,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     private record LaunchRequest(Path root, JdkInstallation jdk, DownloadProgressListener progress) {
-    }
-
-    private record CompletionCache(String text, int line, int col, String linePrefix,
-                                   boolean incomplete, List<AutoCompleteItem> items) {
-    }
-
-    record CompletionAnswer(List<AutoCompleteItem> items, boolean incomplete) {
     }
 
     @Override
@@ -1188,7 +1215,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         diagnosed.forEach(onDiagnosticsPublished);
         navigation.clearSymbols();
         decorations.reset();
-        completionCache.clear();
+        completion.clearCache();
         requests.clearInFlight();
         workspaceWorkTokens.clear();
         capabilities = ServerCapabilities.none();
@@ -1743,7 +1770,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         documents.remove(uri);
         navigation.forgetSymbols(uri);
         decorations.discardCodeLenses(uri);
-        completionCache.remove(uri);
+        completion.forget(uri);
         invalidateWorkspaceNavigation();
         requests.cancelInFlightForUri(uri);
 
@@ -1800,7 +1827,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         String uri = LspConversions.toUri(target);
         navigation.forgetSymbols(uri);
         decorations.discardCodeLenses(uri);
-        completionCache.remove(uri);
+        completion.forget(uri);
         invalidateWorkspaceNavigation();
 
         watchedFiles.add(target, changeType, System.nanoTime());
@@ -2035,7 +2062,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             }
             navigation.forgetSymbols(uri);
             decorations.discardCodeLenses(uri);
-            completionCache.remove(uri);
+            completion.forget(uri);
             Path path = LspConversions.toPath(uri);
             if (path == null) {
                 return;
@@ -2078,7 +2105,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         documents.uris().forEach(uri -> {
             navigation.forgetSymbols(uri);
             decorations.discardCodeLenses(uri);
-            completionCache.remove(uri);
+            completion.forget(uri);
             Path path = LspConversions.toPath(uri);
             if (path != null) {
                 onDiagnosticsPublished.accept(path);
@@ -2201,191 +2228,31 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public List<AutoCompleteItem> complete(Path filePath, String text, int line, int col) {
-        return complete(filePath, text, line, col, CompletionTrigger.INVOKED, null, ANY_VERSION);
+        return completion.complete(filePath, text, line, col);
     }
 
     public List<AutoCompleteItem> complete(Path filePath, String text, int line, int col,
                                            CompletionTrigger trigger, Character triggerCharacter,
                                            int expectedVersion) {
-        return complete(filePath, text, line, col, trigger, triggerCharacter, expectedVersion, false);
+        return completion.complete(filePath, text, line, col, trigger, triggerCharacter, expectedVersion);
     }
 
     public List<AutoCompleteItem> complete(Path filePath, String text, int line, int col,
                                            CompletionTrigger trigger, Character triggerCharacter,
                                            int expectedVersion, boolean announceLateResult) {
-        CompletableFuture<List<AutoCompleteItem>> pending = completeAsync(filePath, text, line, col,
-                trigger, triggerCharacter, expectedVersion);
-        long timeout = isReady() ? READY_COMPLETION_TIMEOUT_MS : INDEXING_COMPLETION_TIMEOUT_MS;
-        try {
-            return pending.get(timeout, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException timedOut) {
-            log.debug("Completion sem resposta em {} ms; aguardando em segundo plano", timeout);
-            if (announceLateResult) {
-                pending.thenAccept(late -> announceLateCompletion(filePath, line, col, late));
-            }
-            return List.of();
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            return List.of();
-        } catch (Exception failure) {
-            requests.logRequestFailure("textDocument/completion", failure);
-            return List.of();
-        }
+        return completion.complete(filePath, text, line, col, trigger, triggerCharacter, expectedVersion,
+                announceLateResult);
     }
 
     public CompletableFuture<List<AutoCompleteItem>> completeAsync(Path filePath, String text, int line,
                                                                    int col, CompletionTrigger trigger,
                                                                    Character triggerCharacter,
                                                                    int expectedVersion) {
-        if (!isInteractive()) {
-            return CompletableFuture.completedFuture(List.of());
-        }
-        String uri = LspConversions.toUri(filePath);
-        String requestedText = text == null ? "" : text;
-        int versionBeforeSync = documents.version(uri);
-        if (!syncBeforeRequest(filePath, text)) {
-            return CompletableFuture.completedFuture(List.of());
-        }
-        int expected = expectedVersion == versionBeforeSync ? documents.version(uri) : expectedVersion;
-        CompletionCache cached = completionCache.get(uri);
-        if (cached != null && cached.text().equals(requestedText)
-                && cached.line() == line && cached.col() == col) {
-            return CompletableFuture.completedFuture(cached.items());
-        }
-        int version = documents.version(uri);
-        if (isStaleVersion(expected, version)) {
-            log.debug("Completion descartada antes do envio: versao {} esperada, {} atual",
-                    expected, version);
-            return CompletableFuture.completedFuture(List.of());
-        }
-        CompletionTrigger kind = trigger == null ? CompletionTrigger.INVOKED : trigger;
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || !isInteractive()) {
-            return CompletableFuture.completedFuture(List.of());
-        }
-        long started = System.nanoTime();
-        String key = "completion|" + uri + "|" + version + "|" + line + "|" + col;
-        CompletableFuture<JsonNode> request = requests.shareInFlight(key, ignored ->
-                rpc.request("textDocument/completion",
-                        completionParams(filePath, line, col, kind, triggerCharacter)));
-        CompletableFuture<List<AutoCompleteItem>> items = request.handle((result, error) -> {
-            if (error != null) {
-                if (!(error instanceof java.util.concurrent.CancellationException)
-                        && !(error.getCause() instanceof java.util.concurrent.CancellationException)) {
-                    requests.logRequestFailure("textDocument/completion",
-                            error instanceof Exception exception ? exception : new Exception(error));
-                }
-                return List.<AutoCompleteItem>of();
-            }
-            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
-            int current = documents.version(uri);
-            if (!requestedText.equals(documents.content(uri)) || current != version
-                    || isStaleVersion(expected, current)) {
-                log.debug("Completion descartada: documento mudou durante a requisicao ({} ms)",
-                        elapsedMs);
-                return List.<AutoCompleteItem>of();
-            }
-            CompletionAnswer answer = completionItems(result);
-            completionCache.put(uri, new CompletionCache(requestedText, line, col,
-                    linePrefixAtWordStart(requestedText, line, col), answer.incomplete(), answer.items()));
-            log.debug("Completion com {} item(ns) em {} ms (acionamento {}, incompleta={})",
-                    answer.items().size(), elapsedMs, kind, answer.incomplete());
-            return answer.items();
-        });
-        items.whenComplete((ignored, error) -> {
-            if (items.isCancelled()) {
-                request.cancel(false);
-            }
-        });
-        return items;
+        return completion.completeAsync(filePath, text, line, col, trigger, triggerCharacter, expectedVersion);
     }
 
     public CompletableFuture<AutoCompleteItem> resolveCompletionAsync(AutoCompleteItem item) {
-        if (item == null || !capabilities.completionResolve() || !(item.data() instanceof JsonNode raw)) {
-            return CompletableFuture.completedFuture(item);
-        }
-        return requests.requestAsync("completionItem/resolve", raw, requests.interactiveTimeoutMs(), true)
-                .thenApply(resolved -> LspConversions.withResolvedDocumentation(item, resolved));
-    }
-
-    private void announceLateCompletion(Path filePath, int line, int col, List<AutoCompleteItem> late) {
-        if (late == null || late.isEmpty()) {
-            return;
-        }
-        log.debug("Completion atrasada chegou com {} item(ns)", late.size());
-        try {
-            lateCompletionListener.onLateCompletion(filePath, line, col);
-        } catch (Exception e) {
-            log.debug("Falha ao reabrir a completion atrasada: {}", e.getMessage());
-        }
-    }
-
-    static CompletionAnswer completionItems(JsonNode result) {
-        if (result == null) {
-            return new CompletionAnswer(List.of(), false);
-        }
-        JsonNode items = result.isArray() ? result : result.get("items");
-        boolean incomplete = !result.isArray() && result.path("isIncomplete").asBoolean(false);
-        if (items == null || !items.isArray()) {
-            return new CompletionAnswer(List.of(), incomplete);
-        }
-        List<SortableCompletion> sortable = new ArrayList<>(items.size());
-        for (JsonNode node : items) {
-            if (node == null || node.path("label").asText("").isBlank()) {
-                continue;
-            }
-            AutoCompleteItem item = LspConversions.completionItem(node);
-            if (item != null) sortable.add(new SortableCompletion(completionSortKey(node), item));
-        }
-        sortable.sort(Comparator.comparing(SortableCompletion::key));
-        if (sortable.size() > MAX_COMPLETION_ITEMS) {
-            incomplete = true;
-        }
-        List<AutoCompleteItem> completions = sortable.stream()
-                .limit(MAX_COMPLETION_ITEMS)
-                .map(SortableCompletion::item)
-                .toList();
-        return new CompletionAnswer(completions, incomplete);
-    }
-
-    private record SortableCompletion(String key, AutoCompleteItem item) {
-    }
-
-    static String completionSortKey(JsonNode node) {
-        for (String field : List.of("sortText", "filterText", "label")) {
-            String value = node.path(field).asText("");
-            if (!value.isBlank()) {
-                return value;
-            }
-        }
-        return "";
-    }
-
-    static String linePrefixAtWordStart(String text, int line, int col) {
-        String lineText = lineOf(text, line);
-        int end = Math.max(0, Math.min(col, lineText.length()));
-        int start = end;
-        while (start > 0 && Character.isJavaIdentifierPart(lineText.charAt(start - 1))) {
-            start--;
-        }
-        return lineText.substring(0, start);
-    }
-
-    private static String lineOf(String text, int line) {
-        if (text == null || line < 0) {
-            return "";
-        }
-        int start = 0;
-        for (int current = 0; current < line; current++) {
-            int newline = text.indexOf('\n', start);
-            if (newline < 0) {
-                return "";
-            }
-            start = newline + 1;
-        }
-        int end = text.indexOf('\n', start);
-        String lineText = end < 0 ? text.substring(start) : text.substring(start, end);
-        return lineText.endsWith("\r") ? lineText.substring(0, lineText.length() - 1) : lineText;
+        return completion.resolveCompletionAsync(item);
     }
 
     public int documentVersion(Path filePath) {
@@ -2395,77 +2262,16 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         return documents.version(LspConversions.toUri(filePath));
     }
 
-    static boolean isStaleVersion(int expectedVersion, int currentVersion) {
-        return expectedVersion != ANY_VERSION && expectedVersion != currentVersion;
-    }
-
-    private static Map<String, Object> completionParams(Path filePath, int line, int col,
-                                                        CompletionTrigger trigger,
-                                                        Character triggerCharacter) {
-        Map<String, Object> params = positionParams(filePath, line, col);
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("triggerKind", trigger.lspKind());
-        if (trigger == CompletionTrigger.TRIGGER_CHARACTER && triggerCharacter != null) {
-            context.put("triggerCharacter", String.valueOf(triggerCharacter.charValue()));
-        }
-        params.put("context", context);
-        return params;
-    }
-
     public List<AutoCompleteItem> cachedCompletions(Path filePath, String text, int line, int col) {
-        if (filePath == null) return List.of();
-        CompletionCache cached = completionCache.get(LspConversions.toUri(filePath));
-        return isReusable(cached, text, line, col) ? cached.items() : List.of();
-    }
-
-    private static boolean isReusable(CompletionCache cached, String text, int line, int col) {
-        if (cached == null || cached.line() != line || col < cached.col()) {
-            return false;
-        }
-        if (cached.text().equals(text) && cached.col() == col) {
-            return true;
-        }
-        return !cached.incomplete() && extendsCachedWord(cached.text(), line, cached.col(), text, col)
-                && cached.items().stream().allMatch(item -> item.replacementRange() == null && !item.hasAdditionalTextEdits());
+        return completion.cachedCompletions(filePath, text, line, col);
     }
 
     public List<AutoCompleteItem> reusableCompletions(Path filePath, String text, int line, int col) {
-        if (filePath == null || text == null) return List.of();
-        CompletionCache cached = completionCache.get(LspConversions.toUri(filePath));
-        if (cached == null || cached.incomplete() || cached.line() != line) return List.of();
-        return extendsCachedWord(cached.text(), line, cached.col(), text, col)
-                && cached.items().stream().allMatch(item -> item.replacementRange() == null && !item.hasAdditionalTextEdits())
-                ? cached.items()
-                : List.of();
-    }
-
-    static boolean extendsCachedWord(String cachedText, int line, int cachedCol, String text, int col) {
-        if (cachedText == null || text == null || col < cachedCol) {
-            return false;
-        }
-        int cachedOffset = offsetIn(cachedText, new Position(line, cachedCol));
-        int offset = offsetIn(text, new Position(line, col));
-        if (cachedOffset < 0 || offset < 0) {
-            return false;
-        }
-        int typed = offset - cachedOffset;
-        if (typed != col - cachedCol || text.length() - cachedText.length() != typed) {
-            return false;
-        }
-        if (!text.regionMatches(0, cachedText, 0, cachedOffset)) {
-            return false;
-        }
-        for (int index = cachedOffset; index < offset; index++) {
-            if (!Character.isJavaIdentifierPart(text.charAt(index))) {
-                return false;
-            }
-        }
-        return text.regionMatches(offset, cachedText, cachedOffset, cachedText.length() - cachedOffset);
+        return completion.reusableCompletions(filePath, text, line, col);
     }
 
     public void warmCompletion(Path filePath, String text, int line, int col) {
-        if (!isInteractive() || isReady() || filePath == null) return;
-        executor.submit(() -> complete(filePath, text, line, col));
+        completion.warmCompletion(filePath, text, line, col);
     }
 
     public CompletableFuture<HoverInfo> hoverAsync(Path filePath, String text, int line, int col) {
@@ -2847,23 +2653,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             end++;
         }
         return end > start ? normalized.substring(start, end) : null;
-    }
-
-    private static int offsetIn(String text, Position position) {
-        int line = 0;
-        int index = 0;
-        while (line < position.line()) {
-            int next = text.indexOf('\n', index);
-            if (next < 0) {
-                return -1;
-            }
-            index = next + 1;
-            line++;
-        }
-        int lineEnd = text.indexOf('\n', index);
-        int limit = lineEnd < 0 ? text.length() : lineEnd;
-        long offset = (long) index + position.col();
-        return position.col() < 0 || offset > limit ? -1 : (int) offset;
     }
 
     public PrepareRenameResult prepareRename(Path filePath, String text, int line, int col) {
