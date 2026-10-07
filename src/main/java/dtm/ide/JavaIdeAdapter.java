@@ -57,6 +57,7 @@ import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildToolsSupport;
 import dtm.ide.adapter.CompletionEngine;
 import dtm.ide.adapter.DiagnosticsEngine;
+import dtm.ide.adapter.RenameSupport;
 import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.JdkManagerSupport;
@@ -396,17 +397,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String BUILD_PROBLEMS_OWNER = "java.build";
     private static final String LSP_PROBLEMS_OWNER = "java.lsp";
     private volatile ProblemsActionHandle clearBuildAction;
-    private static final long RENAME_WAIT_BUDGET_MS = 60_000;
     private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
     private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
-    private static final String RENAME_PROGRESS_ID = "javaRenameWait";
-    private static final Set<String> JAVA_RESERVED_WORDS = Set.of(
-            "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
-            "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
-            "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long", "native",
-            "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp",
-            "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void",
-            "volatile", "while", "true", "false", "null", "_");
     private static final String BUILD_PROGRESS_ID = "javaBuild";
     private static final String RUN_BUILD_PROGRESS_ID = "javaRunBuild";
     private static final long LSP_DEBUG_POLL_MS = 250;
@@ -428,7 +420,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String LSP_PROGRESS_ID = "javaLanguageServer";
-    private static final String RENAME_COMPUTE_PROGRESS_ID = "javaRename";
     private static final String LSP_WORK_PROGRESS_ID = "javaLanguageServerWork";
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
     private static final String SYNC_PROGRESS_ID = "javaProjectSync";
@@ -851,6 +842,21 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestShowCodeActions(Path file) {
             JavaIdeAdapter.this.requestShowCodeActions(file);
         }
+    
+        @Override
+        public JavaLanguageServer runningServerFor(Path file) {
+            return JavaIdeAdapter.this.runningServerFor(file);
+        }
+
+        @Override
+        public void showProgress(String id, String message) {
+            JavaIdeAdapter.this.showProgress(id, message);
+        }
+
+        @Override
+        public void updateProgress(String id, String message, int percent, boolean cancellable, Runnable onCancel) {
+            JavaIdeAdapter.this.updateProgress(id, message, percent, cancellable, onCancel);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -862,12 +868,12 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final CoverageSupport coverageSupport = new CoverageSupport(adapterHost);
     private final CompletionEngine completionEngine = new CompletionEngine(adapterHost);
     private final DiagnosticsEngine diagnosticsEngine = new DiagnosticsEngine(adapterHost);
+    private final RenameSupport renameSupport = new RenameSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
             new JavaFastCompletionProvider(lexicalIndex);
     private final AtomicLong problemsRefreshTicket = new AtomicLong();
-    private final AtomicBoolean renameWaitCanceled = new AtomicBoolean();
     private final AtomicBoolean diagnosticReanalysisRunning = new AtomicBoolean();
     private final PomProperties pomProperties = new PomProperties(this::pomLocalRepository);
     private final BuildFileCompletionProvider buildFileCompletion =
@@ -3645,313 +3651,32 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<TextEdit> computeRenameEdits(IdeRenameContext context) {
-        Path filePath = context == null ? null : context.filePath();
-        if (JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        JavaLanguageServer lsp = runningServerFor(filePath);
-        return lsp == null ? null : lsp.rename(context.filePath(), context.text(),
-                context.line(), context.col(), context.newName());
+        return renameSupport.computeRenameEdits(context);
     }
 
     @Override
     public IdeWorkspaceEdit computeRenameWorkspaceEdit(IdeRenameContext context) {
-        Path filePath = context == null ? null : context.filePath();
-        if (!JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        showProgress(RENAME_COMPUTE_PROGRESS_ID, text("rename.progress", "Java: renomeando para '{name}'...")
-                .replace("{name}", context.newName() == null ? "" : context.newName().trim()));
-        try {
-            JavaLanguageServer lsp = runningServerFor(filePath);
-            if (lsp == null) {
-                lsp = awaitServerForRename(filePath);
-            }
-            if (lsp == null) {
-                return null;
-            }
-            IdeWorkspaceEdit edit = lsp.renameWorkspace(filePath, context.text(),
-                    context.line(), context.col(), context.newName());
-            String problem = lsp.lastRenameProblem();
-            if (problem != null) {
-                setStatusBarText(text("rename.unsafeEdit",
-                        "Rename cancelado para proteger o código: {reason}").replace("{reason}", problem));
-                return edit;
-            }
-            return edit == null || edit.isEmpty() ? edit : withLombokAccessors(lsp, context, edit);
-        } finally {
-            hideProgress(RENAME_COMPUTE_PROGRESS_ID);
-        }
-    }
-
-    private IdeWorkspaceEdit withLombokAccessors(JavaLanguageServer lsp, IdeRenameContext context, IdeWorkspaceEdit edit) {
-        try {
-            Path current = JavaProjectConventions.normalize(context.filePath());
-            LombokAccessorRename.Result result = LombokAccessorRename.apply(lsp, current, context.text(),
-                    context.line(), context.col(), context.newName(), edit, lexicalIndex::filesMayContain,
-                    file -> renameContentOf(lsp, file, current, context.text()));
-            if (result.accessors().isEmpty()) {
-                return edit;
-            }
-            log.info("Rename com Lombok: {} chamada(s) de {} atualizada(s)", result.calls(),
-                    result.accessors().stream().map(LombokAccessors.Accessor::oldName).toList());
-            if (result.calls() > 0) {
-                setStatusBarText(text("rename.lombokAccessors", "Java: {count} chamada(s) de métodos do Lombok renomeada(s)")
-                        .replace("{count}", Integer.toString(result.calls())));
-            }
-            return result.edit();
-        } catch (Exception e) {
-            log.warn("Nao foi possivel renomear os metodos gerados pelo Lombok: {}", e.toString());
-            return edit;
-        }
-    }
-
-    private static String renameContentOf(JavaLanguageServer lsp, Path file, Path current, String currentText) {
-        Path normalized = JavaProjectConventions.normalize(file);
-        if (normalized.equals(current)) {
-            return currentText;
-        }
-        String open = lsp.documentContent(normalized);
-        if (open != null) {
-            return open;
-        }
-        String disk = JavaProjectConventions.readOrEmpty(normalized);
-        return disk.startsWith("﻿") ? disk.substring(1) : disk;
+        return renameSupport.computeRenameWorkspaceEdit(context);
     }
 
     @Override
     public boolean isRenameEnabled(Path filePath) {
-        return runningServerFor(filePath) != null;
+        return renameSupport.isRenameEnabled(filePath);
     }
 
     @Override
     public IdeRenamePolicy getRenamePolicy(Path filePath) {
-        return JavaProjectConventions.isJava(filePath) ? IdeRenamePolicy.inline() : IdeRenamePolicy.undeclared();
+        return renameSupport.getRenamePolicy(filePath);
     }
 
     @Override
     public IdeRenamePreparation prepareRename(IdeRenamePrepareContext context) {
-        Path filePath = context == null ? null : context.filePath();
-        if (!JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        String text = context.text();
-        JavaLanguageServer lsp = runningServerFor(filePath);
-        if (lsp == null) {
-            return IdeRenamePreparation.rejected(isServerStarting(filePath)
-                    ? text("rename.serverLoading", "Aguarde o servidor Java terminar de carregar para renomear")
-                    : text("rename.serverUnavailable", "O servidor Java não está disponível para renomear com segurança"));
-        }
-        PrepareRenameResult prepared = lsp.prepareRename(filePath, text, context.line(), context.col());
-        if (prepared != null && !prepared.renameable()) {
-            return IdeRenamePreparation.rejected(text("rename.notRenameable",
-                    "Este elemento não pode ser renomeado"));
-        }
-        Range range = prepared == null ? null : prepared.range();
-        if (range == null) {
-            range = identifierRangeAt(text, context.line(), context.col());
-        }
-        if (range == null) {
-            return null;
-        }
-        String placeholder = prepared == null ? null : prepared.placeholder();
-        if (placeholder == null || placeholder.isBlank()) {
-            placeholder = textOfRange(text, range);
-        }
-        List<Range> occurrences = new ArrayList<>();
-        List<DocumentHighlight> highlights = lsp.documentHighlights(filePath, text, context.line(), context.col());
-        if (highlights != null) {
-            for (DocumentHighlight highlight : highlights) {
-                if (highlight != null && highlight.range() != null) {
-                    occurrences.add(highlight.range());
-                }
-            }
-        }
-        SymbolKind kind = resolveRenameKind(lsp, filePath, text, context.line(), context.col(), placeholder);
-        return IdeRenamePreparation.of(range, placeholder)
-                .withOccurrences(occurrences)
-                .withKind(kind);
+        return renameSupport.prepareRename(context);
     }
 
     @Override
     public String validateRenameName(IdeRenamePrepareContext context, String newName) {
-        if (context == null || !JavaProjectConventions.isJava(context.filePath())) {
-            return null;
-        }
-        String name = newName == null ? "" : newName.trim();
-        if (name.isEmpty()) {
-            return null;
-        }
-        if (JAVA_RESERVED_WORDS.contains(name)) {
-            return text("rename.reservedWord", "'{name}' é uma palavra reservada do Java").replace("{name}", name);
-        }
-        if (!Character.isJavaIdentifierStart(name.charAt(0))) {
-            return text("rename.invalidIdentifier", "'{name}' não é um identificador Java válido").replace("{name}", name);
-        }
-        for (int i = 1; i < name.length(); i++) {
-            if (!Character.isJavaIdentifierPart(name.charAt(i))) {
-                return text("rename.invalidIdentifier", "'{name}' não é um identificador Java válido").replace("{name}", name);
-            }
-        }
-        return null;
-    }
-
-    private boolean isServerStarting(Path filePath) {
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp == null || !JavaProjectConventions.isJava(filePath)) {
-            return false;
-        }
-        LanguageServerState state = lsp.getState();
-        return state == LanguageServerState.NOT_STARTED
-                || state == LanguageServerState.STARTING
-                || state == LanguageServerState.INDEXING;
-    }
-
-    private SymbolKind resolveRenameKind(JavaLanguageServer lsp, Path filePath, String text, int line, int col, String name) {
-        Position position = new Position(line, col);
-        SymbolKind declared = symbolKindAt(lsp.documentSymbols(filePath, text), position);
-        if (declared != null) {
-            return declared;
-        }
-        try {
-            if (JavaLocalScope.at(text, line, col) != null) {
-                return SymbolKind.VARIABLE;
-            }
-        } catch (Exception ignored) {
-        }
-        List<Location> definitions = lsp.definitions(filePath, text, line, col);
-        Location definition = definitions == null || definitions.isEmpty() ? null : definitions.get(0);
-        if (definition != null && definition.range() != null && isSameFile(definition, filePath)) {
-            SymbolKind atDefinition = symbolKindAt(lsp.documentSymbols(filePath, text), definition.range().start());
-            if (atDefinition != null) {
-                return atDefinition;
-            }
-            return SymbolKind.VARIABLE;
-        }
-        List<CallHierarchyItem> calls = lsp.prepareCallHierarchy(filePath, text, line, col);
-        if (calls != null && !calls.isEmpty() && calls.get(0).kind() != null) {
-            return calls.get(0).kind();
-        }
-        if (definition != null && name != null && !name.isEmpty() && Character.isUpperCase(name.charAt(0))) {
-            String fileName = definitionFileName(definition);
-            if (fileName != null && fileName.equals(name + ".java")) {
-                return SymbolKind.CLASS;
-            }
-        }
-        return SymbolKind.FIELD;
-    }
-
-    private static SymbolKind symbolKindAt(List<DocumentSymbol> symbols, Position position) {
-        if (symbols == null || position == null) {
-            return null;
-        }
-        for (DocumentSymbol symbol : symbols) {
-            if (symbol.range() != null && !symbol.range().contains(position)) {
-                continue;
-            }
-            SymbolKind nested = symbolKindAt(symbol.children(), position);
-            if (nested != null) {
-                return nested;
-            }
-            if (symbol.selectionRange() != null && symbol.selectionRange().contains(position)) {
-                return symbol.kind();
-            }
-        }
-        return null;
-    }
-
-    private static boolean isSameFile(Location location, Path filePath) {
-        if (location.isLocal()) {
-            return true;
-        }
-        try {
-            Path target = Path.of(URI.create(location.uri())).toAbsolutePath().normalize();
-            return filePath != null && target.equals(filePath.toAbsolutePath().normalize());
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private static String definitionFileName(Location location) {
-        if (location == null || location.isLocal()) {
-            return null;
-        }
-        String uri = location.uri();
-        int slash = uri.lastIndexOf('/');
-        String name = slash >= 0 ? uri.substring(slash + 1) : uri;
-        int query = name.indexOf('?');
-        return query >= 0 ? name.substring(0, query) : name;
-    }
-
-    private static Range identifierRangeAt(String text, int line, int col) {
-        if (text == null) {
-            return null;
-        }
-        String[] lines = text.split("\n", -1);
-        if (line < 0 || line >= lines.length) {
-            return null;
-        }
-        String lineText = lines[line];
-        int start = Math.max(0, Math.min(col, lineText.length()));
-        int end = start;
-        while (start > 0 && Character.isJavaIdentifierPart(lineText.charAt(start - 1))) {
-            start--;
-        }
-        while (end < lineText.length() && Character.isJavaIdentifierPart(lineText.charAt(end))) {
-            end++;
-        }
-        if (end <= start) {
-            return null;
-        }
-        return Range.of(line, start, line, end);
-    }
-
-    private static String textOfRange(String text, Range range) {
-        if (text == null || range == null || range.start().line() != range.end().line()) {
-            return null;
-        }
-        String[] lines = text.split("\n", -1);
-        int line = range.start().line();
-        if (line < 0 || line >= lines.length) {
-            return null;
-        }
-        String lineText = lines[line];
-        int start = Math.max(0, Math.min(range.start().col(), lineText.length()));
-        int end = Math.max(start, Math.min(range.end().col(), lineText.length()));
-        return lineText.substring(start, end);
-    }
-
-    private JavaLanguageServer awaitServerForRename(Path filePath) {
-        if (!isServerStarting(filePath)) {
-            return null;
-        }
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp == null) {
-            return null;
-        }
-        renameWaitCanceled.set(false);
-        String waiting = text("status.renameWaiting",
-                "Java: aguardando a indexacao para renomear com seguranca");
-        showProgress(RENAME_PROGRESS_ID, waiting, true, () -> renameWaitCanceled.set(true));
-        updateProgress(RENAME_PROGRESS_ID, waiting, -1, true, () -> renameWaitCanceled.set(true));
-        try {
-            long deadline = System.nanoTime()
-                    + TimeUnit.MILLISECONDS.toNanos(RENAME_WAIT_BUDGET_MS);
-            while (System.nanoTime() < deadline && !renameWaitCanceled.get()) {
-                if (lsp.awaitReady(250)) {
-                    return runningServerFor(filePath);
-                }
-                if (lsp.getState() == LanguageServerState.ERROR
-                        || lsp.getState() == LanguageServerState.STOPPED) {
-                    break;
-                }
-            }
-        } finally {
-            hideProgress(RENAME_PROGRESS_ID);
-        }
-        setStatusBarText(text("status.renameDuringIndexing",
-                "Java: renomear com seguranca exige a indexacao concluida"));
-        return null;
+        return renameSupport.validateRenameName(context, newName);
     }
 
     @Override

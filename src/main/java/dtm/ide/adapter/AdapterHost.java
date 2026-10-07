@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import javax.swing.*;
 import javax.swing.Icon;
 import javax.swing.JComponent;
 
@@ -112,4 +113,7 @@ public interface AdapterHost extends AdapterContext {
     Resource resource();
     void requestRefreshDiagnostics(Path file);
     void requestShowCodeActions(Path file);
+    JavaLanguageServer runningServerFor(Path file);
+    void showProgress(String id, String message);
+    void updateProgress(String id, String message, int percent, boolean cancellable, Runnable onCancel);
 }
