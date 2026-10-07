@@ -189,6 +189,8 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
     });
 
+    private final JdtClassFiles classFiles = new JdtClassFiles(requests, () -> capabilities.definition());
+
     private final LspDecorations decorations = new LspDecorations(requests, executor, new LspDecorations.Host() {
         @Override
         public ServerCapabilities capabilities() {
@@ -1798,60 +1800,27 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public List<Location> definitionsAtUri(String uri, int line, int col) {
-        if (!capabilities.definition() || !JavaClassFileNavigation.isClassFileUri(uri)) {
-            return List.of();
-        }
-        Map<String, Object> params = Map.of(
-                "textDocument", Map.of("uri", uri),
-                "position", Map.of(
-                        "line", Math.max(0, line),
-                        "character", Math.max(0, col)));
-        return LspConversions.locations(requests.requestInteractive(
-                "textDocument/definition", params, INTERACTIVE_TIMEOUT_MS));
+        return classFiles.definitionsAtUri(uri, line, col);
     }
 
     public HoverInfo hoverAtUri(String uri, int line, int col) {
-        if (!JavaClassFileNavigation.isClassFileUri(uri)) {
-            return null;
-        }
-        Map<String, Object> params = Map.of(
-                "textDocument", Map.of("uri", uri),
-                "position", Map.of(
-                        "line", Math.max(0, line),
-                        "character", Math.max(0, col)));
-        return LspConversions.hover(requests.requestInteractive(
-                "textDocument/hover", params, INTERACTIVE_TIMEOUT_MS));
+        return classFiles.hoverAtUri(uri, line, col);
     }
 
     public boolean isClassFileUri(String uri) {
-        return JavaClassFileNavigation.isClassFileUri(uri);
+        return classFiles.isClassFileUri(uri);
     }
 
     public String classFileSourceName(String uri) {
-        return JavaClassFileNavigation.sourceFileName(uri);
+        return classFiles.classFileSourceName(uri);
     }
 
     public String classFileTabKey(String uri) {
-        return JavaClassFileNavigation.tabKey(uri);
+        return classFiles.classFileTabKey(uri);
     }
 
     public String classFileContents(String uri) {
-        if (!JavaClassFileNavigation.isClassFileUri(uri)) {
-            return null;
-        }
-        JsonNode result = requests.requestInteractive(
-                "java/classFileContents", Map.of("uri", uri), REQUEST_TIMEOUT_MS * 2);
-        if (result == null || result.isNull()) {
-            return null;
-        }
-        if (result.isTextual()) {
-            return result.asText();
-        }
-        String content = result.path("contents").asText("");
-        if (content.isBlank()) {
-            content = result.path("content").asText("");
-        }
-        return content.isBlank() ? null : content;
+        return classFiles.classFileContents(uri);
     }
 
     public boolean supportsTypeHierarchy() {
