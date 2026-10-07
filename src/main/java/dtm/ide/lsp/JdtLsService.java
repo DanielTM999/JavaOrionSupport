@@ -67,9 +67,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
-import java.util.function.LongConsumer;
 
 import static dtm.ide.lsp.LspRequests.INDEXING_INTERACTIVE_TIMEOUT_MS;
 import static dtm.ide.lsp.LspRequests.INTERACTIVE_TIMEOUT_MS;
@@ -88,8 +86,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
 
-    private static final long INITIALIZE_CEILING_MS = 900_000;
-    private static final long INITIALIZE_WAIT_SLICE_MS = 5_000;
     private static final long SHUTDOWN_TIMEOUT_MS = 10_000;
     private static final long EXIT_TIMEOUT_MS = 5_000;
     private static final long UNLOAD_SHUTDOWN_TIMEOUT_MS = 500;
@@ -1093,28 +1089,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
     }
 
-    static JsonNode awaitWhileAlive(CompletableFuture<JsonNode> response, BooleanSupplier keepWaiting,
-                                    long sliceMs, long ceilingMs, LongConsumer onWaiting) throws Exception {
-        long started = System.nanoTime();
-        while (true) {
-            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
-            long remaining = ceilingMs - elapsed;
-            if (remaining <= 0) {
-                response.cancel(false);
-                throw new TimeoutException("o JDT LS nao respondeu em " + ceilingMs + " ms");
-            }
-            try {
-                return response.get(Math.min(sliceMs, remaining), TimeUnit.MILLISECONDS);
-            } catch (TimeoutException slice) {
-                if (!keepWaiting.getAsBoolean()) {
-                    response.cancel(false);
-                    throw new IllegalStateException("o processo do JDT LS encerrou durante a inicializacao");
-                }
-                onWaiting.accept(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
-            }
-        }
-    }
-
     private JdkInstallation resolveServerJdk(JdkInstallation preferred) {
         if (preferred != null && preferred.major() >= JdkService.LANGUAGE_SERVER_MIN_MAJOR
                 && preferred.isJdk()) {
@@ -1383,28 +1357,12 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (rpc == null) {
             throw new IllegalStateException("Cliente LSP indisponivel");
         }
-        Map<String, Object> params = new LinkedHashMap<>();
-        params.put("processId", ProcessHandle.current().pid());
-        params.put("rootUri", LspConversions.toUri(root));
-        params.put("workspaceFolders", List.of(Map.of(
-                "uri", LspConversions.toUri(root),
-                "name", root.getFileName() == null ? "workspace" : root.getFileName().toString())));
-        params.put("capabilities", LspClientCapabilities.build(LspDecorations.TOKEN_TYPES, LspDecorations.TOKEN_MODIFIERS));
         JdkInstallation configuredJdk = preferredProjectJdk == null ? runtime : preferredProjectJdk;
         effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode,
                 inlayHintsMode);
         effectiveSettings = JdtLsSettings.withMavenSettings(effectiveSettings, root);
-        params.put("initializationOptions", dialect.initializationOptions(effectiveSettings, bundlePaths));
-
-        JsonNode result = awaitWhileAlive(rpc.request("initialize", params),
-                () -> server.isAlive() && isCurrent(launchGeneration),
-                INITIALIZE_WAIT_SLICE_MS, INITIALIZE_CEILING_MS,
-                elapsed -> statusListener.onStatus("Java: iniciando o JDT LS... "
-                        + TimeUnit.MILLISECONDS.toSeconds(elapsed) + " s", -1));
-        capabilities = LspClientCapabilities.readServerCapabilities(result);
-        rpc.notify("initialized", Map.of());
-        rpc.notify("workspace/didChangeConfiguration",
-                Map.of("settings", effectiveSettings));
+        capabilities = session.initialize(rpc, server, root, effectiveSettings, bundlePaths,
+                dialect, () -> isCurrent(launchGeneration));
     }
 
     public boolean isDebugAdapterAvailable() {

@@ -22,7 +22,7 @@ class JdtLsStartupWaitTest {
         CompletableFuture<JsonNode> response = new CompletableFuture<>();
         List<Long> waits = new ArrayList<>();
 
-        JsonNode result = JdtLsService.awaitWhileAlive(response, () -> true, 20, 5_000, elapsed -> {
+        JsonNode result = LspSession.awaitWhileAlive(response, () -> true, 20, 5_000, elapsed -> {
             waits.add(elapsed);
             if (waits.size() == 3) {
                 response.complete(TextNode.valueOf("ok"));
@@ -41,7 +41,7 @@ class JdtLsStartupWaitTest {
         long started = System.nanoTime();
 
         IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
-                JdtLsService.awaitWhileAlive(response, alive::get, 20, 60_000, elapsed -> alive.set(false)));
+                LspSession.awaitWhileAlive(response, alive::get, 20, 60_000, elapsed -> alive.set(false)));
 
         assertTrue(failure.getMessage().contains("encerrou"));
         assertTrue(response.isCancelled());
@@ -53,13 +53,13 @@ class JdtLsStartupWaitTest {
         CompletableFuture<JsonNode> response = new CompletableFuture<>();
 
         assertThrows(TimeoutException.class, () ->
-                JdtLsService.awaitWhileAlive(response, () -> true, 10, 50, elapsed -> { }));
+                LspSession.awaitWhileAlive(response, () -> true, 10, 50, elapsed -> { }));
         assertTrue(response.isCancelled());
     }
 
     @Test
     void anAnswerThatIsAlreadyThereComesBackImmediately() throws Exception {
-        JsonNode result = JdtLsService.awaitWhileAlive(
+        JsonNode result = LspSession.awaitWhileAlive(
                 CompletableFuture.completedFuture(TextNode.valueOf("pronto")), () -> false, 20, 50, elapsed -> { });
 
         assertEquals("pronto", result.asText());
