@@ -1,5 +1,14 @@
 package dtm.ide;
 
+import dtm.ide.lsp.api.ClassFileSupport;
+import dtm.ide.lsp.api.DebugAdapterSupport;
+import dtm.ide.lsp.api.ImportCandidateSupport;
+import dtm.ide.lsp.api.ImportLookup;
+import dtm.ide.lsp.api.JavaAgentSupport;
+import dtm.ide.lsp.api.JavaLanguageServer;
+import dtm.ide.lsp.api.ProjectModelSupport;
+import dtm.ide.lsp.api.SourceGenerationSupport;
+import dtm.ide.lsp.api.TestDiscoverySupport;
 import dtm.ide.lsp.api.CompletionTrigger;
 import dtm.ide.lsp.api.JavaCodeLens;
 import dtm.ide.lsp.api.LanguageServerState;
@@ -126,11 +135,9 @@ import dtm.ide.navigation.JavaNavigation.Result;
 import dtm.ide.navigation.JavaNavigation.Status;
 import dtm.ide.navigation.JavaNavigation.Extent;
 import dtm.ide.editor.theme.JavaEditorTheme;
-import dtm.ide.lsp.ImportCandidates;
 import dtm.ide.lsp.JdtLsExtensionBundles;
 import dtm.ide.lsp.JdtLsProvisioner;
 import dtm.ide.lsp.JdtLsService;
-import dtm.ide.lsp.JavaClassFileNavigation;
 import dtm.ide.lsp.LombokAccessorRename;
 import dtm.ide.lsp.LombokAccessors;
 import dtm.ide.lsp.LombokAgentResolver;
@@ -508,7 +515,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String MENU_ID_RELOAD = "java.tree.reload";
     private static final String MENU_ID_MARK_DIRECTORY = "java.tree.markDirectory";
 
-    private volatile JdtLsService jdtLs;
+    private volatile JavaLanguageServer jdtLs;
+    private volatile ClassFileSupport classFileUris;
     private volatile boolean unloaded;
     private volatile LombokAgentResolver lombokResolver;
     private final LombokSupport lombokSupport = new LombokSupport(this::onLombokStatusChanged);
@@ -644,7 +652,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             staticRunConfigurations = List.of();
         }
         background.cancelPending();
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             lsp.resetProjectState();
             if (switching && closingRoot != null) {
@@ -734,7 +742,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (action != null) {
             action.unregister();
         }
-        JdtLsService lsp;
+        JavaLanguageServer lsp;
         synchronized (this) {
             lsp = jdtLs;
             jdtLs = null;
@@ -806,7 +814,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         problems.clearAll();
         refreshProblemsPanel();
         clearCoverage();
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
 
         background.submit(() -> {
             JavaProjectDescriptor described = timed("describe(clearCaches)",
@@ -1065,7 +1073,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void awaitLanguageServerBeforeBuild(long ticket, Path root) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null) {
             return;
         }
@@ -1124,7 +1132,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     "Java: IntelliSense desligado nas preferencias"));
             return;
         }
-        JdtLsService lsp = ensureLanguageServer();
+        JavaLanguageServer lsp = ensureLanguageServer();
         if (lsp.isInteractive() && root.equals(lsp.getProjectRoot())) {
             return;
         }
@@ -1166,11 +1174,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         });
     }
 
-    private synchronized JdtLsService ensureLanguageServer() {
+    private synchronized JavaLanguageServer ensureLanguageServer() {
         if (unloaded) {
             throw new IllegalStateException("plugin Java descarregado");
         }
-        JdtLsService existing = jdtLs;
+        JavaLanguageServer existing = jdtLs;
         if (existing != null) {
             return existing;
         }
@@ -1194,6 +1202,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         created.setLateCompletionListener(this::onLateCompletion);
         created.setDocumentUpgradeListener(this::onLanguageServerDocumentUpgrade);
         languageServerReadyHandled.set(false);
+        classFileUris = created.extension(ClassFileSupport.class);
         jdtLs = created;
         return created;
     }
@@ -1208,7 +1217,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             conditionSession.diagnosticsPublished();
             return;
         }
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null && lsp.isReady()) {
             problems.supersedeCompilerProblems(normalized);
         }
@@ -1224,28 +1233,29 @@ public class JavaIdeAdapter extends IdeAdapter {
         refreshProblemsPanel();
     }
 
-    private boolean applyLombokAgent(JdtLsService lsp, JavaProjectDescriptor current) {
-        if (lsp == null) {
+    private boolean applyLombokAgent(JavaLanguageServer lsp, JavaProjectDescriptor current) {
+        JavaAgentSupport agents = lsp == null ? null : lsp.extension(JavaAgentSupport.class);
+        if (agents == null) {
             return false;
         }
         if (!settings().isLombokSupport()) {
             lombokSupport.update(LombokSupportStatus.DISABLED, "");
-            return lsp.setLombokAgentJar(null);
+            return agents.setLombokAgentJar(null);
         }
         try {
             LombokAgentResolver.Agent agent = ensureLombokResolver()
                     .resolveAgent(current, resolvedClasspath(lsp, current));
             if (!agent.declared()) {
                 lombokSupport.update(LombokSupportStatus.NOT_USED, "");
-                return lsp.setLombokAgentJar(null);
+                return agents.setLombokAgentJar(null);
             }
             if (!agent.isUsable()) {
                 lombokSupport.update(LombokSupportStatus.ERROR, agent.failure());
-                return lsp.setLombokAgentJar(null);
+                return agents.setLombokAgentJar(null);
             }
             lombokSupport.update(LombokSupportStatus.STARTING,
                     agent.version() == null ? LombokAgentResolver.TESTED_VERSION : agent.version());
-            return lsp.setLombokAgentJar(agent.jar());
+            return agents.setLombokAgentJar(agent.jar());
         } catch (Exception e) {
             lombokSupport.update(LombokSupportStatus.ERROR, rootMessage(e));
             log.warn("Falha ao resolver o agente do Lombok: {}", rootMessage(e));
@@ -1261,11 +1271,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         lombokSupport.setListener(listener == null ? this::onLombokStatusChanged : listener);
     }
 
-    private List<Path> resolvedClasspath(JdtLsService lsp, JavaProjectDescriptor current) {
+    private List<Path> resolvedClasspath(JavaLanguageServer lsp, JavaProjectDescriptor current) {
         if (lsp == null || current == null || !lsp.isInteractive()) {
             return List.of();
         }
-        return lsp.runtimeClasspath(current.root())
+        ProjectModelSupport model = lsp.extension(ProjectModelSupport.class);
+        if (model == null) {
+            return List.of();
+        }
+        return model.runtimeClasspath(current.root())
                 .map(classpath -> {
                     if (ClasspathValidation.hasMissingJar(classpath)) {
                         requestJdtLsProjectConfigurationRefresh(lsp);
@@ -1283,9 +1297,10 @@ public class JavaIdeAdapter extends IdeAdapter {
         requestJdtLsProjectConfigurationRefresh(jdtLs);
     }
 
-    private void requestJdtLsProjectConfigurationRefresh(JdtLsService lsp) {
-        if (lsp != null && lsp.isInteractive()) {
-            lsp.projectConfigurationUpdate();
+    private void requestJdtLsProjectConfigurationRefresh(JavaLanguageServer lsp) {
+        ProjectModelSupport model = lsp == null ? null : lsp.extension(ProjectModelSupport.class);
+        if (model != null && lsp.isInteractive()) {
+            model.projectConfigurationUpdate();
         }
     }
 
@@ -1346,7 +1361,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void publishLanguageServerStatus(String message, int percent) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         LanguageServerState state = lsp == null ? LanguageServerState.NOT_STARTED : lsp.getState();
         refreshLombokStatusAfterServerState(state);
         if (state == LanguageServerState.STARTING || state == LanguageServerState.INDEXING) {
@@ -1419,7 +1434,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void cancelLanguageServerIndexing() {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null) {
             return;
         }
@@ -1465,7 +1480,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public CompletableFuture<List<FoldRange>> resolveFoldRanges(Path filePath, String text, long documentVersion) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null || !JavaProjectConventions.isJava(filePath) || !lsp.supportsFoldingRanges()) {
             return CompletableFuture.completedFuture(null);
         }
@@ -1623,7 +1638,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         List<AutoCompleteItem> snippetsLocal = javaSnippets(context);
 
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null && lsp.isInteractive() && lsp.isReady()) {
             long started = System.nanoTime();
             List<AutoCompleteItem> semantic = reusableJavaCompletions(lsp, context);
@@ -1653,7 +1668,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public CompletableFuture<List<AutoCompleteItem>> getCompletionSuggestionsAsync(
             IdeCompletionContext context) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (debugActive.get() || context == null || !JavaProjectConventions.isJava(context.filePath())
                 || lsp == null || !lsp.isInteractive() || !lsp.isReady()) {
             return CompletableFuture.completedFuture(getCompletionSuggestions(context));
@@ -1682,7 +1697,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public CompletableFuture<AutoCompleteItem> resolveCompletionItem(AutoCompleteItem item) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         return lsp == null || !lsp.isInteractive() ? CompletableFuture.completedFuture(item)
                 : lsp.resolveCompletionAsync(item);
     }
@@ -1695,7 +1710,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return snippets.suggestions(context.prefix(), current != null && current.spring());
     }
 
-    private static List<AutoCompleteItem> reusableJavaCompletions(JdtLsService lsp,
+    private static List<AutoCompleteItem> reusableJavaCompletions(JavaLanguageServer lsp,
                                                                   IdeCompletionContext context) {
         return filterCompletionSuggestions(lsp.reusableCompletions(context.filePath(), context.text(),
                 context.caretLine(), context.caretCol()), context.prefix());
@@ -1712,7 +1727,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 : CompletionTrigger.INVOKED;
     }
 
-    private List<AutoCompleteItem> finishSemanticCompletion(JdtLsService lsp, IdeCompletionContext context,
+    private List<AutoCompleteItem> finishSemanticCompletion(JavaLanguageServer lsp, IdeCompletionContext context,
                                                             List<AutoCompleteItem> semantic,
                                                             List<AutoCompleteItem> snippetsLocal,
                                                             long started, String origin) {
@@ -1876,7 +1891,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (prefix.isEmpty() && !memberAccess) {
             return null;
         }
-        JdtLsService lsp = interactiveServerFor(context.filePath());
+        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
         List<AutoCompleteItem> contextual = List.of();
         if (lsp != null) {
             contextual = lsp.reusableCompletions(context.filePath(), context.text(),
@@ -2086,7 +2101,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         List<Diagnostic> merged = new ArrayList<>();
 
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null && lsp.isInteractive()) {
             merged.addAll(lsp.diagnostics(filePath));
         }
@@ -2237,7 +2252,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private CompletableFuture<List<Range>> selectionChain(Path filePath, String text, int offset) {
-        JdtLsService lsp = interactiveServerFor(filePath);
+        JavaLanguageServer lsp = interactiveServerFor(filePath);
         if (lsp == null || !JavaProjectConventions.isJava(filePath)) {
             return CompletableFuture.completedFuture(List.of());
         }
@@ -2250,7 +2265,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (context == null || isDebugPaused() || SpringConfigSupport.isConfigFile(context.filePath())) {
             return CompletableFuture.completedFuture(getHover(context));
         }
-        JdtLsService lsp = interactiveServerFor(context.filePath());
+        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
         if (lsp == null) {
             return CompletableFuture.completedFuture(null);
         }
@@ -2271,7 +2286,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return SpringConfigSupport.hover(springMetadata, context.filePath(),
                     context.text(), context.line());
         }
-        JdtLsService lsp = interactiveServerFor(context.filePath());
+        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
         if (lsp == null) {
             return null;
         }
@@ -2355,7 +2370,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private JavaSafeDeleteScanner.ScanResult findExternalUsages(List<Path> targets) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         Set<Path> deleted = new LinkedHashSet<>(targets);
         Map<String, Location> unique = new LinkedHashMap<>();
         boolean semanticComplete = lsp != null && lsp.isReady() && !lsp.isWarmingUp()
@@ -2380,7 +2395,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return new JavaSafeDeleteScanner.ScanResult(List.copyOf(unique.values()), false);
     }
 
-    private boolean semanticUsages(JdtLsService lsp, List<Path> targets, Set<Path> deleted,
+    private boolean semanticUsages(JavaLanguageServer lsp, List<Path> targets, Set<Path> deleted,
                                    Map<String, Location> unique) {
         record Search(Path source, String content, Range declaration) {
         }
@@ -2512,7 +2527,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         requestJavaTreeIconRefresh(file);
         if (change == JavaFileChangeRouter.Change.DELETED) {
             forgetJavaFile(file);
-            JdtLsService lsp = jdtLs;
+            JavaLanguageServer lsp = jdtLs;
             if (lsp != null) {
                 lsp.pathDeleted(file);
             }
@@ -2526,7 +2541,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         lexicalIndex.refreshFile(file, content);
         refreshSpringIndexFor(file, content);
 
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             if (change == JavaFileChangeRouter.Change.CREATED) {
                 lsp.pathCreated(file);
@@ -2541,7 +2556,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void onExternalChangeToOpenFile(Path file, String rawDiskContent) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null || rawDiskContent == null) {
             return;
         }
@@ -2599,9 +2614,10 @@ public class JavaIdeAdapter extends IdeAdapter {
             return;
         }
         background.schedule(() -> {
-            JdtLsService lsp = jdtLs;
-            if (lsp != null) {
-                lsp.projectConfigurationUpdate();
+            JavaLanguageServer lsp = jdtLs;
+            ProjectModelSupport model = lsp == null ? null : lsp.extension(ProjectModelSupport.class);
+            if (model != null) {
+                model.projectConfigurationUpdate();
             }
         }, PROJECT_CONFIGURATION_REQUEST_DELAY_MS, TimeUnit.MILLISECONDS);
     }
@@ -2616,14 +2632,17 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void onWatchedBuildFile(Path file, JavaFileChangeRouter.Change change) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             if (change == JavaFileChangeRouter.Change.DELETED) {
                 lsp.pathDeleted(file);
             } else {
                 lsp.pathChanged(file);
             }
-            lsp.projectConfigurationUpdate();
+            ProjectModelSupport model = lsp.extension(ProjectModelSupport.class);
+            if (model != null) {
+                model.projectConfigurationUpdate();
+            }
         }
         onBuildFileChanged(file);
     }
@@ -2765,7 +2784,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             router.acceptCreated(file);
             return;
         }
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             lsp.pathCreated(normalized);
         }
@@ -2785,7 +2804,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             onBuildFileChanged(deleted);
         }
         problems.removeBelow(deleted);
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             lsp.pathDeleted(deleted);
         }
@@ -2834,8 +2853,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
 
         @Override
-        public JdtLsService readyServer() {
-            JdtLsService lsp = jdtLs;
+        public JavaLanguageServer readyServer() {
+            JavaLanguageServer lsp = jdtLs;
             return lsp != null && lsp.isReady() ? lsp : null;
         }
 
@@ -3060,7 +3079,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return null;
         }
         List<CodeLens> lenses = new ArrayList<>();
-        JdtLsService lsp = runningServerFor(context.filePath());
+        JavaLanguageServer lsp = runningServerFor(context.filePath());
         if (lsp != null) {
             for (JavaCodeLens lens : lsp.codeLenses(
                     context.filePath(), context.text())) {
@@ -3527,8 +3546,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         for (Location location : JavaNavigation.unique(locations)) {
             Path path = JavaNavigation.path(location);
             if (path == null) {
-                if (JavaClassFileNavigation.isClassFileUri(location.uri())) {
-                    String name = JavaClassFileNavigation.sourceFileName(location.uri());
+                ClassFileSupport classFiles = classFileUris;
+                if (classFiles != null && classFiles.isClassFileUri(location.uri())) {
+                    String name = classFiles.classFileSourceName(location.uri());
                     items.add(new UsagesPopup.Item(
                             text("navigation.decompiled", "Fonte de dependencia"),
                             name,
@@ -3574,7 +3594,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (location == null || location.range() == null) {
             return;
         }
-        if (path == null && JavaClassFileNavigation.isClassFileUri(location.uri())) {
+        ClassFileSupport classFiles = classFileUris;
+        if (path == null && classFiles != null && classFiles.isClassFileUri(location.uri())) {
             navigateToClassFile(location);
             return;
         }
@@ -3603,8 +3624,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void navigateToClassFile(Location location) {
-        JdtLsService lsp = jdtLs;
-        if (lsp == null || !lsp.isInteractive()) return;
+        JavaLanguageServer lsp = jdtLs;
+        ClassFileSupport classFiles = lsp == null ? null : lsp.extension(ClassFileSupport.class);
+        if (classFiles == null || !lsp.isInteractive()) return;
         String uri = location.uri();
         int line = location.range().start().line();
         int col = location.range().start().col();
@@ -3613,7 +3635,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         SwingUtilities.invokeLater(() -> showProgress(NAVIGATION_PROGRESS_ID,
                 text("progress.decompiling", "Java: abrindo fonte da dependencia...")));
         background.submit(() -> {
-            String source = lsp.classFileContents(uri);
+            String source = classFiles.classFileContents(uri);
             SwingUtilities.invokeLater(() -> {
                 if (ticket != navigationTicket.get()) return;
                 hideProgress(NAVIGATION_PROGRESS_ID);
@@ -3628,8 +3650,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private CodeEditor openClassFileEditor(String uri, String source, int line, int col) {
-        String fileName = JavaClassFileNavigation.sourceFileName(uri);
-        String tabKey = JavaClassFileNavigation.tabKey(uri);
+        ClassFileSupport classFiles = classFileUris;
+        String fileName = classFiles.classFileSourceName(uri);
+        String tabKey = classFiles.classFileTabKey(uri);
         closeCenterTab(tabKey);
 
         CodeEditor editor = requestEmbeddedCodeEditor(fileName, source,
@@ -3691,16 +3714,18 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (context == null || isDebugPaused()) {
             return null;
         }
-        JdtLsService lsp = jdtLs;
-        return lsp == null || !lsp.isInteractive()
-                ? null : lsp.hoverAtUri(uri, context.line(), context.col());
+        JavaLanguageServer lsp = jdtLs;
+        ClassFileSupport classFiles = lsp == null ? null : lsp.extension(ClassFileSupport.class);
+        return classFiles == null || !lsp.isInteractive()
+                ? null : classFiles.hoverAtUri(uri, context.line(), context.col());
     }
 
     private void navigateFromClassFile(String uri, int line, int col) {
-        JdtLsService lsp = jdtLs;
-        if (lsp == null || !lsp.isInteractive()) return;
+        JavaLanguageServer lsp = jdtLs;
+        ClassFileSupport classFiles = lsp == null ? null : lsp.extension(ClassFileSupport.class);
+        if (classFiles == null || !lsp.isInteractive()) return;
         background.submit(() -> {
-            List<Location> targets = lsp.definitionsAtUri(uri, line, col);
+            List<Location> targets = classFiles.definitionsAtUri(uri, line, col);
             if (targets == null || targets.isEmpty()) {
                 SwingUtilities.invokeLater(() -> setStatusBarText(
                         text("status.navigation.empty", "Java: nenhum destino encontrado")));
@@ -3716,7 +3741,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (debugActive.get()) {
             return CompletableFuture.completedFuture(null);
         }
-        JdtLsService lsp = interactiveServerFor(context == null ? null : context.filePath());
+        JavaLanguageServer lsp = interactiveServerFor(context == null ? null : context.filePath());
         return lsp == null ? CompletableFuture.completedFuture(null)
                 : lsp.signatureHelpAsync(context.filePath(), context.text(),
                 context.caretLine(), context.caretCol());
@@ -3727,7 +3752,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (debugActive.get()) {
             return null;
         }
-        JdtLsService lsp = interactiveServerFor(context == null ? null : context.filePath());
+        JavaLanguageServer lsp = interactiveServerFor(context == null ? null : context.filePath());
         return lsp == null ? null : lsp.signatureHelp(context.filePath(), context.text(),
                 context.caretLine(), context.caretCol());
     }
@@ -3831,7 +3856,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!JavaProjectConventions.isJava(filePath)) {
             return null;
         }
-        JdtLsService lsp = interactiveServerFor(filePath);
+        JavaLanguageServer lsp = interactiveServerFor(filePath);
         List<DocumentSymbol> precise = lsp == null ? List.of()
                 : lsp.isReady()
                         ? lsp.documentSymbols(filePath, context.text())
@@ -3849,7 +3874,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!JavaProjectConventions.isJava(filePath)) {
             return null;
         }
-        JdtLsService lsp = interactiveServerFor(filePath);
+        JavaLanguageServer lsp = interactiveServerFor(filePath);
         List<DocumentHighlight> precise = lsp == null ? List.of()
                 : lsp.isReady()
                         ? lsp.documentHighlights(filePath, context.text(),
@@ -3882,7 +3907,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (JavaProjectConventions.isJava(filePath)) {
             return null;
         }
-        JdtLsService lsp = runningServerFor(filePath);
+        JavaLanguageServer lsp = runningServerFor(filePath);
         return lsp == null ? null : lsp.rename(context.filePath(), context.text(),
                 context.line(), context.col(), context.newName());
     }
@@ -3896,7 +3921,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         showProgress(RENAME_COMPUTE_PROGRESS_ID, text("rename.progress", "Java: renomeando para '{name}'...")
                 .replace("{name}", context.newName() == null ? "" : context.newName().trim()));
         try {
-            JdtLsService lsp = runningServerFor(filePath);
+            JavaLanguageServer lsp = runningServerFor(filePath);
             if (lsp == null) {
                 lsp = awaitServerForRename(filePath);
             }
@@ -3917,7 +3942,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private IdeWorkspaceEdit withLombokAccessors(JdtLsService lsp, IdeRenameContext context, IdeWorkspaceEdit edit) {
+    private IdeWorkspaceEdit withLombokAccessors(JavaLanguageServer lsp, IdeRenameContext context, IdeWorkspaceEdit edit) {
         try {
             Path current = JavaProjectConventions.normalize(context.filePath());
             LombokAccessorRename.Result result = LombokAccessorRename.apply(lsp, current, context.text(),
@@ -3939,7 +3964,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private static String renameContentOf(JdtLsService lsp, Path file, Path current, String currentText) {
+    private static String renameContentOf(JavaLanguageServer lsp, Path file, Path current, String currentText) {
         Path normalized = JavaProjectConventions.normalize(file);
         if (normalized.equals(current)) {
             return currentText;
@@ -3969,7 +3994,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return null;
         }
         String text = context.text();
-        JdtLsService lsp = runningServerFor(filePath);
+        JavaLanguageServer lsp = runningServerFor(filePath);
         if (lsp == null) {
             return IdeRenamePreparation.rejected(isServerStarting(filePath)
                     ? text("rename.serverLoading", "Aguarde o servidor Java terminar de carregar para renomear")
@@ -4030,7 +4055,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private boolean isServerStarting(Path filePath) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null || !JavaProjectConventions.isJava(filePath)) {
             return false;
         }
@@ -4040,7 +4065,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 || state == LanguageServerState.INDEXING;
     }
 
-    private SymbolKind resolveRenameKind(JdtLsService lsp, Path filePath, String text, int line, int col, String name) {
+    private SymbolKind resolveRenameKind(JavaLanguageServer lsp, Path filePath, String text, int line, int col, String name) {
         Position position = new Position(line, col);
         SymbolKind declared = symbolKindAt(lsp.documentSymbols(filePath, text), position);
         if (declared != null) {
@@ -4154,11 +4179,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         return lineText.substring(start, end);
     }
 
-    private JdtLsService awaitServerForRename(Path filePath) {
+    private JavaLanguageServer awaitServerForRename(Path filePath) {
         if (!isServerStarting(filePath)) {
             return null;
         }
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null) {
             return null;
         }
@@ -4204,7 +4229,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private List<CodeAction> computeCodeActions(IdeCodeActionContext context) {
         List<CodeAction> actions = new ArrayList<>(suppressionActions(context));
-        JdtLsService lsp = interactiveServerFor(context.filePath());
+        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
         List<CodeAction> semantic = lsp == null ? null : lsp.codeActions(context.filePath(),
                 context.text(), context.range(), context.diagnostics());
         if (semantic != null) {
@@ -4323,14 +4348,14 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public CompletableFuture<List<InlayHint>> getInlayHintsAsync(IdeInlayHintContext context) {
-        JdtLsService lsp = runningServerFor(context == null ? null : context.filePath());
+        JavaLanguageServer lsp = runningServerFor(context == null ? null : context.filePath());
         return lsp == null ? CompletableFuture.completedFuture(null)
                 : lsp.inlayHintsAsync(context.filePath(), context.text(), context.firstLine(), context.lastLine());
     }
 
     @Override
     public List<InlayHint> getInlayHints(IdeInlayHintContext context) {
-        JdtLsService lsp = runningServerFor(context == null ? null : context.filePath());
+        JavaLanguageServer lsp = runningServerFor(context == null ? null : context.filePath());
         return lsp == null ? null : lsp.inlayHints(context.filePath(), context.text(),
                 context.firstLine(), context.lastLine());
     }
@@ -4342,7 +4367,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public CompletableFuture<List<SemanticToken>> getSemanticTokensAsync(IdeSemanticTokensContext context) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (context == null || lsp == null || !lsp.isReady()
                 || !JavaProjectConventions.isJava(context.filePath())
                 || !settings().getLanguageServerMode().startsServer()) {
@@ -4358,7 +4383,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 || !settings().getLanguageServerMode().startsServer()) {
             return null;
         }
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         LanguageServerState state = lsp == null
                 ? LanguageServerState.NOT_STARTED : lsp.getState();
         if (state == LanguageServerState.ERROR || state == LanguageServerState.STOPPED) {
@@ -4373,7 +4398,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public String formatCode(FormatCodeContext context) {
         Path file = context == null ? null : context.file();
-        JdtLsService lsp = runningServerFor(file);
+        JavaLanguageServer lsp = runningServerFor(file);
         if (lsp == null) {
             if (isIndexing(file)) {
                 setStatusBarText(text("status.formatDuringIndexing",
@@ -4484,7 +4509,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             String current = editor.getText();
             if (!Objects.equals(requestedText, current)) {
-                JdtLsService lsp = jdtLs;
+                JavaLanguageServer lsp = jdtLs;
                 if (lsp != null && current != null) background.submit(() -> lsp.changeDocument(file, current));
                 setStatusBarText(text("status.navigation.stale",
                         "Java: o codigo mudou; tente novamente"));
@@ -4614,32 +4639,32 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public boolean isCallHierarchyEnabled() {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         return lsp != null && lsp.isInteractive() && lsp.supportsCallHierarchy();
     }
 
     @Override
     public boolean isTypeHierarchyEnabled() {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         return lsp != null && lsp.isInteractive() && lsp.supportsTypeHierarchy();
     }
 
     @Override
     public List<TypeHierarchyItem> prepareTypeHierarchy(IdeCallHierarchyContext context) {
-        JdtLsService lsp = context == null ? null : interactiveServerFor(context.filePath());
+        JavaLanguageServer lsp = context == null ? null : interactiveServerFor(context.filePath());
         return lsp == null ? List.of()
                 : lsp.prepareTypeHierarchy(context.filePath(), context.text(), context.line(), context.col());
     }
 
     @Override
     public List<TypeHierarchyItem> getSupertypes(TypeHierarchyItem item) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         return lsp == null || !lsp.isInteractive() ? List.of() : lsp.supertypes(item);
     }
 
     @Override
     public List<TypeHierarchyItem> getSubtypes(TypeHierarchyItem item) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         return lsp == null || !lsp.isInteractive() ? List.of() : lsp.subtypes(item);
     }
 
@@ -4648,7 +4673,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (context == null) {
             return List.of();
         }
-        JdtLsService lsp = interactiveServerFor(context.filePath());
+        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
         if (lsp == null) {
             return List.of();
         }
@@ -4658,13 +4683,13 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<CallHierarchyCall> getIncomingCalls(CallHierarchyItem item) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         return lsp == null || !lsp.isInteractive() ? List.of() : lsp.incomingCalls(item);
     }
 
     @Override
     public List<CallHierarchyCall> getOutgoingCalls(CallHierarchyItem item) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         return lsp == null || !lsp.isInteractive() ? List.of() : lsp.outgoingCalls(item);
     }
 
@@ -4791,7 +4816,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private DiagnosticSeverity lampSeverityAt(IdeWordCaretContext context) {
         DiagnosticSeverity strongest = null;
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null && JavaProjectConventions.isJava(context.filePath())) {
             Diagnostic fromServer = lsp.diagnosticAt(
                     context.filePath(), context.line(), context.col());
@@ -5210,7 +5235,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         installTestGutter(editorContext);
         installCodeActionCommandHandler(editorContext);
         installJavaShortcuts(editorContext);
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (editorContext == null || !JavaProjectConventions.isJava(editorContext.filePath())) {
             return;
         }
@@ -5341,8 +5366,9 @@ public class JavaIdeAdapter extends IdeAdapter {
             pendingPasteImports.remove(key, pending);
             return;
         }
-        JdtLsService lsp = interactiveServerFor(pending.file());
-        if (lsp == null || !pasteImportsResolving.add(key)) {
+        JavaLanguageServer lsp = interactiveServerFor(pending.file());
+        ImportCandidateSupport imports = lsp == null ? null : lsp.extension(ImportCandidateSupport.class);
+        if (imports == null || !pasteImportsResolving.add(key)) {
             return;
         }
         background.execute(() -> {
@@ -5352,7 +5378,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 if (text == null || !text.startsWith(pending.pasted(), pending.offset())) {
                     return;
                 }
-                ImportCandidates.Lookup lookup = lsp.importCandidates(pending.file(), text, pending.range(),
+                ImportLookup lookup = imports.importCandidates(pending.file(), text, pending.range(),
                         pending.handled());
                 if (!lookup.diagnosed()) {
                     retry = true;
@@ -5439,7 +5465,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         String after = editor.getText();
         followUpPastedImports(pending, before, after);
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             lsp.changeDocument(file, after);
         }
@@ -5491,7 +5517,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             return;
         }
-        if (!JdtLsService.APPLY_CODE_ACTION_COMMAND.equals(command.id())) {
+        if (!JavaLanguageServer.APPLY_CODE_ACTION_COMMAND.equals(command.id())) {
             return;
         }
         String rawAction = String.valueOf(command.arguments().getFirst());
@@ -5500,13 +5526,13 @@ public class JavaIdeAdapter extends IdeAdapter {
             runSourceAction(sourcePrompt, activeJavaEditor);
             return;
         }
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             background.submit(() -> applyResolvedCodeAction(lsp, rawAction));
         }
     }
 
-    private void applyResolvedCodeAction(JdtLsService lsp, String rawAction) {
+    private void applyResolvedCodeAction(JavaLanguageServer lsp, String rawAction) {
         ResolvedCodeAction resolved = lsp.resolveCodeAction(rawAction);
         if (resolved == null) {
             setStatusBarText(text("status.codeActionFailed",
@@ -5522,7 +5548,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private Boolean applyWorkspaceEdit(JdtLsService lsp, IdeWorkspaceEdit edit) {
+    private Boolean applyWorkspaceEdit(JavaLanguageServer lsp, IdeWorkspaceEdit edit) {
         boolean skipped = false;
         for (IdeWorkspaceEdit.Operation operation : edit.operations()) {
             if (!(operation instanceof IdeWorkspaceEdit.TextEdits textEdits)) {
@@ -5546,12 +5572,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private static String sourcePromptId(String rawAction) {
         if (rawAction == null) return null;
-        for (String id : List.of(JdtLsService.OVERRIDE_METHODS_PROMPT,
-                JdtLsService.HASHCODE_EQUALS_PROMPT,
-                JdtLsService.GENERATE_TOSTRING_PROMPT,
-                JdtLsService.GENERATE_ACCESSORS_PROMPT,
-                JdtLsService.GENERATE_CONSTRUCTORS_PROMPT,
-                JdtLsService.GENERATE_DELEGATE_METHODS_PROMPT)) {
+        for (String id : List.of(SourceGenerationSupport.OVERRIDE_METHODS_PROMPT,
+                SourceGenerationSupport.HASHCODE_EQUALS_PROMPT,
+                SourceGenerationSupport.GENERATE_TOSTRING_PROMPT,
+                SourceGenerationSupport.GENERATE_ACCESSORS_PROMPT,
+                SourceGenerationSupport.GENERATE_CONSTRUCTORS_PROMPT,
+                SourceGenerationSupport.GENERATE_DELEGATE_METHODS_PROMPT)) {
             if (rawAction.contains(id)) return id;
         }
         return null;
@@ -5560,15 +5586,15 @@ public class JavaIdeAdapter extends IdeAdapter {
     private void showGenerateActions(IdeEditorContext context) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
         List<JavaSourceActionDialogs.Choice<String>> choices = List.of(
-                new JavaSourceActionDialogs.Choice<>(JdtLsService.GENERATE_CONSTRUCTORS_PROMPT,
+                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.GENERATE_CONSTRUCTORS_PROMPT,
                         text("generate.constructor", "Constructor..."), "",
                         JavaSourceActionDialogs.Kind.CONSTRUCTOR),
-                new JavaSourceActionDialogs.Choice<>(JdtLsService.GENERATE_ACCESSORS_PROMPT,
+                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.GENERATE_ACCESSORS_PROMPT,
                         text("generate.accessors", "Getter and Setter..."), "",
                         JavaSourceActionDialogs.Kind.ACCESSOR),
-                new JavaSourceActionDialogs.Choice<>(JdtLsService.HASHCODE_EQUALS_PROMPT,
+                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.HASHCODE_EQUALS_PROMPT,
                         "equals() and hashCode()...", "", JavaSourceActionDialogs.Kind.EQUALS_HASH),
-                new JavaSourceActionDialogs.Choice<>(JdtLsService.GENERATE_TOSTRING_PROMPT,
+                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.GENERATE_TOSTRING_PROMPT,
                         "toString()...", "", JavaSourceActionDialogs.Kind.TO_STRING),
                 new JavaSourceActionDialogs.Choice<>("override",
                         text("generate.override", "Override Methods..."), "",
@@ -5576,7 +5602,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 new JavaSourceActionDialogs.Choice<>("implement",
                         text("generate.implement", "Implement Methods..."), "",
                         JavaSourceActionDialogs.Kind.IMPLEMENT, "Ctrl+I"),
-                new JavaSourceActionDialogs.Choice<>(JdtLsService.GENERATE_DELEGATE_METHODS_PROMPT,
+                new JavaSourceActionDialogs.Choice<>(SourceGenerationSupport.GENERATE_DELEGATE_METHODS_PROMPT,
                         text("generate.delegate", "Delegate Methods..."), "",
                         JavaSourceActionDialogs.Kind.DELEGATE)
         );
@@ -5592,33 +5618,38 @@ public class JavaIdeAdapter extends IdeAdapter {
     private void runSourceAction(String command, IdeEditorContext context) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
         switch (command) {
-            case JdtLsService.OVERRIDE_METHODS_PROMPT -> showOverrideMethods(context, false);
-            case JdtLsService.GENERATE_CONSTRUCTORS_PROMPT -> showConstructors(context);
-            case JdtLsService.GENERATE_ACCESSORS_PROMPT -> showAccessors(context);
-            case JdtLsService.HASHCODE_EQUALS_PROMPT -> showHashCodeEquals(context);
-            case JdtLsService.GENERATE_TOSTRING_PROMPT -> showToString(context);
-            case JdtLsService.GENERATE_DELEGATE_METHODS_PROMPT -> showDelegateMethods(context);
+            case SourceGenerationSupport.OVERRIDE_METHODS_PROMPT -> showOverrideMethods(context, false);
+            case SourceGenerationSupport.GENERATE_CONSTRUCTORS_PROMPT -> showConstructors(context);
+            case SourceGenerationSupport.GENERATE_ACCESSORS_PROMPT -> showAccessors(context);
+            case SourceGenerationSupport.HASHCODE_EQUALS_PROMPT -> showHashCodeEquals(context);
+            case SourceGenerationSupport.GENERATE_TOSTRING_PROMPT -> showToString(context);
+            case SourceGenerationSupport.GENERATE_DELEGATE_METHODS_PROMPT -> showDelegateMethods(context);
             default -> { }
         }
     }
 
+    private SourceGenerationSupport sourceGenerationFor(Path file) {
+        JavaLanguageServer lsp = interactiveServerFor(file);
+        return lsp == null ? null : lsp.extension(SourceGenerationSupport.class);
+    }
+
     private void showOverrideMethods(IdeEditorContext context, boolean implementOnly) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        JdtLsService lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) return;
+        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
+        if (generator == null) return;
         String source = context.getText();
         int line = context.getCaretLine(), col = context.getCaretCol();
         background.submit(() -> {
-            JdtLsService.OverrideStatus status = lsp.overridableMethods(
+            SourceGenerationSupport.OverrideStatus status = generator.overridableMethods(
                     context.filePath(), source, line, col);
-            List<JdtLsService.SourceItem> methods = status.methods().stream()
+            List<SourceGenerationSupport.SourceItem> methods = status.methods().stream()
                     .filter(item -> item.selected() == implementOnly).toList();
             SwingUtilities.invokeLater(() -> {
                 if (methods.isEmpty()) {
                     sourceActionUnavailable(implementOnly ? "Implement Methods" : "Override Methods");
                     return;
                 }
-                List<JdtLsService.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
+                List<SourceGenerationSupport.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
                         createModernComponentDialogBuilder(),
                         implementOnly ? text("generate.implement", "Implement Methods")
                                 : text("generate.override", "Override Methods"),
@@ -5626,7 +5657,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                                 ? JavaSourceActionDialogs.Kind.IMPLEMENT
                                 : JavaSourceActionDialogs.Kind.OVERRIDE), item -> true);
                 if (selected == null || selected.isEmpty()) return;
-                submitGeneration(context, source, () -> lsp.generateOverridableMethods(
+                submitGeneration(context, source, () -> generator.generateOverridableMethods(
                         context.filePath(), source, line, col, selected));
             });
         });
@@ -5634,31 +5665,31 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void showConstructors(IdeEditorContext context) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        JdtLsService lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) return;
+        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
+        if (generator == null) return;
         String source = context.getText();
         int line = context.getCaretLine(), col = context.getCaretCol();
         background.submit(() -> {
-            JdtLsService.ConstructorsStatus status = lsp.constructorsStatus(
+            SourceGenerationSupport.ConstructorsStatus status = generator.constructorsStatus(
                     context.filePath(), source, line, col);
             SwingUtilities.invokeLater(() -> {
                 if (status.constructors().isEmpty()) {
                     sourceActionUnavailable(text("generate.constructor", "Constructor"));
                     return;
                 }
-                List<JdtLsService.SourceItem> constructors = JavaSourceActionDialogs.chooseMany(
+                List<SourceGenerationSupport.SourceItem> constructors = JavaSourceActionDialogs.chooseMany(
                         createModernComponentDialogBuilder(), text("generate.constructor", "Constructor"),
                         text("generate.chooseConstructors", "Selecione os construtores da superclasse"),
                         sourceChoices(status.constructors(), JavaSourceActionDialogs.Kind.CONSTRUCTOR), item -> true);
                 if (constructors == null || constructors.isEmpty()) return;
-                List<JdtLsService.SourceItem> fields = status.fields().isEmpty() ? List.of()
+                List<SourceGenerationSupport.SourceItem> fields = status.fields().isEmpty() ? List.of()
                         : JavaSourceActionDialogs.chooseMany(createModernComponentDialogBuilder(),
                         text("generate.constructor", "Constructor"),
                         text("generate.chooseFields", "Selecione os campos que serao inicializados"),
                         sourceChoices(status.fields(), JavaSourceActionDialogs.Kind.FIELD),
-                        JdtLsService.SourceItem::selected);
+                        SourceGenerationSupport.SourceItem::selected);
                 if (fields == null) return;
-                submitGeneration(context, source, () -> lsp.generateConstructors(
+                submitGeneration(context, source, () -> generator.generateConstructors(
                         context.filePath(), source, line, col, constructors, fields));
             });
         });
@@ -5666,24 +5697,24 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void showAccessors(IdeEditorContext context) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        JdtLsService lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) return;
+        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
+        if (generator == null) return;
         String source = context.getText();
         int line = context.getCaretLine(), col = context.getCaretCol();
         background.submit(() -> {
-            List<JdtLsService.SourceItem> available = lsp.accessorsStatus(
+            List<SourceGenerationSupport.SourceItem> available = generator.accessorsStatus(
                     context.filePath(), source, line, col);
             SwingUtilities.invokeLater(() -> {
                 if (available.isEmpty()) {
                     sourceActionUnavailable(text("generate.accessors", "Getter and Setter"));
                     return;
                 }
-                List<JdtLsService.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
+                List<SourceGenerationSupport.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
                         createModernComponentDialogBuilder(), text("generate.accessors", "Getter and Setter"),
                         text("generate.chooseAccessors", "Selecione os campos"),
                         sourceChoices(available, JavaSourceActionDialogs.Kind.ACCESSOR), item -> true);
                 if (selected == null || selected.isEmpty()) return;
-                submitGeneration(context, source, () -> lsp.generateAccessors(
+                submitGeneration(context, source, () -> generator.generateAccessors(
                         context.filePath(), source, line, col, selected));
             });
         });
@@ -5691,12 +5722,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void showHashCodeEquals(IdeEditorContext context) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        JdtLsService lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) return;
+        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
+        if (generator == null) return;
         String source = context.getText();
         int line = context.getCaretLine(), col = context.getCaretCol();
         background.submit(() -> {
-            JdtLsService.FieldsStatus status = lsp.hashCodeEqualsStatus(
+            SourceGenerationSupport.FieldsStatus status = generator.hashCodeEqualsStatus(
                     context.filePath(), source, line, col);
             SwingUtilities.invokeLater(() -> {
                 if (status.fields().isEmpty()) {
@@ -5707,12 +5738,12 @@ public class JavaIdeAdapter extends IdeAdapter {
                         "equals() and hashCode()", text("generate.regenerate",
                                 "Os metodos ja existem. Deseja gerar novamente?"),
                         text("generate.regenerateAction", "Gerar novamente"))) return;
-                List<JdtLsService.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
+                List<SourceGenerationSupport.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
                         createModernComponentDialogBuilder(), "equals() and hashCode()",
                         text("generate.chooseFields", "Selecione os campos"),
                         sourceChoices(status.fields(), JavaSourceActionDialogs.Kind.FIELD), item -> true);
                 if (selected == null || selected.isEmpty()) return;
-                submitGeneration(context, source, () -> lsp.generateHashCodeEquals(
+                submitGeneration(context, source, () -> generator.generateHashCodeEquals(
                         context.filePath(), source, line, col, selected, status.exists()));
             });
         });
@@ -5720,25 +5751,25 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void showToString(IdeEditorContext context) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        JdtLsService lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) return;
+        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
+        if (generator == null) return;
         String source = context.getText();
         int line = context.getCaretLine(), col = context.getCaretCol();
         background.submit(() -> {
-            JdtLsService.FieldsStatus status = lsp.toStringStatus(
+            SourceGenerationSupport.FieldsStatus status = generator.toStringStatus(
                     context.filePath(), source, line, col);
             SwingUtilities.invokeLater(() -> {
                 if (status.exists() && !JavaSourceActionDialogs.confirm(createModernComponentDialogBuilder(Boolean.class),
                         "toString()", text("generate.replaceToString",
                                 "toString() ja existe. Deseja substituir a implementacao?"),
                         text("generate.replace", "Substituir"))) return;
-                List<JdtLsService.SourceItem> selected = status.fields().isEmpty() ? List.of()
+                List<SourceGenerationSupport.SourceItem> selected = status.fields().isEmpty() ? List.of()
                         : JavaSourceActionDialogs.chooseMany(createModernComponentDialogBuilder(), "toString()",
                         text("generate.chooseFields", "Selecione os campos"),
                         sourceChoices(status.fields(), JavaSourceActionDialogs.Kind.FIELD),
-                        JdtLsService.SourceItem::selected);
+                        SourceGenerationSupport.SourceItem::selected);
                 if (selected == null) return;
-                submitGeneration(context, source, () -> lsp.generateToString(
+                submitGeneration(context, source, () -> generator.generateToString(
                         context.filePath(), source, line, col, selected));
             });
         });
@@ -5746,39 +5777,39 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void showDelegateMethods(IdeEditorContext context) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
-        JdtLsService lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) return;
+        SourceGenerationSupport generator = sourceGenerationFor(context.filePath());
+        if (generator == null) return;
         String source = context.getText();
         int line = context.getCaretLine(), col = context.getCaretCol();
         background.submit(() -> {
-            List<JdtLsService.DelegateTarget> targets = lsp.delegateTargets(
+            List<SourceGenerationSupport.DelegateTarget> targets = generator.delegateTargets(
                     context.filePath(), source, line, col);
             SwingUtilities.invokeLater(() -> {
                 if (targets.isEmpty()) {
                     sourceActionUnavailable(text("generate.delegate", "Delegate Methods"));
                     return;
                 }
-                List<JavaSourceActionDialogs.Choice<JdtLsService.DelegateTarget>> choices = targets.stream()
+                List<JavaSourceActionDialogs.Choice<SourceGenerationSupport.DelegateTarget>> choices = targets.stream()
                         .map(target -> new JavaSourceActionDialogs.Choice<>(target, target.label(), "",
                                 JavaSourceActionDialogs.Kind.FIELD))
                         .toList();
-                JdtLsService.DelegateTarget target = JavaSourceActionDialogs.chooseOne(
+                SourceGenerationSupport.DelegateTarget target = JavaSourceActionDialogs.chooseOne(
                         createModernComponentDialogBuilder(), text("generate.delegate", "Delegate Methods"),
                         text("generate.chooseDelegateTarget", "Selecione o campo delegado"), choices);
                 if (target == null) return;
-                List<JdtLsService.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
+                List<SourceGenerationSupport.SourceItem> selected = JavaSourceActionDialogs.chooseMany(
                         createModernComponentDialogBuilder(), text("generate.delegate", "Delegate Methods"),
                         text("generate.chooseDelegateMethods", "Selecione os metodos delegados"),
                         sourceChoices(target.methods(), JavaSourceActionDialogs.Kind.DELEGATE), item -> true);
                 if (selected == null || selected.isEmpty()) return;
-                submitGeneration(context, source, () -> lsp.generateDelegateMethods(
+                submitGeneration(context, source, () -> generator.generateDelegateMethods(
                         context.filePath(), source, line, col, target, selected));
             });
         });
     }
 
-    private static List<JavaSourceActionDialogs.Choice<JdtLsService.SourceItem>> sourceChoices(
-            List<JdtLsService.SourceItem> items, JavaSourceActionDialogs.Kind kind) {
+    private static List<JavaSourceActionDialogs.Choice<SourceGenerationSupport.SourceItem>> sourceChoices(
+            List<SourceGenerationSupport.SourceItem> items, JavaSourceActionDialogs.Kind kind) {
         return items.stream().map(item -> new JavaSourceActionDialogs.Choice<>(
                 item, item.label(), item.detail(), kind)).toList();
     }
@@ -5801,7 +5832,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     "Java: o arquivo mudou durante a geracao; tente novamente"));
             return;
         }
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null) return;
         int line = context.getCaretLine(), col = context.getCaretCol();
         String generated = lsp.applyTextEdits(source, edits);
@@ -5835,7 +5866,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onCodeEditorTextChanged(IdeEditorContext editorContext) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (editorContext != null && JavaProjectConventions.isJava(editorContext.filePath())) {
             Path edited = editorContext.filePath().toAbsolutePath().normalize();
             String currentText = Objects.toString(editorContext.getText(), "");
@@ -5861,7 +5892,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             activeJavaEditor = null;
             refreshRunButtonsForCurrentFile();
         }
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (JavaProjectConventions.isJava(filePath)) {
             detachCoverageGutter(filePath);
             javaEditors.remove(JavaProjectConventions.normalize(filePath));
@@ -5879,7 +5910,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!preferences.isFormatOnSave() && !preferences.isOrganizeImportsOnSave()) {
             return content;
         }
-        JdtLsService lsp = runningServerFor(filePath);
+        JavaLanguageServer lsp = runningServerFor(filePath);
         if (lsp == null) {
             return content;
         }
@@ -5893,7 +5924,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onAfterFileSave(Path filePath, String content) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (JavaProjectConventions.isJava(filePath)) {
             diskBaseline.put(JavaProjectConventions.normalize(filePath), content);
             JavaProjectTreeIcons.invalidate(filePath);
@@ -5927,16 +5958,16 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private JdtLsService interactiveServerFor(Path filePath) {
-        JdtLsService lsp = jdtLs;
+    private JavaLanguageServer interactiveServerFor(Path filePath) {
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null || !lsp.isInteractive() || !JavaProjectConventions.isJava(filePath)) {
             return null;
         }
         return lsp;
     }
 
-    private JdtLsService runningServerFor(Path filePath) {
-        JdtLsService lsp = jdtLs;
+    private JavaLanguageServer runningServerFor(Path filePath) {
+        JavaLanguageServer lsp = jdtLs;
         if (lsp == null || !lsp.isReady() || !JavaProjectConventions.isJava(filePath)) {
             return null;
         }
@@ -5944,7 +5975,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private boolean isIndexing(Path filePath) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         return lsp != null && lsp.getState() == LanguageServerState.INDEXING
                 && JavaProjectConventions.isJava(filePath);
     }
@@ -5962,7 +5993,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             List<Location> keys = configKeyDefinitions(spring.token());
             if (!keys.isEmpty()) return new Result(Status.LOCAL, keys);
         }
-        JdtLsService lsp = interactiveServerFor(filePath);
+        JavaLanguageServer lsp = interactiveServerFor(filePath);
         long lspStart = System.nanoTime();
         Result semantic = lsp == null ? Result.of(isIndexing(filePath) ? Status.INDEXING : Status.UNAVAILABLE)
                 : lsp.navigation(kind, filePath, source, line, col);
@@ -6392,7 +6423,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .forEach(type -> found.putIfAbsent(type.qualifiedName(),
                         new JavaTypeCreationPanel.TypeCandidate(type.qualifiedName(),
                                 type.kind() == JavaType.Kind.INTERFACE)));
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null && lsp.isInteractive()) {
             for (TypeSymbol symbol : lsp.workspaceTypes(term)) {
                 found.putIfAbsent(symbol.qualifiedName(), new JavaTypeCreationPanel.TypeCandidate(
@@ -6403,21 +6434,22 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private String withInheritedMembers(Path file, String skeleton, boolean hasSuperclass) {
-        JdtLsService lsp = interactiveServerFor(file);
-        if (lsp == null) {
+        JavaLanguageServer lsp = interactiveServerFor(file);
+        SourceGenerationSupport generator = lsp == null ? null : lsp.extension(SourceGenerationSupport.class);
+        if (generator == null) {
             return null;
         }
         try {
             String source = skeleton;
             if (hasSuperclass) {
                 int line = JavaFileTemplates.closingBraceLine(source);
-                JdtLsService.ConstructorsStatus constructors =
-                        lsp.constructorsStatus(file, source, line, 0);
+                SourceGenerationSupport.ConstructorsStatus constructors =
+                        generator.constructorsStatus(file, source, line, 0);
                 boolean needsConstructor = !constructors.constructors().isEmpty()
                         && constructors.constructors().stream()
                         .noneMatch(item -> item.label().endsWith("()"));
                 if (needsConstructor) {
-                    var edits = lsp.generateConstructors(file, source, line, 0,
+                    var edits = generator.generateConstructors(file, source, line, 0,
                             constructors.constructors(), List.of());
                     if (edits != null && !edits.isEmpty()) {
                         source = lsp.applyTextEdits(source, edits);
@@ -6425,14 +6457,14 @@ public class JavaIdeAdapter extends IdeAdapter {
                 }
             }
             int line = JavaFileTemplates.closingBraceLine(source);
-            JdtLsService.OverrideStatus status = lsp.overridableMethods(file, source, line, 0);
+            SourceGenerationSupport.OverrideStatus status = generator.overridableMethods(file, source, line, 0);
             if (status.type().isBlank()) {
                 return null;
             }
-            List<JdtLsService.SourceItem> abstracts = status.methods().stream()
-                    .filter(JdtLsService.SourceItem::selected).toList();
+            List<SourceGenerationSupport.SourceItem> abstracts = status.methods().stream()
+                    .filter(SourceGenerationSupport.SourceItem::selected).toList();
             if (!abstracts.isEmpty()) {
-                var edits = lsp.generateOverridableMethods(file, source, line, 0, abstracts);
+                var edits = generator.generateOverridableMethods(file, source, line, 0, abstracts);
                 if (edits != null && !edits.isEmpty()) {
                     source = lsp.applyTextEdits(source, edits);
                 }
@@ -6692,7 +6724,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     editor.setText(updated);
                     editor.setCaretPosition(line, col);
                 }
-                JdtLsService lsp = jdtLs;
+                JavaLanguageServer lsp = jdtLs;
                 if (lsp != null) {
                     lsp.changeDocument(file, editor.getText());
                 }
@@ -6703,7 +6735,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public boolean renameSymbol(Path file, String text, int offset, String newName) {
-            JdtLsService lsp = jdtLs;
+            JavaLanguageServer lsp = jdtLs;
             if (lsp == null || text == null) {
                 return false;
             }
@@ -7388,7 +7420,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 targetModule, processHandle);
     }
 
-    private boolean awaitLanguageServerForDebug(JdtLsService lsp, long generation)
+    private boolean awaitLanguageServerForDebug(JavaLanguageServer lsp, long generation)
             throws InterruptedException {
         boolean announced = false;
         while (!lsp.isWorkspaceSettled()) {
@@ -7410,9 +7442,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void warmUpDebugAdapter() {
-        JdtLsService lsp = jdtLs;
-        if (lsp != null) {
-            background.submit(lsp::prepareDebugAdapter);
+        JavaLanguageServer lsp = jdtLs;
+        DebugAdapterSupport debugAdapter = lsp == null ? null : lsp.extension(DebugAdapterSupport.class);
+        if (debugAdapter != null) {
+            background.submit(debugAdapter::prepareDebugAdapter);
         }
     }
 
@@ -7438,14 +7471,15 @@ public class JavaIdeAdapter extends IdeAdapter {
         long generation = debugStartGeneration.get();
         background.submit(() -> {
             try {
-                JdtLsService lsp = ensureLanguageServer();
+                JavaLanguageServer lsp = ensureLanguageServer();
                 if (!awaitLanguageServerForDebug(lsp, generation)) {
                     return;
                 }
-                if (!lsp.isDebugAdapterAvailable()) {
+                DebugAdapterSupport debugAdapter = lsp.extension(DebugAdapterSupport.class);
+                if (debugAdapter == null || !debugAdapter.isDebugAdapterAvailable()) {
                     throw new IllegalStateException("O servidor de debug Java nao esta disponivel. Reinicie o IntelliSense Java.");
                 }
-                int adapterPort = lsp.startDebugSession();
+                int adapterPort = debugAdapter.startDebugSession();
                 if (adapterPort <= 0) {
                     throw new IllegalStateException("O JDT LS nao abriu uma sessao de debug.");
                 }
@@ -7856,8 +7890,9 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void highlightDebugLibraryLine(String uri, int line) {
-        JdtLsService lsp = jdtLs;
-        if (uri == null || lsp == null) {
+        JavaLanguageServer lsp = jdtLs;
+        ClassFileSupport classFiles = lsp == null ? null : lsp.extension(ClassFileSupport.class);
+        if (uri == null || classFiles == null) {
             return;
         }
         long ticket = debugLineTicket.incrementAndGet();
@@ -7870,7 +7905,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         SwingUtilities.invokeLater(() -> showProgress(NAVIGATION_PROGRESS_ID,
                 text("progress.decompiling", "Java: abrindo fonte da dependencia...")));
         background.submit(() -> {
-            String source = lsp.classFileContents(uri);
+            String source = classFiles.classFileContents(uri);
             if (source != null && !source.isBlank()) {
                 debugLibrarySources.put(uri, source);
             }
@@ -8438,7 +8473,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void syncWithDisk() {
         Path root = projectRoot;
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (root == null || lsp == null) {
             setStatusBarText(text("status.noProject", "Java: nenhum projeto aberto"));
             return;
@@ -8477,7 +8512,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         affected.addAll(problems.paths());
 
         problems.clearAll();
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             lsp.clearDiagnostics();
         }
@@ -8783,13 +8818,14 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void discoverSemantic(List<JavaTest> provisional,
                                      java.util.function.Consumer<List<JavaTest>> onFinished) {
             JavaProjectDescriptor current = descriptor;
-            JdtLsService lsp = jdtLs;
-            if (current == null || lsp == null || !lsp.isTestRunnerAvailable()) {
+            JavaLanguageServer lsp = jdtLs;
+            TestDiscoverySupport discovery = lsp == null ? null : lsp.extension(TestDiscoverySupport.class);
+            if (current == null || discovery == null || !discovery.isTestRunnerAvailable()) {
                 onFinished.accept(provisional);
                 return;
             }
             background.submit(() -> onFinished.accept(
-                    JavaSemanticTestDiscovery.enrich(current, lsp, provisional)));
+                    JavaSemanticTestDiscovery.enrich(current, discovery, provisional)));
         }
 
         @Override
@@ -9057,9 +9093,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module) {
-        JdtLsService lsp = jdtLs;
-        if (lsp != null && lsp.isReady()) {
-            java.util.Optional<String> fromServer = lsp.runtimeClasspath(module.root());
+        JavaLanguageServer lsp = jdtLs;
+        ProjectModelSupport model = lsp == null ? null : lsp.extension(ProjectModelSupport.class);
+        if (model != null && lsp.isReady()) {
+            java.util.Optional<String> fromServer = model.runtimeClasspath(module.root());
             if (fromServer.isPresent() && !fromServer.get().isBlank()) {
                 if (!ClasspathValidation.hasMissingJar(fromServer.get())) {
                     return fromServer;
@@ -9425,16 +9462,17 @@ public class JavaIdeAdapter extends IdeAdapter {
                     clearCaches();
                     return;
                 }
-                JdtLsService lsp = jdtLs;
+                JavaLanguageServer lsp = jdtLs;
                 applyLombokAgent(lsp, descriptor);
-                boolean agentChanged = lsp != null && lsp.needsRestartForLombokAgent();
+                boolean agentChanged = lsp != null && needsLombokAgentRestart(lsp);
                 if (agentChanged || lsp == null) {
                     clearCaches();
                     return;
                 }
+                ProjectModelSupport model = lsp.extension(ProjectModelSupport.class);
                 SyncWork work = new SyncWork();
                 syncWork.set(work);
-                if (!lsp.updateProjectConfiguration(root)) {
+                if (model == null || !model.updateProjectConfiguration(root)) {
                     syncWork.compareAndSet(work, null);
                     clearCaches();
                     return;
@@ -9444,7 +9482,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                     syncWork.compareAndSet(work, null);
                     boolean recovered = error == null;
                     try {
-                        if (recovered && current(ticket, root) && syncGeneration.get() == generation) lsp.resynchronizeAfterProjectUpdate();
+                        if (recovered && current(ticket, root) && syncGeneration.get() == generation) model.resynchronizeAfterProjectUpdate();
                     } catch (Exception failure) {
                         recovered = false;
                         log.warn("Falha ao sincronizar documentos apos atualizar o projeto", failure);
@@ -9847,7 +9885,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         springBaseUrl = current.getSpringBaseUrl();
         applyDependencySearchSettings(current);
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             lsp.setInlayHintsMode(current.getInlayHints());
         }
@@ -9875,7 +9913,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             return false;
         }
         appliedBuildMode = mode;
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (root == null || lsp == null) {
             return false;
         }
@@ -9888,7 +9926,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void applyLombokSettingChange(Path root) {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (root == null || lsp == null) {
             return;
         }
@@ -9896,7 +9934,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void restartLanguageServer() {
-        JdtLsService lsp = jdtLs;
+        JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             lsp.resetCrashHistory();
         }
@@ -9904,12 +9942,17 @@ public class JavaIdeAdapter extends IdeAdapter {
         clearCaches();
     }
 
-    private void restartWhenLombokAgentChanged(JdtLsService lsp, JavaProjectDescriptor current) {
+    private static boolean needsLombokAgentRestart(JavaLanguageServer lsp) {
+        JavaAgentSupport agents = lsp.extension(JavaAgentSupport.class);
+        return agents != null && agents.needsRestartForLombokAgent();
+    }
+
+    private void restartWhenLombokAgentChanged(JavaLanguageServer lsp, JavaProjectDescriptor current) {
         if (current == null || lsp == null) {
             return;
         }
         applyLombokAgent(lsp, current);
-        if (!lsp.needsRestartForLombokAgent()) {
+        if (!needsLombokAgentRestart(lsp)) {
             return;
         }
         log.info("Agente do Lombok mudou; reiniciando o IntelliSense Java");

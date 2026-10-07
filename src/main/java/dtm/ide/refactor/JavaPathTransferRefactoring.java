@@ -4,7 +4,8 @@ import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.ide.api.project.tree.PathTransferDecision;
 import dtm.ide.api.project.tree.PathTransferKind;
 import dtm.ide.api.project.tree.PathTransferRequest;
-import dtm.ide.lsp.JdtLsService;
+import dtm.ide.lsp.api.JavaLanguageServer;
+import dtm.ide.lsp.api.TypeMoveSupport;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.ui.JavaCopyDialogPanel;
@@ -37,7 +38,7 @@ public final class JavaPathTransferRefactoring {
 
         JavaProjectDescriptor descriptor();
 
-        JdtLsService readyServer();
+        JavaLanguageServer readyServer();
 
         JavaMoveDialogPanel.Choice askMove(JavaPathTransferPlan plan);
 
@@ -152,8 +153,9 @@ public final class JavaPathTransferRefactoring {
     }
 
     IdeWorkspaceEdit computeMoveEdit(JavaPathTransferPlan plan) {
-        JdtLsService lsp = host.readyServer();
-        if (lsp == null) {
+        JavaLanguageServer lsp = host.readyServer();
+        TypeMoveSupport moves = lsp == null ? null : lsp.extension(TypeMoveSupport.class);
+        if (moves == null) {
             return null;
         }
         List<IdeWorkspaceEdit.Operation> operations = new ArrayList<>();
@@ -162,17 +164,17 @@ public final class JavaPathTransferRefactoring {
                 .map(JavaPathTransferPlan.FileTransfer::source)
                 .toList();
         if (!files.isEmpty()) {
-            IdeWorkspaceEdit edit = lsp.moveTypesWorkspace(files, plan.targetDirectory());
+            IdeWorkspaceEdit edit = moves.moveTypesWorkspace(files, plan.targetDirectory());
             if (edit.isEmpty()) {
-                log.info("java/move sem edicoes para {}: {}", files, lsp.lastMoveProblem());
+                log.info("java/move sem edicoes para {}: {}", files, moves.lastMoveProblem());
                 return null;
             }
             operations.addAll(edit.operations());
         }
         for (JavaPathTransferPlan.FolderTransfer folder : plan.folders()) {
             IdeWorkspaceEdit edit = lsp.willRenameFilesWorkspace(Map.of(folder.source(), folder.target()));
-            if (edit.isEmpty() && lsp.lastMoveProblem() != null) {
-                log.info("workspace/willRenameFiles sem edicoes para {}: {}", folder.source(), lsp.lastMoveProblem());
+            if (edit.isEmpty() && moves.lastMoveProblem() != null) {
+                log.info("workspace/willRenameFiles sem edicoes para {}: {}", folder.source(), moves.lastMoveProblem());
                 return null;
             }
             operations.addAll(edit.operations());

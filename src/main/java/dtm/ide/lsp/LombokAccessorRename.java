@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.JavaLanguageServer;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.ide.index.JavaLexicalSource;
 import dtm.stools.component.panels.editor.code.api.Location;
@@ -69,7 +70,7 @@ public final class LombokAccessorRename {
     public record Result(IdeWorkspaceEdit edit, List<LombokAccessors.Accessor> accessors, int calls) {
     }
 
-    public static Result apply(JdtLsService lsp, Path current, String text, int line, int col, String newName,
+    public static Result apply(JavaLanguageServer lsp, Path current, String text, int line, int col, String newName,
                                IdeWorkspaceEdit edit, Function<String, Collection<Path>> filesFor,
                                Function<Path, String> contentOf) {
         Result unchanged = new Result(edit, List.of(), 0);

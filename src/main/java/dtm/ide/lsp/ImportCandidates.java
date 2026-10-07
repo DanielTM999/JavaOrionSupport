@@ -5,7 +5,6 @@ import dtm.stools.component.panels.editor.code.api.Range;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -14,15 +13,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class ImportCandidates {
-
-    public record Lookup(boolean diagnosed, Map<String, List<String>> candidates, Set<String> queried) {
-        public static final Lookup PENDING = new Lookup(false, Map.of(), Set.of());
-
-        public Lookup {
-            candidates = candidates == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(candidates));
-            queried = queried == null ? Set.of() : Set.copyOf(queried);
-        }
-    }
 
     private static final Set<String> UNRESOLVED_CODES = Set.of("16777218", "570425394");
     private static final Pattern IMPORT_TITLE = Pattern.compile(

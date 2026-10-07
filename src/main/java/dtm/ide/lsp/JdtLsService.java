@@ -8,13 +8,23 @@ import dtm.ide.api.hierarchy.TypeHierarchyItem;
 import dtm.stools.component.panels.editor.code.documenthighlight.DocumentHighlight;
 import dtm.ide.api.project.editor.SemanticToken;
 import dtm.ide.inspection.DiagnosticRanges;
+import dtm.ide.lsp.api.ClassFileSupport;
 import dtm.ide.lsp.api.CompletionTrigger;
+import dtm.ide.lsp.api.DebugAdapterSupport;
+import dtm.ide.lsp.api.ImportCandidateSupport;
+import dtm.ide.lsp.api.ImportLookup;
+import dtm.ide.lsp.api.JavaAgentSupport;
 import dtm.ide.lsp.api.JavaCodeLens;
+import dtm.ide.lsp.api.JavaLanguageServer;
 import dtm.ide.lsp.api.LanguageServerState;
 import dtm.ide.lsp.api.LateCompletionListener;
 import dtm.ide.lsp.api.PrepareRenameResult;
+import dtm.ide.lsp.api.ProjectModelSupport;
 import dtm.ide.lsp.api.ResolvedCodeAction;
+import dtm.ide.lsp.api.SourceGenerationSupport;
 import dtm.ide.lsp.api.StatusListener;
+import dtm.ide.lsp.api.TestDiscoverySupport;
+import dtm.ide.lsp.api.TypeMoveSupport;
 import dtm.ide.lsp.api.TypeSymbol;
 import dtm.ide.lsp.api.WorkListener;
 import dtm.ide.inspection.JavaDiagnosticEdits;
@@ -27,6 +37,7 @@ import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
 import dtm.ide.sdk.JdkVendor;
 import dtm.ide.sdk.SdkDownloader;
+import dtm.ide.test.JavaTest;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
@@ -69,36 +80,15 @@ import java.util.function.Consumer;
 import java.util.function.LongConsumer;
 
 @Slf4j
-public class JdtLsService {
+public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport, TypeMoveSupport,
+        ClassFileSupport, ProjectModelSupport, DebugAdapterSupport, TestDiscoverySupport, ImportCandidateSupport,
+        JavaAgentSupport {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
     enum ResyncMode {
         REOPEN,
         TOUCH
-    }
-
-    public static final String APPLY_CODE_ACTION_COMMAND = "java/applyCodeAction";
-    public static final String OVERRIDE_METHODS_PROMPT = "java.action.overrideMethodsPrompt";
-    public static final String HASHCODE_EQUALS_PROMPT = "java.action.hashCodeEqualsPrompt";
-    public static final String GENERATE_TOSTRING_PROMPT = "java.action.generateToStringPrompt";
-    public static final String GENERATE_ACCESSORS_PROMPT = "java.action.generateAccessorsPrompt";
-    public static final String GENERATE_CONSTRUCTORS_PROMPT = "java.action.generateConstructorsPrompt";
-    public static final String GENERATE_DELEGATE_METHODS_PROMPT = "java.action.generateDelegateMethodsPrompt";
-
-    public record SourceItem(JsonNode value, String label, String detail, boolean selected) {
-    }
-
-    public record OverrideStatus(String type, List<SourceItem> methods) {
-    }
-
-    public record FieldsStatus(String type, List<SourceItem> fields, List<String> existingMethods, boolean exists) {
-    }
-
-    public record ConstructorsStatus(List<SourceItem> constructors, List<SourceItem> fields) {
-    }
-
-    public record DelegateTarget(JsonNode field, String label, List<SourceItem> methods) {
     }
 
     private static final long REQUEST_TIMEOUT_MS = 4_000;
@@ -139,7 +129,6 @@ public class JdtLsService {
     private static final int WATCHED_FILES_PER_NOTIFICATION = 512;
     private static final int MAX_REOPEN_DOCUMENTS = 30;
     private static final int MAX_COMPLETION_ITEMS = 80;
-    public static final int ANY_VERSION = -1;
     private static final int MAX_CODE_LENS_RESOLVE = 8;
     private static final long CODE_LENS_RETRY_TIMEOUT_MS = 20_000;
     private static final int MAX_CODE_LENS_RETRIES = 2;
@@ -309,6 +298,11 @@ public class JdtLsService {
     }
 
     record CompletionAnswer(List<AutoCompleteItem> items, boolean incomplete) {
+    }
+
+    @Override
+    public <T> T extension(Class<T> type) {
+        return type.isInstance(this) ? type.cast(this) : null;
     }
 
     public LanguageServerState getState() {
@@ -1305,6 +1299,10 @@ public class JdtLsService {
         return requestInteractive("workspace/executeCommand", Map.of(
                 "command", "vscode.java.test.findTestTypesAndMethods",
                 "arguments", List.of(LspConversions.toUri(file))), 15_000);
+    }
+
+    public List<JavaTest> testsIn(Path file) {
+        return JdtTestItems.parse(findTestTypesAndMethods(file), file);
     }
 
     public boolean isTestRunnerAvailable() {
@@ -2575,6 +2573,18 @@ public class JdtLsService {
                 "textDocument/hover", params, INTERACTIVE_TIMEOUT_MS));
     }
 
+    public boolean isClassFileUri(String uri) {
+        return JavaClassFileNavigation.isClassFileUri(uri);
+    }
+
+    public String classFileSourceName(String uri) {
+        return JavaClassFileNavigation.sourceFileName(uri);
+    }
+
+    public String classFileTabKey(String uri) {
+        return JavaClassFileNavigation.tabKey(uri);
+    }
+
     public String classFileContents(String uri) {
         if (!JavaClassFileNavigation.isClassFileUri(uri)) {
             return null;
@@ -3153,15 +3163,15 @@ public class JdtLsService {
                 action.hasNonNull("command") ? action.toString() : null);
     }
 
-    public ImportCandidates.Lookup importCandidates(Path filePath, String text, Range pasted,
+    public ImportLookup importCandidates(Path filePath, String text, Range pasted,
                                                    Set<String> handled) {
         if (!capabilities.codeAction() || !isCurrentText(filePath, text)) {
-            return ImportCandidates.Lookup.PENDING;
+            return ImportLookup.PENDING;
         }
         Map<String, JsonNode> unresolved = ImportCandidates.unresolvedByName(
                 rawDiagnosticsByPath.getOrDefault(normalizePath(filePath), List.of()), text, pasted, handled);
         if (unresolved.isEmpty()) {
-            return ImportCandidates.Lookup.PENDING;
+            return ImportLookup.PENDING;
         }
         Map<String, List<String>> candidates = new LinkedHashMap<>();
         for (JsonNode diagnostic : unresolved.values()) {
@@ -3172,11 +3182,11 @@ public class JdtLsService {
             JsonNode result = requestInteractive("textDocument/codeAction", params,
                     IMPORT_CANDIDATES_TIMEOUT_MS);
             if (result == null) {
-                return ImportCandidates.Lookup.PENDING;
+                return ImportLookup.PENDING;
             }
             ImportCandidates.merge(candidates, ImportCandidates.fromActions(result));
         }
-        return new ImportCandidates.Lookup(true, candidates, unresolved.keySet());
+        return new ImportLookup(true, candidates, unresolved.keySet());
     }
 
     public List<TypeSymbol> workspaceTypes(String query) {
@@ -3414,7 +3424,7 @@ public class JdtLsService {
 
     static List<JsonNode> rawValues(List<SourceItem> items) {
         if (items == null) return List.of();
-        return items.stream().map(SourceItem::value).toList();
+        return items.stream().map(item -> (JsonNode) item.value()).toList();
     }
 
     static boolean isSourcePrompt(String id) {

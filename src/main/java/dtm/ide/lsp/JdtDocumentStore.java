@@ -1,5 +1,6 @@
 package dtm.ide.lsp;
 
+import dtm.ide.lsp.api.JavaLanguageServer;
 import java.util.Map;
 import java.util.Set;
 import java.util.ArrayDeque;
@@ -37,7 +38,7 @@ final class JdtDocumentStore {
 
     int version(String uri) {
         AtomicInteger version = versions.get(uri);
-        return version == null ? JdtLsService.ANY_VERSION : version.get();
+        return version == null ? JavaLanguageServer.ANY_VERSION : version.get();
     }
 
     int ensureVersion(String uri) {

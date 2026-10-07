@@ -19,14 +19,12 @@ class ArchitectureRulesTest {
     private static final Path SOURCES = Path.of("src", "main", "java");
     private static final String SERVER_PACKAGE = "dtm/ide/lsp/";
     private static final Pattern SERVER_SPECIFIC = Pattern.compile(
-            "\\b(JdtLs\\w*|LombokAgentResolver)\\b|\"jdt:|\"vscode\\.java|\"java/[a-zA-Z]|\"java\\.project\\.");
+            "\\b(JdtLs\\w*|JavaClassFileNavigation|ImportCandidates)\\b|\"jdt:|\"vscode\\.java|\"java/[A-Za-z]+\"|\"java\\.project\\.");
 
     private static final Set<String> STILL_COUPLED_TO_JDT_LS = Set.of(
             "dtm/ide/JavaIdeAdapter.java",
-            "dtm/ide/debug/ConditionLanguageService.java",
             "dtm/ide/debug/JavaDebugSession.java",
-            "dtm/ide/refactor/JavaPathTransferRefactoring.java",
-            "dtm/ide/test/JavaSemanticTestDiscovery.java");
+            "dtm/ide/ui/JavaDebugPanel.java");
 
     @Test
     void onlyTheLanguageServerPackageKnowsTheConcreteServer() throws IOException {
