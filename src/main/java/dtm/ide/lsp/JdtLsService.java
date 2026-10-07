@@ -154,8 +154,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private volatile Path lombokAgentJar;
     private volatile Path launchedLombokAgentJar;
     private volatile boolean springSupport;
-    private volatile boolean debugBundleLoaded;
-    private volatile boolean testBundleLoaded;
+    private final JdtDialect dialect = new JdtDialect();
     private volatile Map<String, Object> effectiveSettings = Map.of();
     private volatile Consumer<Path> onCodeLensRefresh = path -> {
     };
@@ -467,7 +466,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
                 @Override
                 public boolean debugBundleLoaded() {
-                    return debugBundleLoaded;
+                    return dialect.debugBundleLoaded();
                 }
             });
 
@@ -1398,7 +1397,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode,
                 inlayHintsMode);
         effectiveSettings = JdtLsSettings.withMavenSettings(effectiveSettings, root);
-        params.put("initializationOptions", initializationOptions(effectiveSettings, bundlePaths));
+        params.put("initializationOptions", dialect.initializationOptions(effectiveSettings, bundlePaths));
 
         JsonNode result = awaitWhileAlive(rpc.request("initialize", params),
                 () -> server.isAlive() && isCurrent(launchGeneration),
@@ -1409,32 +1408,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         rpc.notify("initialized", Map.of());
         rpc.notify("workspace/didChangeConfiguration",
                 Map.of("settings", effectiveSettings));
-    }
-
-    private Map<String, Object> initializationOptions(Map<String, Object> settings,
-                                                      List<String> bundlePaths) {
-        Map<String, Object> options = new LinkedHashMap<>();
-        options.put("settings", settings);
-        options.put("extendedClientCapabilities", Map.of(
-                "progressReportProvider", true,
-                "classFileContentsSupport", true,
-                "overrideMethodsPromptSupport", true,
-                "advancedOrganizeImportsSupport", true,
-                "advancedGenerateAccessorsSupport", true,
-                "generateConstructorsPromptSupport", true,
-                "generateToStringPromptSupport", true,
-                "hashCodeEqualsPromptSupport", true,
-                "generateDelegateMethodsPromptSupport", true));
-
-        debugBundleLoaded = bundlePaths.stream().anyMatch(path ->
-                path.contains("com.microsoft.java.debug.plugin"));
-        testBundleLoaded = bundlePaths.stream().anyMatch(path ->
-                path.contains("com.microsoft.java.test.plugin"));
-        if (!bundlePaths.isEmpty()) {
-            options.put("bundles", bundlePaths);
-            log.info("Bundles carregados no jdtls: {}", bundlePaths.size());
-        }
-        return options;
     }
 
     public boolean isDebugAdapterAvailable() {
@@ -1463,7 +1436,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public boolean isTestRunnerAvailable() {
-        return testBundleLoaded && isInteractive();
+        return dialect.testBundleLoaded() && isInteractive();
     }
 
     public boolean updateProjectConfiguration(Path projectRoot) {
