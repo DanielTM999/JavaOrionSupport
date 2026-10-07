@@ -135,26 +135,9 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static final int WATCHED_FILES_PER_NOTIFICATION = 512;
     private static final int MAX_REOPEN_DOCUMENTS = 30;
     private static final int MAX_COMPLETION_ITEMS = 80;
-    private static final int MAX_CODE_LENS_RESOLVE = 8;
-    private static final long CODE_LENS_RETRY_TIMEOUT_MS = 20_000;
-    private static final int MAX_CODE_LENS_RETRIES = 2;
-    private static final long CODE_LENS_WORK_REFRESH_COOLDOWN_MS = 2_000;
-    private static final long CODE_LENS_EDIT_REFRESH_DELAY_MS = 800;
     private static final long WARM_UP_TIMEOUT_MS = 8_000;
     private static final long DIAGNOSTICS_SETTLE_QUIET_MS = 2_000;
     private static final long DIAGNOSTICS_SETTLE_TIMEOUT_MS = 90_000;
-
-    private static final List<String> TOKEN_TYPES = List.of(
-            "namespace", "class", "interface", "enum", "enumMember", "type", "typeParameter",
-            "method", "property", "variable", "parameter", "record", "recordComponent",
-            "annotation", "annotationMember", "modifier", "keyword", "comment", "string",
-            "number", "operator"
-    );
-
-    private static final List<String> TOKEN_MODIFIERS = List.of(
-            "abstract", "static", "final", "deprecated", "declaration", "documentation",
-            "public", "private", "protected", "native", "generic", "typeArgument",
-            "importDeclaration", "constructor");
 
     private final JdkService jdkService;
     private final JdtLsProvisioner provisioner;
@@ -167,8 +150,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private final Map<Path, List<Diagnostic>> diagnosticsByPath = new ConcurrentHashMap<>();
     private final Map<Path, List<JsonNode>> rawDiagnosticsByPath = new ConcurrentHashMap<>();
     private final Map<String, SymbolCache> symbolCache = new ConcurrentHashMap<>();
-    private final Map<String, LensWork> codeLensCache = new ConcurrentHashMap<>();
-    private final Map<String, AtomicLong> codeLensRefreshTickets = new ConcurrentHashMap<>();
     private final Map<String, CompletionCache> completionCache = new ConcurrentHashMap<>();
     private final Map<String, List<Location>> navigationCache = new ConcurrentHashMap<>();
     private final Set<String> workspaceWorkTokens = ConcurrentHashMap.newKeySet();
@@ -182,7 +163,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             MAX_PENDING_WATCHED_FILES,
             TimeUnit.MILLISECONDS.toNanos(EXTERNAL_RESYNC_MAX_DELAY_MS));
     private volatile long externalResyncDelayMs = EXTERNAL_RESYNC_DELAY_MS;
-    private final AtomicLong lastCodeLensWorkRefresh = new AtomicLong();
     private final Object processLock = new Object();
 
     private volatile LanguageServerState state = LanguageServerState.NOT_STARTED;
@@ -263,6 +243,58 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
     });
 
+    private final LspDecorations decorations = new LspDecorations(requests, executor, new LspDecorations.Host() {
+        @Override
+        public ServerCapabilities capabilities() {
+            return capabilities;
+        }
+
+        @Override
+        public boolean isReady() {
+            return JdtLsService.this.isReady();
+        }
+
+        @Override
+        public boolean isWarmingUp() {
+            return JdtLsService.this.isWarmingUp();
+        }
+
+        @Override
+        public boolean syncBeforeRequest(Path filePath, String text) {
+            return JdtLsService.this.syncBeforeRequest(filePath, text);
+        }
+
+        @Override
+        public boolean isCurrentText(Path filePath, String text) {
+            return JdtLsService.this.isCurrentText(filePath, text);
+        }
+
+        @Override
+        public long workspaceRevision() {
+            return workspaceRevision.get();
+        }
+
+        @Override
+        public JdtDocumentStore documents() {
+            return documents;
+        }
+
+        @Override
+        public LspJsonRpcClient client() {
+            return client;
+        }
+
+        @Override
+        public void codeLensRefreshed(Path path) {
+            onCodeLensRefresh.accept(path);
+        }
+
+        @Override
+        public JavaCodeLens unresolvedLens(JsonNode node, Status status) {
+            return JdtLsService.unresolvedLens(node, status);
+        }
+    });
+
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
         this.jdkService = jdkService;
@@ -277,52 +309,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private record LaunchRequest(Path root, JdkInstallation jdk, DownloadProgressListener progress) {
     }
 
-    record ServerCapabilities(
-            boolean definition,
-            boolean typeDefinition,
-            boolean implementation,
-            boolean references,
-            boolean documentSymbol,
-            boolean documentHighlight,
-            boolean codeLens,
-            boolean rename,
-            boolean prepareRename,
-            boolean formatting,
-            boolean rangeFormatting,
-            boolean codeAction,
-            boolean signatureHelp,
-            boolean inlayHint,
-            boolean semanticTokens,
-            boolean callHierarchy,
-            boolean executeCommand,
-            boolean workspaceSymbol,
-            boolean typeHierarchy,
-            boolean foldingRange,
-            boolean completionResolve,
-            boolean incrementalSync,
-            Set<Character> completionTriggers,
-            Set<Character> signatureTriggers) {
-
-        static ServerCapabilities none() {
-            return new ServerCapabilities(false, false, false, false, false, false, false, false,
-                    false, false, false, false, false, false, false, false, false, false, false,
-                    false, false, false, Set.of(), Set.of());
-        }
-    }
-
     private record SymbolCache(String text, List<DocumentSymbol> symbols) { }
-
-    private static final class LensWork {
-        final String text;
-        final long revision;
-        final int version;
-        volatile List<JavaCodeLens> lenses = List.of();
-        final Set<CompletableFuture<JsonNode>> pending = ConcurrentHashMap.newKeySet();
-        LensWork(String text, long revision, int version) {
-            this.text = text; this.revision = revision; this.version = version;
-        }
-        void cancel() { pending.forEach(f -> f.cancel(false)); }
-    }
 
     private record CompletionCache(String text, int line, int col, String linePrefix,
                                    boolean incomplete, List<AutoCompleteItem> items) {
@@ -1157,9 +1144,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         rawDiagnosticsByPath.clear();
         diagnosed.forEach(onDiagnosticsPublished);
         symbolCache.clear();
-        codeLensCache.values().forEach(LensWork::cancel);
-        codeLensCache.clear();
-        codeLensRefreshTickets.clear();
+        decorations.reset();
         completionCache.clear();
         requests.clearInFlight();
         workspaceWorkTokens.clear();
@@ -1241,7 +1226,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         params.put("workspaceFolders", List.of(Map.of(
                 "uri", LspConversions.toUri(root),
                 "name", root.getFileName() == null ? "workspace" : root.getFileName().toString())));
-        params.put("capabilities", LspClientCapabilities.build(TOKEN_TYPES, TOKEN_MODIFIERS));
+        params.put("capabilities", LspClientCapabilities.build(LspDecorations.TOKEN_TYPES, LspDecorations.TOKEN_MODIFIERS));
         JdkInstallation configuredJdk = preferredProjectJdk == null ? runtime : preferredProjectJdk;
         effectiveSettings = JdtLsSettings.build(configuredJdk, jdkService.available(), buildMode,
                 inlayHintsMode);
@@ -1659,7 +1644,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 finishWarmUp();
             }
             if (workspaceWorkTokens.remove(token)) invalidateWorkspaceNavigation();
-            else refreshCodeLensesAfterWork();
+            else decorations.refreshCodeLensesAfterWork();
         }
     }
 
@@ -1710,11 +1695,11 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return;
         }
         String uri = LspConversions.toUri(filePath);
-        codeLensRefreshTickets.remove(uri);
+        decorations.forgetRefreshTicket(uri);
         boolean wasSynced = documents.unmarkSynced(uri);
         documents.remove(uri);
         symbolCache.remove(uri);
-        discardCodeLenses(uri);
+        decorations.discardCodeLenses(uri);
         completionCache.remove(uri);
         invalidateWorkspaceNavigation();
         requests.cancelInFlightForUri(uri);
@@ -1771,7 +1756,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         Path target = normalizePath(path);
         String uri = LspConversions.toUri(target);
         symbolCache.remove(uri);
-        discardCodeLenses(uri);
+        decorations.discardCodeLenses(uri);
         completionCache.remove(uri);
         invalidateWorkspaceNavigation();
 
@@ -2006,7 +1991,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 sendDidChange(uri, content, content);
             }
             symbolCache.remove(uri);
-            discardCodeLenses(uri);
+            decorations.discardCodeLenses(uri);
             completionCache.remove(uri);
             Path path = LspConversions.toPath(uri);
             if (path == null) {
@@ -2049,7 +2034,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private void refreshOpenDocuments() {
         documents.uris().forEach(uri -> {
             symbolCache.remove(uri);
-            discardCodeLenses(uri);
+            decorations.discardCodeLenses(uri);
             completionCache.remove(uri);
             Path path = LspConversions.toPath(uri);
             if (path != null) {
@@ -2090,16 +2075,10 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 "contentChanges", List.of(change)));
     }
 
-    private void discardCodeLenses(String uri) {
-        LensWork old = codeLensCache.remove(uri);
-        if (old != null) old.cancel();
-    }
-
     private void invalidateWorkspaceNavigation() {
         workspaceRevision.incrementAndGet();
         navigationCache.clear();
-        codeLensCache.values().forEach(LensWork::cancel);
-        codeLensCache.clear();
+        decorations.discardAll();
         documents.uris().forEach(uri -> {
             Path path = LspConversions.toPath(uri);
             if (path != null) onCodeLensRefresh.accept(path);
@@ -2114,7 +2093,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private void documentContentChanged(Path filePath, String uri, String previous,
                                         String content, boolean deferCodeLensRefresh) {
         symbolCache.remove(uri);
-        discardCodeLenses(uri);
+        decorations.discardCodeLenses(uri);
         invalidateNavigationForEdit();
         requests.cancelInFlightForUri(uri);
         Path key = normalizePath(filePath);
@@ -2131,27 +2110,10 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             onDiagnosticsPublished.accept(filePath);
         }
         if (deferCodeLensRefresh) {
-            scheduleCodeLensRefresh(filePath, uri);
+            decorations.scheduleCodeLensRefresh(filePath, uri);
         } else if (filePath != null) {
             onCodeLensRefresh.accept(filePath);
         }
-    }
-
-    private void scheduleCodeLensRefresh(Path filePath, String uri) {
-        if (filePath == null || uri == null) {
-            return;
-        }
-        AtomicLong ticket = codeLensRefreshTickets.computeIfAbsent(uri, ignored -> new AtomicLong());
-        long currentTicket = ticket.incrementAndGet();
-        CompletableFuture.delayedExecutor(CODE_LENS_EDIT_REFRESH_DELAY_MS, TimeUnit.MILLISECONDS, executor)
-                .execute(() -> {
-                    AtomicLong latest = codeLensRefreshTickets.get(uri);
-                    if (latest != ticket || latest.get() != currentTicket
-                            || documents.content(uri) == null) {
-                        return;
-                    }
-                    onCodeLensRefresh.accept(filePath);
-                });
     }
 
     static Map<String, Object> incrementalDocumentChange(String previous, String current) {
@@ -3492,76 +3454,18 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     public CompletableFuture<List<InlayHint>> inlayHintsAsync(Path filePath, String text,
                                                                int firstLine, int lastLine) {
-        if (!capabilities.inlayHint() || isWarmingUp() || !syncBeforeRequest(filePath, text)) {
-            return CompletableFuture.completedFuture(List.of());
-        }
-        return requests.requestAsync("textDocument/inlayHint", inlayHintParams(filePath, firstLine, lastLine),
-                REQUEST_TIMEOUT_MS, false)
-                .thenApply(result -> isCurrentText(filePath, text) ? inlayHintsOf(result) : List.<InlayHint>of());
+        return decorations.inlayHintsAsync(filePath, text, firstLine, lastLine);
     }
 
     public List<InlayHint> inlayHints(Path filePath, String text, int firstLine, int lastLine) {
-        if (!capabilities.inlayHint()) {
-            return List.of();
-        }
-        if (!syncBeforeRequest(filePath, text)) {
-            return List.of();
-        }
-        JsonNode result = requests.requestBackground("textDocument/inlayHint",
-                inlayHintParams(filePath, firstLine, lastLine), REQUEST_TIMEOUT_MS);
-        if (!isCurrentText(filePath, text)) {
-            return List.of();
-        }
-        return inlayHintsOf(result);
-    }
-
-    private static Map<String, Object> inlayHintParams(Path filePath, int firstLine, int lastLine) {
-        return Map.of(
-                "textDocument", documentId(filePath),
-                "range", Map.of(
-                        "start", Map.of("line", Math.max(0, firstLine), "character", 0),
-                        "end", Map.of("line", Math.max(0, lastLine), "character", 0)));
-    }
-
-    private static List<InlayHint> inlayHintsOf(JsonNode result) {
-        if (result == null || !result.isArray()) {
-            return List.of();
-        }
-        List<InlayHint> hints = new ArrayList<>(result.size());
-        for (JsonNode node : result) {
-            InlayHint hint = LspConversions.inlayHint(node);
-            if (hint != null) {
-                hints.add(hint);
-            }
-        }
-        return hints;
+        return decorations.inlayHints(filePath, text, firstLine, lastLine);
     }
 
     public List<JavaCodeLens> codeLenses(Path filePath, String text) {
-        if (!capabilities.codeLens() || !isReady() || isWarmingUp()
-                || !syncBeforeRequest(filePath, text)) return List.of();
-        String uri = LspConversions.toUri(filePath);
-        String snapshot = text == null ? "" : text;
-        long revision = workspaceRevision.get();
-        int version = documents.version(uri);
-        AtomicBoolean created = new AtomicBoolean();
-        LensWork work = codeLensCache.compute(uri, (key, previous) -> {
-            if (previous != null && previous.text.equals(snapshot) && previous.revision == revision
-                    && previous.version == version) return previous;
-            if (previous != null) previous.cancel();
-            created.set(true);
-            return new LensWork(snapshot, revision, version);
-        });
-        if (created.get()) executor.execute(() -> resolveCodeLenses(filePath, uri, work));
-        return work.lenses;
+        return decorations.codeLenses(filePath, text);
     }
 
-    private boolean currentLensWork(String uri, LensWork work) {
-        return codeLensCache.get(uri) == work && workspaceRevision.get() == work.revision
-                && documents.version(uri) == work.version && work.text.equals(documents.content(uri)) && isReady();
-    }
-
-    private JavaCodeLens unresolvedLens(JsonNode node, Status status) {
+    private static JavaCodeLens unresolvedLens(JsonNode node, Status status) {
         JsonNode data = node.path("data");
         String type = data.isArray() && data.size() > 2 ? data.get(2).asText() : "";
         String command = switch (type) {
@@ -3572,103 +3476,12 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         return new JavaCodeLens(LspConversions.range(node.get("range")), "", command, List.of(), status);
     }
 
-    private void resolveCodeLenses(Path file, String uri, LensWork work) {
-        try {
-            JsonNode response = requests.requestBackground("textDocument/codeLens",
-                    Map.of("textDocument", Map.of("uri", uri)), REQUEST_TIMEOUT_MS * 2);
-            if (!currentLensWork(uri, work)) return;
-            if (response == null || !response.isArray()) {
-                codeLensCache.remove(uri, work);
-                return;
-            }
-            List<JsonNode> raw = new ArrayList<>();
-            response.forEach(raw::add);
-            List<JavaCodeLens> resolved = new ArrayList<>();
-            for (JsonNode node : raw) {
-                JavaCodeLens lens = LspConversions.codeLens(node);
-                resolved.add(lens == null ? unresolvedLens(node, Status.INDEXING) : lens);
-            }
-            publishLenses(file, uri, work, resolved);
-            for (int attempt = 0; attempt <= MAX_CODE_LENS_RETRIES && currentLensWork(uri, work); attempt++) {
-                List<Integer> remaining = new ArrayList<>();
-                for (int i = 0; i < resolved.size(); i++) {
-                    if (resolved.get(i).status() != Status.COMPLETE) remaining.add(i);
-                }
-                if (remaining.isEmpty()) break;
-                for (int start = 0; start < remaining.size() && currentLensWork(uri, work); start += MAX_CODE_LENS_RESOLVE) {
-                    Map<Integer, CompletableFuture<JsonNode>> batch = new LinkedHashMap<>();
-                    LspJsonRpcClient rpc = client;
-                    if (rpc == null) return;
-                    for (int i = start; i < Math.min(start + MAX_CODE_LENS_RESOLVE, remaining.size()); i++) {
-                        int index = remaining.get(i);
-                        CompletableFuture<JsonNode> future = rpc.request("codeLens/resolve", raw.get(index));
-                        batch.put(index, future); work.pending.add(future);
-                    }
-                    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CODE_LENS_RETRY_TIMEOUT_MS);
-                    for (var entry : batch.entrySet()) {
-                        CompletableFuture<JsonNode> future = entry.getValue();
-                        try {
-                            JsonNode answer = future.isDone() ? future.getNow(null)
-                                    : future.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
-                            JavaCodeLens lens = LspConversions.codeLens(answer);
-                            resolved.set(entry.getKey(), lens == null
-                                    ? unresolvedLens(raw.get(entry.getKey()), Status.FAILED) : lens);
-                        } catch (InterruptedException interrupted) {
-                            Thread.currentThread().interrupt(); return;
-                        } catch (Exception failure) {
-                            resolved.set(entry.getKey(), unresolvedLens(raw.get(entry.getKey()), Status.FAILED));
-                            future.cancel(false);
-                        } finally { work.pending.remove(future); }
-                    }
-                    publishLenses(file, uri, work, resolved);
-                }
-            }
-        } finally { work.cancel(); }
-    }
-
-    private void publishLenses(Path file, String uri, LensWork work, List<JavaCodeLens> lenses) {
-        if (!currentLensWork(uri, work)) return;
-        work.lenses = List.copyOf(lenses);
-        onCodeLensRefresh.accept(file);
-    }
-
-    private void refreshCodeLensesAfterWork() {
-        if (!isReady()) return;
-        long now = System.currentTimeMillis();
-        long previous = lastCodeLensWorkRefresh.get();
-        if (now - previous < CODE_LENS_WORK_REFRESH_COOLDOWN_MS
-                || !lastCodeLensWorkRefresh.compareAndSet(previous, now)) return;
-        documents.uris().forEach(uri -> {
-            if (!codeLensCache.containsKey(uri)) {
-                Path path = LspConversions.toPath(uri);
-                if (path != null) onCodeLensRefresh.accept(path);
-            }
-        });
-    }
-
     public CompletableFuture<List<SemanticToken>> semanticTokensAsync(Path filePath, String text) {
-        if (!capabilities.semanticTokens() || isWarmingUp() || !syncBeforeRequest(filePath, text)) {
-            return CompletableFuture.completedFuture(List.of());
-        }
-        return requests.requestAsync("textDocument/semanticTokens/full", Map.of("textDocument", documentId(filePath)),
-                REQUEST_TIMEOUT_MS, false)
-                .thenApply(result -> result == null || !isCurrentText(filePath, text) ? List.<SemanticToken>of()
-                        : SemanticTokenDecoder.decode(result.get("data"), TOKEN_TYPES, TOKEN_MODIFIERS));
+        return decorations.semanticTokensAsync(filePath, text);
     }
 
     public List<SemanticToken> semanticTokens(Path filePath, String text) {
-        if (!capabilities.semanticTokens()) {
-            return List.of();
-        }
-        if (!syncBeforeRequest(filePath, text)) {
-            return List.of();
-        }
-        JsonNode result = requests.requestBackground("textDocument/semanticTokens/full",
-                Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS);
-        if (result == null || !isCurrentText(filePath, text)) {
-            return List.of();
-        }
-        return SemanticTokenDecoder.decode(result.get("data"), TOKEN_TYPES, TOKEN_MODIFIERS);
+        return decorations.semanticTokens(filePath, text);
     }
 
     public String format(Path filePath, String text, int tabSize, boolean insertSpaces) {

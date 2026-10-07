@@ -629,7 +629,7 @@ class JdtLsProtocolTest {
         target.set(service, value);
     }
 
-    private static JdtLsService.ServerCapabilities allCapabilities() throws Exception {
+    private static ServerCapabilities allCapabilities() throws Exception {
         JsonNode handshake = JSON.readTree("""
                 {"capabilities":{"definitionProvider":true,"typeDefinitionProvider":true,
                  "implementationProvider":true,"referencesProvider":true,

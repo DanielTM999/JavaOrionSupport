@@ -105,12 +105,12 @@ final class LspClientCapabilities {
         return Map.of("dynamicRegistration", dynamicRegistration, key, value);
     }
 
-    static JdtLsService.ServerCapabilities readServerCapabilities(JsonNode initializeResult) {
+    static ServerCapabilities readServerCapabilities(JsonNode initializeResult) {
         JsonNode caps = initializeResult == null ? null : initializeResult.get("capabilities");
         if (caps == null || caps.isNull()) {
-            return JdtLsService.ServerCapabilities.none();
+            return ServerCapabilities.none();
         }
-        return new JdtLsService.ServerCapabilities(
+        return new ServerCapabilities(
                 provided(caps, "definitionProvider"),
                 provided(caps, "typeDefinitionProvider"),
                 provided(caps, "implementationProvider"),
