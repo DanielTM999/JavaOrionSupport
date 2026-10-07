@@ -122,11 +122,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static final Set<JdtLsService> LIVE_SERVICES = ConcurrentHashMap.newKeySet();
     private static final AtomicBoolean SHUTDOWN_HOOK_INSTALLED = new AtomicBoolean();
     private static final long DOCUMENT_RECOVERY_COOLDOWN_MS = 5_000;
-    private static final long EXTERNAL_RESYNC_DELAY_MS = 350;
-    private static final long EXTERNAL_RESYNC_MAX_DELAY_MS = 2_000;
     private static final long PROJECT_CONFIGURATION_COOLDOWN_MS = 2_000;
-    private static final int MAX_PENDING_WATCHED_FILES = 50_000;
-    private static final int WATCHED_FILES_PER_NOTIFICATION = 512;
     private static final int MAX_REOPEN_DOCUMENTS = 30;
     private static final long WARM_UP_TIMEOUT_MS = 8_000;
 
@@ -144,12 +140,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private final AtomicLong workspaceRevision = new AtomicLong();
     private final AtomicLong lastDocumentRecovery = new AtomicLong();
     private final AtomicLong lastProjectConfigurationUpdate = new AtomicLong();
-    private final AtomicLong watchedFlushTicket = new AtomicLong();
-    private final AtomicLong resyncTicket = new AtomicLong();
-    private final WatchedFileBatch watchedFiles = new WatchedFileBatch(
-            MAX_PENDING_WATCHED_FILES,
-            TimeUnit.MILLISECONDS.toNanos(EXTERNAL_RESYNC_MAX_DELAY_MS));
-    private volatile long externalResyncDelayMs = EXTERNAL_RESYNC_DELAY_MS;
     private final Object processLock = new Object();
 
     private volatile LanguageServerState state = LanguageServerState.NOT_STARTED;
@@ -497,6 +487,44 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 @Override
                 public boolean debugBundleLoaded() {
                     return debugBundleLoaded;
+                }
+            });
+
+    private final LspWatchedFiles watched = new LspWatchedFiles(executor, documents,
+            new LspWatchedFiles.Host() {
+                @Override
+                public LspJsonRpcClient client() {
+                    return client;
+                }
+
+                @Override
+                public boolean canSyncDocuments() {
+                    return JdtLsService.this.canSyncDocuments();
+                }
+
+                @Override
+                public void invalidateWorkspaceNavigation() {
+                    JdtLsService.this.invalidateWorkspaceNavigation();
+                }
+
+                @Override
+                public void forgetSymbols(String uri) {
+                    navigation.forgetSymbols(uri);
+                }
+
+                @Override
+                public void discardCodeLenses(String uri) {
+                    decorations.discardCodeLenses(uri);
+                }
+
+                @Override
+                public void forgetCompletion(String uri) {
+                    completion.forget(uri);
+                }
+
+                @Override
+                public void resynchronizeOpenDocuments() {
+                    JdtLsService.this.resynchronizeOpenDocuments(resyncMode(), false, null);
                 }
             });
 
@@ -1345,9 +1373,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private void resetServerState() {
         documents.clearSyncState();
         openedDuringImport.clear();
-        watchedFiles.clear();
-        watchedFlushTicket.incrementAndGet();
-        resyncTicket.incrementAndGet();
+        watched.reset();
         diagnosticsStore.reset();
         navigation.clearSymbols();
         decorations.reset();
@@ -1775,7 +1801,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public void requestExternalResync() {
-        scheduleExternalResync();
+        watched.scheduleExternalResync();
     }
 
     public void resynchronizeWithDisk() {
@@ -1806,92 +1832,15 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     private void queueWatchedFile(Path path, int changeType) {
-        if (path == null) {
-            return;
-        }
-        Path target = normalizePath(path);
-        String uri = LspConversions.toUri(target);
-        navigation.forgetSymbols(uri);
-        decorations.discardCodeLenses(uri);
-        completion.forget(uri);
-        invalidateWorkspaceNavigation();
-
-        watchedFiles.add(target, changeType, System.nanoTime());
-        if (canSyncDocuments()) {
-            scheduleWatchedFlush();
-        }
-    }
-
-    private void scheduleWatchedFlush() {
-        long ticket = watchedFlushTicket.incrementAndGet();
-        long delay = TimeUnit.NANOSECONDS.toMillis(watchedFiles.delayNanos(System.nanoTime(),
-                TimeUnit.MILLISECONDS.toNanos(externalResyncDelayMs)));
-        CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS, executor)
-                .execute(() -> flushWatchedFiles(ticket));
-    }
-
-    private void flushWatchedFiles(long ticket) {
-        if (ticket != watchedFlushTicket.get()) {
-            return;
-        }
-        drainWatchedFiles();
-    }
-
-    private void drainWatchedFiles() {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || rpc.isClosed() || !canSyncDocuments()) {
-            return;
-        }
-        if (!watchedFiles.isPending()) {
-            return;
-        }
-        boolean overflowed = watchedFiles.isOverflowed();
-        List<WatchedFileBatch.Entry> entries = watchedFiles.drain();
-        if (!overflowed) {
-            List<Map<String, Object>> changes = new ArrayList<>(entries.size());
-            for (WatchedFileBatch.Entry entry : entries) {
-                String uri = LspConversions.toUri(entry.path());
-                if (entry.changeType() != WatchedFileBatch.DELETED && documents.isSynced(uri)) {
-                    continue;
-                }
-                changes.add(Map.of("uri", uri, "type", entry.changeType()));
-            }
-            for (int from = 0; from < changes.size(); from += WATCHED_FILES_PER_NOTIFICATION) {
-                List<Map<String, Object>> chunk = changes.subList(from,
-                        Math.min(changes.size(), from + WATCHED_FILES_PER_NOTIFICATION));
-                rpc.notify("workspace/didChangeWatchedFiles", Map.of("changes", List.copyOf(chunk)));
-            }
-        } else {
-            log.debug("Lote de mudancas externas estourou; ressincronizando tudo");
-        }
-        scheduleExternalResync();
-    }
-
-    private void scheduleExternalResync() {
-        if (!canSyncDocuments()) {
-            return;
-        }
-        long ticket = resyncTicket.incrementAndGet();
-        CompletableFuture.delayedExecutor(externalResyncDelayMs, TimeUnit.MILLISECONDS, executor)
-                .execute(() -> runExternalResync(ticket));
-    }
-
-    private void runExternalResync(long ticket) {
-        if (ticket != resyncTicket.get() || !canSyncDocuments()) {
-            return;
-        }
-        resynchronizeOpenDocuments(resyncMode(), false, null);
+        watched.queue(path, changeType);
     }
 
     void setExternalResyncDelayMs(long delayMs) {
-        externalResyncDelayMs = Math.max(0, delayMs);
+        watched.setExternalResyncDelayMs(delayMs);
     }
 
     void drainPendingWatchedFiles() {
-        if (!watchedFiles.isPending()) {
-            return;
-        }
-        drainWatchedFiles();
+        watched.drainPending();
     }
 
     public void projectConfigurationUpdate() {
