@@ -331,9 +331,9 @@ class JdtLsServiceTest {
         Map<String, Object> completion = Map.of("enabled", true);
         Map<String, Object> settings = Map.of("java", Map.of("completion", completion));
 
-        assertEquals(completion, JdtLsService.configurationValue(settings, "java.completion"));
-        assertEquals(settings, JdtLsService.configurationValue(settings, ""));
-        assertEquals(null, JdtLsService.configurationValue(settings, "java.missing"));
+        assertEquals(completion, LspSession.configurationValue(settings, "java.completion"));
+        assertEquals(settings, LspSession.configurationValue(settings, ""));
+        assertEquals(null, LspSession.configurationValue(settings, "java.missing"));
     }
 
     @Test

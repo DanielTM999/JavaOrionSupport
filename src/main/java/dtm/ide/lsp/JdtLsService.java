@@ -554,6 +554,48 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
     });
 
+    private final LspSession session = new LspSession(new LspSession.Host() {
+        @Override
+        public void onPublishDiagnostics(JsonNode params) {
+            JdtLsService.this.onPublishDiagnostics(params);
+        }
+
+        @Override
+        public void onLanguageStatus(JsonNode params) {
+            JdtLsService.this.onLanguageStatus(params);
+        }
+
+        @Override
+        public void onServerLogMessage(JsonNode params) {
+            JdtLsService.this.onServerLogMessage(params);
+        }
+
+        @Override
+        public void onProgress(JsonNode params) {
+            JdtLsService.this.onProgress(params);
+        }
+
+        @Override
+        public void onProgressReport(JsonNode params) {
+            JdtLsService.this.onProgressReport(params);
+        }
+
+        @Override
+        public void invalidateWorkspaceNavigation() {
+            JdtLsService.this.invalidateWorkspaceNavigation();
+        }
+
+        @Override
+        public StatusListener statusListener() {
+            return statusListener;
+        }
+
+        @Override
+        public Map<String, Object> effectiveSettings() {
+            return effectiveSettings;
+        }
+    });
+
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
         this.jdkService = jdkService;
@@ -901,7 +943,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             watchServerExit(owned, launchGeneration);
             rpc.onUnexpectedDisconnect(() -> onProtocolLost(owned, launchGeneration));
             processSupport.pumpStderr(owned);
-            registerHandlers(rpc);
+            session.registerHandlers(rpc);
 
             initialize(rpc, owned, launchGeneration, root, runtime, jdk, bundlePaths.join());
             long initialized = System.nanoTime();
@@ -1416,59 +1458,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     static List<String> runtimeClasspathArguments(Path projectOrSource) {
         return JdtProjectCommands.runtimeClasspathArguments(projectOrSource);
-    }
-
-    private void registerHandlers(LspJsonRpcClient rpc) {
-        if (rpc == null) {
-            return;
-        }
-        rpc.onNotification("textDocument/publishDiagnostics", this::onPublishDiagnostics);
-        rpc.onNotification("language/status", this::onLanguageStatus);
-        rpc.onNotification("window/logMessage", this::onServerLogMessage);
-        rpc.onNotification("window/showMessage", params -> {
-            if (params != null) {
-                statusListener.onStatus("Java: " + params.path("message").asText(""), -1);
-            }
-        });
-        rpc.onNotification("$/progress", this::onProgress);
-        rpc.onNotification("language/progressReport", this::onProgressReport);
-        rpc.onRequest("window/workDoneProgress/create", params -> null);
-
-        rpc.onRequest("workspace/configuration", params -> {
-            int items = params != null && params.has("items") ? params.get("items").size() : 1;
-            List<Object> answer = new ArrayList<>(items);
-            for (int i = 0; i < items; i++) {
-                String section = params != null && params.has("items")
-                        ? params.get("items").get(i).path("section").asText("")
-                        : "";
-                answer.add(configurationValue(effectiveSettings, section));
-            }
-            return answer;
-        });
-        rpc.onRequest("client/registerCapability", params -> Map.of());
-        rpc.onRequest("client/unregisterCapability", params -> Map.of());
-        rpc.onRequest("workspace/applyEdit", params -> Map.of("applied", false));
-        rpc.onRequest("workspace/codeLens/refresh", params -> {
-            invalidateWorkspaceNavigation();
-            return null;
-        });
-    }
-
-    static Object configurationValue(Map<String, Object> settings, String section) {
-        if (section == null || section.isBlank()) {
-            return settings;
-        }
-        Object current = settings;
-        for (String part : section.split("\\.")) {
-            if (!(current instanceof Map<?, ?> map)) {
-                return null;
-            }
-            current = map.get(part);
-            if (current == null) {
-                return null;
-            }
-        }
-        return current;
     }
 
     void onPublishDiagnostics(JsonNode params) {
