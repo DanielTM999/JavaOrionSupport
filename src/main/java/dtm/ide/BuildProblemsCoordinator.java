@@ -15,7 +15,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
-final class BuildProblemsCoordinator {
+public final class BuildProblemsCoordinator {
 
     enum Channel {
         BUILD,
@@ -29,7 +29,7 @@ final class BuildProblemsCoordinator {
     private volatile Map<Path, List<Diagnostic>> buildDiagnostics = Map.of();
     private volatile List<BuildDiagnostic> buildProblems = List.of();
 
-    List<Diagnostic> diagnostics(Path file) {
+    public List<Diagnostic> diagnostics(Path file) {
         return buildDiagnostics.getOrDefault(file, List.of());
     }
 

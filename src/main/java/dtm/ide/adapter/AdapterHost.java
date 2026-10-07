@@ -1,6 +1,8 @@
 package dtm.ide.adapter;
 
+import dtm.ide.BuildProblemsCoordinator;
 import dtm.ide.api.extension.PlatformPopupBuilder;
+import dtm.ide.api.extension.Resource;
 import dtm.ide.api.extension.output.OutputPanelHandle;
 import dtm.ide.api.extension.output.OutputPanelOptions;
 import dtm.ide.api.extension.runconfig.RunConfigurationData;
@@ -25,8 +27,6 @@ import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaTodoPanel;
 
-import javax.swing.Icon;
-import javax.swing.JComponent;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collection;
@@ -35,6 +35,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import javax.swing.Icon;
+import javax.swing.JComponent;
 
 public interface AdapterHost extends AdapterContext {
     String registerTodoPanel(JavaTodoPanel panel, Icon icon);
@@ -106,4 +108,8 @@ public interface AdapterHost extends AdapterContext {
     JavaFastCompletionProvider fastCompletion();
     JavaLexicalIndex lexicalIndex();
     boolean isSpringNavigationEnabled();
+    BuildProblemsCoordinator problems();
+    Resource resource();
+    void requestRefreshDiagnostics(Path file);
+    void requestShowCodeActions(Path file);
 }

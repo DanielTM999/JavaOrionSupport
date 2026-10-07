@@ -51,10 +51,12 @@ import dtm.ide.api.project.editor.IdeDocumentHighlightContext;
 import dtm.ide.api.project.editor.IdeDocumentSymbolContext;
 import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
+import dtm.ide.api.extension.Resource;
 import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildToolsSupport;
 import dtm.ide.adapter.CompletionEngine;
+import dtm.ide.adapter.DiagnosticsEngine;
 import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.JdkManagerSupport;
@@ -379,9 +381,7 @@ import static dtm.ide.adapter.CompletionSupport.mergeCompletionSuggestions;
 @PluginReference(id = "java-ide-adapter")
 public class JavaIdeAdapter extends IdeAdapter {
 
-    private static final String DISABLE_INSPECTION_COMMAND = "java.orion.disableInspection";
 
-    private static final String HIDE_OCCURRENCE_COMMAND = "java.orion.hideInspectionOccurrence";
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long RUN_BUTTONS_REFRESH_DELAY_MS = 300;
@@ -831,6 +831,26 @@ public class JavaIdeAdapter extends IdeAdapter {
         public boolean isSpringNavigationEnabled() {
             return JavaIdeAdapter.this.isSpringNavigationEnabled();
         }
+    
+        @Override
+        public BuildProblemsCoordinator problems() {
+            return problems;
+        }
+
+        @Override
+        public Resource resource() {
+            return getResource();
+        }
+
+        @Override
+        public void requestRefreshDiagnostics(Path file) {
+            JavaIdeAdapter.this.requestRefreshDiagnostics(file);
+        }
+
+        @Override
+        public void requestShowCodeActions(Path file) {
+            JavaIdeAdapter.this.requestShowCodeActions(file);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -841,6 +861,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final SpringSupport spring = new SpringSupport(adapterHost);
     private final CoverageSupport coverageSupport = new CoverageSupport(adapterHost);
     private final CompletionEngine completionEngine = new CompletionEngine(adapterHost);
+    private final DiagnosticsEngine diagnosticsEngine = new DiagnosticsEngine(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -853,8 +874,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             new BuildFileCompletionProvider(new EditorDependencyCatalog(), pomProperties);
     private final EditorTheme theme = new JavaEditorTheme(() -> requestEditorThemeConfig("java"));
     private final AtomicLong lifecycle = new AtomicLong();
-    private final AtomicLong wordCaretTicket = new AtomicLong();
-    private final AtomicReference<CodeActionPrefetch> codeActionPrefetch = new AtomicReference<>();
     private final AtomicLong navigationTicket = new AtomicLong();
     private final AtomicLong navigationRequestTicket = new AtomicLong();
     private final AtomicLong hotReloadTicket = new AtomicLong();
@@ -965,13 +984,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JavaProjectStructurePanel structurePanel;
     private volatile JavaBuildToolsPanel buildToolsPanel;
     private volatile String buildToolsPanelId;
-    private volatile InspectionSuppressionStore suppressionStore;
     private volatile JavaFileChangeRouter fileChangeRouter;
     private volatile IdeProjectFileWatcher projectFileWatcher;
     private volatile String fileWatcherListenerId;
     private volatile JavaPluginSettings settings;
-    private volatile Object codeActionLampHandle;
-    private volatile IdeEditorContext codeActionLampContext;
     private volatile IdeEditorContext activeJavaEditor;
     private final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
     private final Map<Path, PendingPasteImport> pendingPasteImports = new ConcurrentHashMap<>();
@@ -1093,7 +1109,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (toolsPanel != null) {
             toolsPanel.setSyncing(false);
         }
-        SwingUtilities.invokeLater(this::hideCodeActionLamp);
+        SwingUtilities.invokeLater(diagnosticsEngine::hideCodeActionLamp);
         clearStatusBarText();
     }
 
@@ -1949,69 +1965,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public Collection<Diagnostic> getDiagnostics(IdeDiagnosticsContext context, boolean incremental,
                                                  Collection<Diagnostic> diagnostics) {
-        if (context == null) {
-            return null;
-        }
-        Path filePath = context.getFilePath();
-        if (JavaProjectConventions.isMavenPom(filePath)) {
-            return PomDiagnostics.validate(context.getText());
-        }
-        if (SpringConfigSupport.isConfigFile(filePath)) {
-            return pluginDiagnostics(filePath, context.getText());
-        }
-        if (!JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        if (incremental && context.getPreviousText() != null
-                && JavaDiagnosticEdits.sameCode(context.getPreviousText(), context.getText())) {
-            return JavaDiagnosticEdits.move(context.getPreviousDiagnostics(),
-                    context.getPreviousText(), context.getText());
-        }
-        List<Diagnostic> merged = new ArrayList<>();
-
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null && lsp.isInteractive()) {
-            merged.addAll(lsp.diagnostics(filePath));
-        }
-        merged.addAll(problems.diagnostics(filePath));
-
-        merged.addAll(pluginDiagnostics(filePath, context.getText()));
-        merged.addAll(unusedMethodDiagnostics(context.getText(), merged,
-                names -> lexicalIndex.unusedMethods(names, filePath, context.getText())));
-        merged.addAll(unusedFieldDiagnostics(context.getText(), merged,
-                names -> lexicalIndex.unusedFields(names, filePath, context.getText())));
-        List<Diagnostic> visible = InspectionSuppressions.filter(merged, context.getText(),
-                settings().getDisabledInspections(), occurrenceFilterFor(filePath));
-        return visible.isEmpty() && (lsp == null || !lsp.isInteractive()) ? null : visible;
-    }
-
-    private List<Diagnostic> pluginDiagnostics(Path filePath, String text) {
-        if (SpringConfigSupport.isConfigFile(filePath)) {
-            return DiagnosticRanges.clamp(InspectionSuppressions.filter(
-                    SpringConfigSupport.validate(spring.metadata(), filePath, text),
-                    text, settings().getDisabledInspections(), occurrenceFilterFor(filePath)), text);
-        }
-        JavaProjectDescriptor current = descriptor;
-        if (!JavaProjectConventions.isJava(filePath) || current == null || !current.spring()
-                || !settings().isSpringSupport()) {
-            return List.of();
-        }
-        SpringIndexSnapshot snapshot = spring.index().snapshot();
-        List<Diagnostic> plugin = new ArrayList<>(
-                SpringDiagnostics.analyze(snapshot, filePath, text));
-        if (settings().isSpringJpa()) {
-            plugin.addAll(JpaDiagnostics.analyze(snapshot, filePath));
-            plugin.addAll(JpqlDiagnostics.analyze(snapshot, filePath));
-        }
-        if (settings().isSpringConfigNavigation()) {
-            plugin.addAll(SpringValueDiagnostics.analyze(snapshot, spring.configIndex(),
-                    spring.metadata(), filePath));
-        }
-        if (settings().isSpringInfra()) {
-            plugin.addAll(SpringInfraDiagnostics.analyze(snapshot.infra(), filePath));
-        }
-        return DiagnosticRanges.clamp(InspectionSuppressions.filter(plugin, text,
-                settings().getDisabledInspections(), occurrenceFilterFor(filePath)), text);
+        return diagnosticsEngine.getDiagnostics(context, incremental, diagnostics);
     }
 
     @Override
@@ -4002,136 +3956,11 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<CodeAction> getCodeActions(IdeCodeActionContext context) {
-        if (context == null) {
-            return null;
-        }
-        CodeActionPrefetch prefetch = codeActionPrefetch.get();
-        if (prefetch != null && prefetch.matches(context)) {
-            List<CodeAction> prefetched = prefetch.await();
-            if (prefetched != null) {
-                return prefetched;
-            }
-        }
-        return computeCodeActions(context);
-    }
-
-    private List<CodeAction> computeCodeActions(IdeCodeActionContext context) {
-        List<CodeAction> actions = new ArrayList<>(suppressionActions(context));
-        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
-        List<CodeAction> semantic = lsp == null ? null : lsp.codeActions(context.filePath(),
-                context.text(), context.range(), context.diagnostics());
-        if (semantic != null) {
-            actions.addAll(semantic);
-        }
-        return actions.isEmpty() ? semantic : actions;
-    }
-
-    private List<CodeAction> suppressionActions(IdeCodeActionContext context) {
-        Path filePath = context.filePath();
-        if (filePath == null || !supportsCodeActionLamp(filePath)) {
-            return List.of();
-        }
-        String text = context.text();
-        List<Diagnostic> candidates = new ArrayList<>(pluginDiagnostics(filePath, text));
-        if (context.diagnostics() != null) {
-            for (Diagnostic diagnostic : context.diagnostics()) {
-                if (InspectionSuppressions.suppressible(diagnostic)) {
-                    candidates.add(diagnostic);
-                }
-            }
-        }
-        if (candidates.isEmpty()) {
-            return List.of();
-        }
-        int fromLine = -1;
-        int toLine = -1;
-        if (context.range() != null && context.range().start() != null) {
-            fromLine = context.range().start().line();
-            toLine = context.range().end() == null ? fromLine : context.range().end().line();
-        }
-        String[] lines = text == null ? new String[0] : text.split("\n", -1);
-
-        List<CodeAction> actions = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (Diagnostic diagnostic : candidates) {
-            if (!InspectionSuppressions.suppressible(diagnostic)) {
-                continue;
-            }
-            if (fromLine >= 0 && (diagnostic.startLine() < Math.min(fromLine, toLine)
-                    || diagnostic.startLine() > Math.max(fromLine, toLine))) {
-                continue;
-            }
-            JavaInspection inspection = InspectionSuppressions.inspectionOf(diagnostic).orElse(null);
-            if (inspection == null || !seen.add(inspection.id())) {
-                continue;
-            }
-            String anchor = InspectionSuppressions.anchorAt(lines, diagnostic.startLine());
-            actions.add(CodeAction.command(
-                    text("action.hideHere", "Ocultar este aviso aqui") + ": " + inspection.label(),
-                    new Command(HIDE_OCCURRENCE_COMMAND,
-                            text("action.hideHere", "Ocultar este aviso aqui"),
-                            List.of(inspection.id(),
-                                    filePath.toAbsolutePath().toString(), anchor))));
-            actions.add(CodeAction.command(
-                    text("action.disableInspection", "Ocultar todos os avisos deste tipo")
-                            + ": " + inspection.label(),
-                    new Command(DISABLE_INSPECTION_COMMAND,
-                            text("action.disableInspection", "Ocultar todos os avisos deste tipo"),
-                            List.of(inspection.id()))));
-            actions.add(suppressHereAction(inspection, lines, diagnostic.startLine()));
-        }
-        return List.copyOf(actions);
-    }
-
-    private CodeAction suppressHereAction(JavaInspection inspection, String[] lines, int line) {
-        int anchor = InspectionSuppressions.anchorLineFor(lines, line);
-        String anchorText = anchor >= 0 && anchor < lines.length ? lines[anchor] : "";
-        String insertion = InspectionSuppressions.suppressionFor(anchorText, inspection.id());
-        return CodeAction.quickFix(
-                text("action.suppressHere", "Anotar com @SuppressWarnings"),
-                List.of(TextEdit.insert(new Position(anchor, 0), insertion)));
+        return diagnosticsEngine.getCodeActions(context);
     }
 
     InspectionSuppressionStore suppressions() {
-        InspectionSuppressionStore existing = suppressionStore;
-        if (existing != null) {
-            return existing;
-        }
-        Path directory = null;
-        try {
-            directory = getResource().getResourcePath();
-        } catch (Exception e) {
-            log.debug("Diretorio de recursos indisponivel para as supressoes: {}", e.getMessage());
-        }
-        InspectionSuppressionStore created = new InspectionSuppressionStore(directory);
-        suppressionStore = created;
-        return created;
-    }
-
-    private InspectionSuppressions.OccurrenceFilter occurrenceFilterFor(Path filePath) {
-        InspectionSuppressionStore store = suppressions();
-        Path root = projectRoot;
-        return (inspectionId, anchor) ->
-                store.isSuppressed(root, filePath, inspectionId, anchor);
-    }
-
-    private void hideInspectionOccurrence(String inspectionId, String file, String anchor) {
-        if (inspectionId == null || file == null || anchor == null) {
-            return;
-        }
-        Path target = Path.of(file);
-        suppressions().suppress(projectRoot, target, inspectionId, anchor);
-        setStatusBarText(text("status.occurrenceHidden", "Java: aviso ocultado nesta ocorrencia"));
-        requestRefreshDiagnostics(target);
-    }
-
-    private void disableInspection(String inspectionId) {
-        JavaPluginSettings current = settings();
-        current.setInspectionDisabled(inspectionId, true);
-        current.save();
-        setStatusBarText(text("status.inspectionDisabled", "Java: inspecao desativada")
-                + " - " + inspectionId);
-        javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
+        return diagnosticsEngine.suppressions();
     }
 
     @Override
@@ -4531,196 +4360,8 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onWordCaretChange(IdeWordCaretContext context) {
-        long ticket = wordCaretTicket.incrementAndGet();
-        SwingUtilities.invokeLater(this::hideCodeActionLamp);
-        if (context == null || context.filePath() == null || context.editorContext() == null
-                || !supportsCodeActionLamp(context.filePath())) {
-            return;
-        }
-        background.schedule(
-                () -> showCodeActionLampIfCaretStayed(context, ticket), 250, TimeUnit.MILLISECONDS);
+        diagnosticsEngine.onWordCaretChange(context);
     }
-
-    private void showCodeActionLampIfCaretStayed(IdeWordCaretContext context, long ticket) {
-        if (ticket != wordCaretTicket.get()
-                || !sameCaret(context, context.editorContext())) {
-            return;
-        }
-        DiagnosticSeverity severity = lampSeverityAt(context);
-        if (severity == null) {
-            return;
-        }
-        SwingUtilities.invokeLater(() -> {
-            if (ticket == wordCaretTicket.get() && sameCaret(context, context.editorContext())) {
-                showCodeActionLamp(context, severity);
-            }
-        });
-        prefetchCodeActions(context);
-    }
-
-    private void prefetchCodeActions(IdeWordCaretContext context) {
-        IdeCodeActionContext actionContext = new IdeCodeActionContext(context.text(),
-                context.filePath(), Range.point(context.line(), context.col()), List.of());
-        CodeActionPrefetch prefetch = new CodeActionPrefetch(actionContext, new CompletableFuture<>());
-        codeActionPrefetch.set(prefetch);
-        try {
-            prefetch.actions().complete(computeCodeActions(actionContext));
-        } catch (RuntimeException e) {
-            prefetch.actions().completeExceptionally(e);
-        }
-    }
-
-    private record CodeActionPrefetch(IdeCodeActionContext context,
-                                      CompletableFuture<List<CodeAction>> actions) {
-
-        private static final long WAIT_MS = 3_000;
-
-        boolean matches(IdeCodeActionContext other) {
-            Range range = other.range();
-            return range != null && range.start() != null && range.start().equals(range.end())
-                    && range.start().equals(context.range().start())
-                    && other.filePath() != null && context.filePath() != null
-                    && other.filePath().toAbsolutePath().normalize()
-                            .equals(context.filePath().toAbsolutePath().normalize())
-                    && Objects.equals(other.text(), context.text());
-        }
-
-        List<CodeAction> await() {
-            try {
-                return actions.get(WAIT_MS, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return null;
-            } catch (Exception e) {
-                return null;
-            }
-        }
-    }
-
-    private boolean supportsCodeActionLamp(Path filePath) {
-        return JavaProjectConventions.isJava(filePath)
-                || SpringConfigSupport.isConfigFile(filePath);
-    }
-
-    private DiagnosticSeverity lampSeverityAt(IdeWordCaretContext context) {
-        DiagnosticSeverity strongest = null;
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null && JavaProjectConventions.isJava(context.filePath())) {
-            Diagnostic fromServer = lsp.diagnosticAt(
-                    context.filePath(), context.line(), context.col());
-            if (fromServer != null) {
-                strongest = fromServer.severity();
-            }
-        }
-        for (Diagnostic diagnostic : pluginDiagnosticsAt(context.filePath(), context.text(),
-                context.line())) {
-            if (InspectionSuppressions.suppressible(diagnostic)) {
-                strongest = strongest(strongest, diagnostic.severity());
-            }
-        }
-        return strongest;
-    }
-
-    private List<Diagnostic> pluginDiagnosticsAt(Path filePath, String text, int line) {
-        List<Diagnostic> atLine = new ArrayList<>();
-        for (Diagnostic diagnostic : pluginDiagnostics(filePath, text)) {
-            if (diagnostic.startLine() == line) {
-                atLine.add(diagnostic);
-            }
-        }
-        return atLine;
-    }
-
-    private static DiagnosticSeverity strongest(DiagnosticSeverity current,
-                                                DiagnosticSeverity candidate) {
-        if (current == null) {
-            return candidate;
-        }
-        if (candidate == null) {
-            return current;
-        }
-        return rank(candidate) > rank(current) ? candidate : current;
-    }
-
-    private static int rank(DiagnosticSeverity severity) {
-        return switch (severity) {
-            case ERROR -> 3;
-            case WARNING -> 2;
-            case INFO -> 1;
-            case HINT -> 0;
-        };
-    }
-
-    private static boolean sameCaret(IdeWordCaretContext context, IdeEditorContext editor) {
-        return context != null && editor != null && editor.filePath() != null
-                && Objects.equals(JavaProjectConventions.normalize(editor.filePath()),
-                        JavaProjectConventions.normalize(context.filePath()))
-                && editor.getCaretLine() == context.line()
-                && editor.getCaretCol() == context.col()
-                && Objects.equals(editor.getText(), context.text());
-    }
-
-    private void showCodeActionLamp(IdeWordCaretContext context, DiagnosticSeverity severity) {
-        IdeEditorContext editorContext = context.editorContext();
-        Rectangle editorBounds = editorContext == null
-                ? null : editorContext.getEditorBoundsOnScreen();
-        if (editorBounds == null) {
-            return;
-        }
-        hideCodeActionLamp();
-        CodeActionLamp lamp = new CodeActionLamp(loadCodeActionLampIcon(severity));
-        lamp.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mouseClicked(MouseEvent event) {
-                hideCodeActionLamp();
-                requestShowCodeActions(context.filePath());
-            }
-        });
-
-        Dimension size = lamp.getPreferredSize();
-        Object handle = editorContext.addEditorOverlay(lamp,
-                codeActionLampBounds(editorBounds, context.mouseY(), size));
-        if (handle == null) {
-            return;
-        }
-        codeActionLampHandle = handle;
-        codeActionLampContext = editorContext;
-    }
-
-    static Rectangle codeActionLampBounds(Rectangle editorBounds, int anchorY, Dimension size) {
-        int maxY = Math.max(0, editorBounds.height - size.height);
-        int y = Math.max(0, Math.min(anchorY - size.height / 2, maxY));
-        return new Rectangle(editorBounds.x - size.width + 2, editorBounds.y + y,
-                size.width, size.height);
-    }
-
-    private Icon loadCodeActionLampIcon(DiagnosticSeverity severity) {
-        String path = switch (severity) {
-            case ERROR -> "imgs/codeActionLampRed.svg";
-            case WARNING -> "imgs/codeActionLampYellow.svg";
-            default -> "imgs/codeActionLampGreen.svg";
-        };
-        String fallback = switch (severity) {
-            case ERROR -> "OptionPane.errorIcon";
-            case WARNING -> "OptionPane.warningIcon";
-            default -> "OptionPane.informationIcon";
-        };
-        return ImageUtils.getIconByResource(JavaIdeAdapter.class, path)
-                .map(icon -> ImageUtils.resizeIcon(icon, 18, 18))
-                .orElseGet(() -> UIManager.getIcon(fallback));
-    }
-
-
-    private void hideCodeActionLamp() {
-        Object handle = codeActionLampHandle;
-        IdeEditorContext context = codeActionLampContext;
-        codeActionLampHandle = null;
-        codeActionLampContext = null;
-        if (handle != null && context != null) {
-            context.removeEditorOverlay(handle);
-        }
-    }
-
 
     private void installTestGutter(IdeEditorContext context) {
         if (context == null) {
@@ -4779,58 +4420,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
 
 
-
-    private static final class CodeActionLamp extends JComponent {
-        private static final Color HOVER_BG = new Color(128, 128, 128, 60);
-        private static final Color HOVER_BORDER = new Color(128, 128, 128, 120);
-        private final Icon icon;
-        private boolean hovered;
-
-        private CodeActionLamp(Icon icon) {
-            this.icon = icon;
-            setOpaque(false);
-            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            setToolTipText(text("tooltip.codeActions", "Mostrar correcoes (Alt+Enter)"));
-            Dimension size = new Dimension((icon == null ? 16 : icon.getIconWidth()) + 8,
-                    (icon == null ? 16 : icon.getIconHeight()) + 4);
-            setPreferredSize(size);
-            setSize(size);
-            addMouseListener(new MouseAdapter() {
-                @Override
-                public void mouseEntered(MouseEvent event) {
-                    hovered = true;
-                    repaint();
-                }
-
-                @Override
-                public void mouseExited(MouseEvent event) {
-                    hovered = false;
-                    repaint();
-                }
-            });
-        }
-
-        @Override
-        protected void paintComponent(Graphics graphics) {
-            Graphics2D g = (Graphics2D) graphics.create();
-            try {
-                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
-                        RenderingHints.VALUE_ANTIALIAS_ON);
-                if (hovered) {
-                    g.setColor(HOVER_BG);
-                    g.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 6, 6);
-                    g.setColor(HOVER_BORDER);
-                    g.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 6, 6);
-                }
-                if (icon != null) {
-                    icon.paintIcon(this, g, (getWidth() - icon.getIconWidth()) / 2,
-                            (getHeight() - icon.getIconHeight()) / 2);
-                }
-            } finally {
-                g.dispose();
-            }
-        }
-    }
 
     @Override
     public void onEditorOpen(IdeEditorContext editorContext) {
@@ -5109,14 +4698,14 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (command == null || command.arguments() == null || command.arguments().isEmpty()) {
             return;
         }
-        if (DISABLE_INSPECTION_COMMAND.equals(command.id())) {
-            disableInspection(String.valueOf(command.arguments().getFirst()));
+        if (DiagnosticsEngine.DISABLE_INSPECTION_COMMAND.equals(command.id())) {
+            diagnosticsEngine.disableInspection(String.valueOf(command.arguments().getFirst()));
             return;
         }
-        if (HIDE_OCCURRENCE_COMMAND.equals(command.id())) {
+        if (DiagnosticsEngine.HIDE_OCCURRENCE_COMMAND.equals(command.id())) {
             List<Object> arguments = command.arguments();
             if (arguments.size() >= 3) {
-                hideInspectionOccurrence(String.valueOf(arguments.get(0)),
+                diagnosticsEngine.hideInspectionOccurrence(String.valueOf(arguments.get(0)),
                         String.valueOf(arguments.get(1)), String.valueOf(arguments.get(2)));
             }
             return;
