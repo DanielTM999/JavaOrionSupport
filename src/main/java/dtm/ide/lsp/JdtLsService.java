@@ -1,7 +1,6 @@
 package dtm.ide.lsp;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
 import dtm.ide.api.hierarchy.TypeHierarchyItem;
@@ -35,7 +34,6 @@ import dtm.ide.navigation.JavaNavigation.Status;
 import dtm.ide.sdk.DownloadProgressListener;
 import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
-import dtm.ide.sdk.JdkVendor;
 import dtm.ide.sdk.SdkDownloader;
 import dtm.ide.test.JavaTest;
 import dtm.ide.api.project.editor.IdeWorkspaceEdit;
@@ -94,15 +92,12 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         ClassFileSupport, ProjectModelSupport, DebugAdapterSupport, TestDiscoverySupport, ImportCandidateSupport,
         JavaAgentSupport {
 
-    private static final ObjectMapper JSON = new ObjectMapper();
-
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
 
     private static final long INITIALIZE_CEILING_MS = 900_000;
     private static final long INITIALIZE_WAIT_SLICE_MS = 5_000;
     private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
     private static final long SERVICE_READY_POLL_MS = 250;
-    private static final int MIN_AUTO_SHARED_ARCHIVE_MAJOR = 19;
     private static final long SERVICE_READY_AFTER_PROJECTS_MS = 30_000;
     private static final long SHUTDOWN_TIMEOUT_MS = 10_000;
     private static final long EXIT_TIMEOUT_MS = 5_000;
@@ -519,6 +514,33 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                     JdtLsService.this.resynchronizeOpenDocuments(resyncMode(), false, null);
                 }
             });
+
+    private final JdtLsProcess processSupport = new JdtLsProcess(new JdtLsProcess.Host() {
+        @Override
+        public Path resolveMavenRepository() {
+            return JdtLsService.this.resolveMavenRepository();
+        }
+
+        @Override
+        public void launchedMavenRepository(Path path) {
+            launchedMavenRepository = path;
+        }
+
+        @Override
+        public String maxHeap() {
+            return maxHeap;
+        }
+
+        @Override
+        public Path lombokAgentJar() {
+            return lombokAgentJar;
+        }
+
+        @Override
+        public void launchedLombokAgentJar(Path path) {
+            launchedLombokAgentJar = path;
+        }
+    });
 
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
@@ -1189,48 +1211,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     List<String> buildCommand(JdkInstallation runtime,
                               JdtLsProvisioner.JdtLsInstallation installation,
                               Path workspace) {
-        List<String> command = new ArrayList<>();
-        command.add(runtime.javaExecutable().toString());
-        command.add("-Declipse.application=org.eclipse.jdt.ls.core.id1");
-        command.add("-Dosgi.bundles.defaultStartLevel=4");
-        command.add("-Declipse.product=org.eclipse.jdt.ls.core.product");
-        command.add("-Dlog.level=WARNING");
-        command.add("-Dfile.encoding=UTF-8");
-        launchedMavenRepository = resolveMavenRepository();
-        if (launchedMavenRepository != null) command.add("-Dmaven.repo.local=" + launchedMavenRepository);
-        command.add("-Djava.import.generatesMetadataFilesAtProjectRoot=false");
-        command.add("-DDetectVMInstallationsJob.disabled=true");
-        command.add("-Dsun.zip.disableMemoryMapping=true");
-        command.add("-Xms256m");
-        command.add("-Xmx" + maxHeap);
-        Path lombok = lombokAgentJar;
-        launchedLombokAgentJar = lombok;
-        if (runtime.vendor() != JdkVendor.SEMERU) {
-            command.add("-XX:+UseParallelGC");
-            command.add("-XX:GCTimeRatio=4");
-            command.add("-XX:AdaptiveSizePolicyWeight=90");
-            command.add("-Xlog:disable");
-            if (lombok == null && runtime.major() >= MIN_AUTO_SHARED_ARCHIVE_MAJOR) {
-                command.add("-XX:+AutoCreateSharedArchive");
-                command.add("-XX:SharedArchiveFile=" + installation.home()
-                        .resolve("jdtls-jdk" + runtime.major() + ".jsa"));
-            }
-        }
-        if (lombok != null) {
-            command.add("-javaagent:" + lombok);
-        }
-        command.add("--add-modules=ALL-SYSTEM");
-        command.add("--add-opens");
-        command.add("java.base/java.util=ALL-UNNAMED");
-        command.add("--add-opens");
-        command.add("java.base/java.lang=ALL-UNNAMED");
-        command.add("-jar");
-        command.add(installation.launcherJar().toString());
-        command.add("-configuration");
-        command.add(installation.configDir().toString());
-        command.add("-data");
-        command.add(workspace.toString());
-        return command;
+        return processSupport.buildCommand(runtime, installation, workspace);
     }
 
     private void pumpStderr(Process started) {
