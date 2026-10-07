@@ -52,6 +52,7 @@ import dtm.ide.api.project.editor.IdeDocumentSymbolContext;
 import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
 import dtm.ide.adapter.GhostTextSupport;
+import dtm.ide.adapter.TodoPanelHost;
 import dtm.ide.api.project.editor.IdeInlayHintContext;
 import dtm.ide.api.project.editor.IdeRenameContext;
 import dtm.ide.api.project.editor.IdeRenamePolicy;
@@ -237,8 +238,6 @@ import dtm.ide.ui.JavaCopyDialogPanel;
 import dtm.ide.ui.JavaModuleRenameDialogPanel;
 import dtm.ide.ui.JavaDeleteDialogPanel;
 import dtm.ide.ui.JavaMoveDialogPanel;
-import dtm.ide.todo.TodoItem;
-import dtm.ide.todo.TodoScanner;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.BuildPromptPanel;
 import dtm.ide.ui.ConditionalBreakpointHints;
@@ -512,7 +511,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JdkManagerPanel jdkManagerPanel;
     private static final String STRUCTURE_TAB_ID = "javaProjectStructure";
 
-    private static final long TODO_DEBOUNCE_MS = 400;
 
     private static final String IDE_MENU_ID_NEW = "tree.new";
 
@@ -573,14 +571,49 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicBoolean naturalDebugEnd = new AtomicBoolean();
     private final Map<Path, ConditionEditorSession> conditionSessions = new ConcurrentHashMap<>();
     private final AtomicReference<ConditionEditorSession> activeConditionSession = new AtomicReference<>();
-    private final TodoScanner todoScanner = new TodoScanner();
-    private final AtomicLong todoRefreshTicket = new AtomicLong();
+    private final TodoPanelHost todoSupport = new TodoPanelHost(new TodoPanelHost.AdapterHost() {
+        @Override
+        public Path projectRoot() {
+            return projectRoot;
+        }
+
+        @Override
+        public JavaProjectDescriptor descriptor() {
+            return descriptor;
+        }
+
+        @Override
+        public List<String> todoMarkers() {
+            return settings().getTodoMarkers();
+        }
+
+        @Override
+        public PluginTaskExecutor background() {
+            return background;
+        }
+
+        @Override
+        public String registerPanel(JavaTodoPanel panel, Icon icon) {
+            return icon == null
+                    ? registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"),
+                            ToolIconType.INFO, panel)
+                    : registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"), icon, panel);
+        }
+
+        @Override
+        public void requestOpenToolPanel(String panelId) {
+            JavaIdeAdapter.this.requestOpenToolPanel(panelId);
+        }
+
+        @Override
+        public void openAt(Path file, int line, int column) {
+            JavaIdeAdapter.this.openAt(file, line, column);
+        }
+    });
     private final AtomicLong treeIconRefreshTicket = new AtomicLong();
     private final AtomicBoolean treeIconRefreshAll = new AtomicBoolean();
     private final Set<Path> treeIconRefreshPaths = ConcurrentHashMap.newKeySet();
     private final Set<Path> migratedBuildRunConfigurations = ConcurrentHashMap.newKeySet();
-    private volatile JavaTodoPanel todoPanel;
-    private volatile String todoPanelId;
     private volatile JavaProjectStructurePanel structurePanel;
     private volatile JavaBuildToolsPanel buildToolsPanel;
     private volatile String buildToolsPanelId;
@@ -691,10 +724,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         lexicalIndex.clear();
         springIndex.clear();
-        todoScanner.clear();
-        if (todoPanel != null) {
-            todoPanel.setItems(List.of(), null);
-        }
+        todoSupport.reset();
         RunFormChoicesLoader choicesLoader = runFormChoicesLoader;
         if (choicesLoader != null) {
             choicesLoader.invalidate();
@@ -791,7 +821,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void unregisterToolPanels() {
         for (String panelId : java.util.Arrays.asList(
-                debugPanelId, testPanelId, todoPanelId, buildToolsPanelId, springPanelId)) {
+                debugPanelId, testPanelId, todoSupport.panelId(), buildToolsPanelId, springPanelId)) {
             if (panelId == null) {
                 continue;
             }
@@ -803,7 +833,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         debugPanelId = null;
         testPanelId = null;
-        todoPanelId = null;
+        todoSupport.clearPanelId();
         buildToolsPanelId = null;
         springPanelId = null;
     }
@@ -2473,9 +2503,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void forgetJavaFile(Path file) {
         lexicalIndex.refreshFile(file, "");
-        if (todoScanner.forget(file) && todoPanel != null) {
-            todoPanel.setItems(todoScanner.items(), projectRoot);
-        }
+        todoSupport.forget(file);
         JavaProjectDescriptor current = descriptor;
         if (current != null && current.spring() && settings().isSpringSupport()) {
             refreshSpringIndexFor(file, "");
@@ -8145,73 +8173,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private void ensureTodoPanel() {
-        if (todoPanel != null) {
-            return;
-        }
-        JavaTodoPanel panel = new JavaTodoPanel(new TodoHost());
-        todoPanel = panel;
-        panel.setProjectRoot(projectRoot);
-        Icon icon = JavaIcons.todo(JavaIcons.SMALL);
-        todoPanelId = icon == null
-                ? registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"),
-                        ToolIconType.INFO, panel)
-                : registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"), icon, panel);
-        rescanTodos();
-    }
-
     private void openTodoPanel() {
-        ensureTodoPanel();
-        if (todoPanelId != null) {
-            requestOpenToolPanel(todoPanelId);
-        }
-    }
-
-    private void rescanTodos() {
-        JavaTodoPanel panel = todoPanel;
-        JavaProjectDescriptor current = descriptor;
-        if (panel == null || current == null) {
-            return;
-        }
-        panel.beginScan();
-        todoScanner.setMarkers(settings().getTodoMarkers());
-        Path root = projectRoot;
-        background.submit(() -> {
-            List<TodoItem> found = todoScanner.scan(current);
-            panel.setItems(found, root);
-        });
+        todoSupport.openPanel();
     }
 
     private void refreshTodosFor(Path filePath, String content) {
-        JavaTodoPanel panel = todoPanel;
-        if (panel == null || filePath == null || !JavaProjectConventions.isJava(filePath)) {
-            return;
-        }
-        long ticket = todoRefreshTicket.incrementAndGet();
-        background.schedule(() -> {
-            if (ticket != todoRefreshTicket.get()) {
-                return;
-            }
-            String source = content != null ? content
-                    : JavaProjectConventions.readOrEmpty(filePath);
-            if (todoScanner.refreshFile(filePath, source)) {
-                panel.setItems(todoScanner.items(), projectRoot);
-            }
-        }, TODO_DEBOUNCE_MS, TimeUnit.MILLISECONDS);
-    }
-
-    private final class TodoHost implements JavaTodoPanel.Host {
-        @Override
-        public void rescan() {
-            rescanTodos();
-        }
-
-        @Override
-        public void open(TodoItem item) {
-            if (item != null) {
-                openAt(item.file(), item.line(), item.column());
-            }
-        }
+        todoSupport.refresh(filePath, content);
     }
 
     private void openProblemsPanel() {
