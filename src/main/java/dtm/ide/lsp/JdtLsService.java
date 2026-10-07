@@ -104,9 +104,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static final int DEBUG_MAX_STRING_LENGTH = 1_000;
     private static final long DEBUG_ADAPTER_TIMEOUT_MS = 60_000;
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
-    private static final long RENAME_TIMEOUT_MS = 60_000;
 
-    private volatile String lastMoveProblem;
     private static final long INITIALIZE_CEILING_MS = 900_000;
     private static final long INITIALIZE_WAIT_SLICE_MS = 5_000;
     private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
@@ -427,6 +425,23 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     private final JdtSourceGeneration sourceGeneration = new JdtSourceGeneration(requests,
             (path, text) -> syncBeforeRequest(path, text));
+
+    private final JdtMove move = new JdtMove(requests, new JdtMove.Host() {
+        @Override
+        public LspJsonRpcClient client() {
+            return client;
+        }
+
+        @Override
+        public boolean isReady() {
+            return JdtLsService.this.isReady();
+        }
+
+        @Override
+        public void drainPendingWatchedFiles() {
+            JdtLsService.this.drainPendingWatchedFiles();
+        }
+    });
 
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
@@ -2491,111 +2506,19 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public IdeWorkspaceEdit moveTypesWorkspace(List<Path> sources, Path targetDirectory) {
-        lastMoveProblem = null;
-        if (sources == null || sources.isEmpty() || targetDirectory == null) {
-            return IdeWorkspaceEdit.empty();
-        }
-        LspJsonRpcClient rpc = readyClientForMove();
-        if (rpc == null) {
-            return IdeWorkspaceEdit.empty();
-        }
-        List<String> sourceUris = sources.stream().map(LspConversions::toUri).toList();
-        Map<String, Object> query = new LinkedHashMap<>();
-        query.put("moveKind", "moveResource");
-        query.put("sourceUris", sourceUris);
-        query.put("params", null);
-        JsonNode destinations = moveRequest(rpc, "java/getMoveDestinations", query);
-        if (destinations == null) {
-            return IdeWorkspaceEdit.empty();
-        }
-        JsonNode destination = moveDestinationFor(destinations.path("destinations"), targetDirectory);
-        if (destination == null) {
-            String error = destinations.path("errorMessage").asText(null);
-            lastMoveProblem = error != null && !error.isBlank()
-                    ? error : "o destino nao e um pacote Java conhecido pelo servidor";
-            return IdeWorkspaceEdit.empty();
-        }
-        Map<String, Object> params = new LinkedHashMap<>(query);
-        params.put("destination", destination);
-        params.put("updateReferences", true);
-        JsonNode result = moveRequest(rpc, "java/move", params);
-        if (result == null) {
-            return IdeWorkspaceEdit.empty();
-        }
-        String error = result.path("errorMessage").asText(null);
-        if (error != null && !error.isBlank()) {
-            lastMoveProblem = error;
-            return IdeWorkspaceEdit.empty();
-        }
-        return LspConversions.workspaceEdit(result.path("edit"));
+        return move.moveTypesWorkspace(sources, targetDirectory);
     }
 
     public IdeWorkspaceEdit willRenameFilesWorkspace(Map<Path, Path> renames) {
-        lastMoveProblem = null;
-        if (renames == null || renames.isEmpty()) {
-            return IdeWorkspaceEdit.empty();
-        }
-        LspJsonRpcClient rpc = readyClientForMove();
-        if (rpc == null) {
-            return IdeWorkspaceEdit.empty();
-        }
-        List<Map<String, Object>> files = new ArrayList<>();
-        renames.forEach((oldPath, newPath) -> files.add(Map.of(
-                "oldUri", LspConversions.toUri(oldPath),
-                "newUri", LspConversions.toUri(newPath))));
-        JsonNode result = moveRequest(rpc, "workspace/willRenameFiles", Map.of("files", files));
-        return result == null ? IdeWorkspaceEdit.empty() : LspConversions.workspaceEdit(result);
+        return move.willRenameFilesWorkspace(renames);
     }
 
     public String lastMoveProblem() {
-        return lastMoveProblem;
-    }
-
-    private LspJsonRpcClient readyClientForMove() {
-        drainPendingWatchedFiles();
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || !isReady()) {
-            lastMoveProblem = "o servidor Java nao esta pronto";
-            return null;
-        }
-        return rpc;
-    }
-
-    private JsonNode moveRequest(LspJsonRpcClient rpc, String method, Object params) {
-        CompletableFuture<JsonNode> future = rpc.request(method, params);
-        try {
-            JsonNode result = future.get(RENAME_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-            if (result == null || result.isNull() || result.isMissingNode()) {
-                lastMoveProblem = "o servidor Java nao devolveu nada para " + method;
-                return null;
-            }
-            return result;
-        } catch (InterruptedException e) {
-            future.cancel(false);
-            Thread.currentThread().interrupt();
-            return null;
-        } catch (Exception e) {
-            future.cancel(false);
-            requests.logRequestFailure(method, e);
-            String message = LspConversions.errorMessage(e);
-            lastMoveProblem = message == null ? "o servidor Java recusou " + method : message;
-            return null;
-        }
+        return move.lastMoveProblem();
     }
 
     static JsonNode moveDestinationFor(JsonNode destinations, Path targetDirectory) {
-        if (destinations == null || !destinations.isArray() || targetDirectory == null) {
-            return null;
-        }
-        Path target = normalizePath(targetDirectory);
-        for (JsonNode destination : destinations) {
-            String uri = destination.path("uri").asText(null);
-            Path path = uri == null ? null : LspConversions.toPath(uri);
-            if (path != null && normalizePath(path).equals(target)) {
-                return destination;
-            }
-        }
-        return null;
+        return JdtMove.moveDestinationFor(destinations, targetDirectory);
     }
 
     static String textIn(String text, Range range) {
