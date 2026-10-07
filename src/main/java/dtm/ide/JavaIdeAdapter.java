@@ -51,8 +51,11 @@ import dtm.ide.api.project.editor.IdeDocumentHighlightContext;
 import dtm.ide.api.project.editor.IdeDocumentSymbolContext;
 import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
+import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.GhostTextSupport;
+import dtm.ide.adapter.JdkManagerSupport;
+import dtm.ide.adapter.ProjectStructureSupport;
 import dtm.ide.adapter.TodoPanelHost;
 import dtm.ide.api.project.editor.IdeInlayHintContext;
 import dtm.ide.api.project.editor.IdeRenameContext;
@@ -486,6 +489,111 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public void openAt(Path file, int line, int column) {
             JavaIdeAdapter.this.openAt(file, line, column);
+        }
+
+        @Override
+        public JdkService jdkService() {
+            return ensureJdkService();
+        }
+
+        @Override
+        public JdkInstallation projectJdk() {
+            return projectJdk;
+        }
+
+        @Override
+        public void projectJdk(JdkInstallation jdk) {
+            projectJdk = jdk;
+        }
+
+        @Override
+        public void descriptor(JavaProjectDescriptor value) {
+            descriptor = value;
+        }
+
+        @Override
+        public long lifecycleTicket() {
+            return lifecycle.get();
+        }
+
+        @Override
+        public long nextLifecycleTicket() {
+            return lifecycle.incrementAndGet();
+        }
+
+        @Override
+        public boolean isCurrent(long ticket, Path root) {
+            return current(ticket, root);
+        }
+
+        @Override
+        public <T> T timed(String label, Supplier<T> operation) {
+            return JavaIdeAdapter.this.timed(label, operation);
+        }
+
+        @Override
+        public void rebuildLexicalIndex(JavaProjectDescriptor value) {
+            lexicalIndex.rebuild(value);
+        }
+
+        @Override
+        public void refreshRunButtonsForCurrentFile() {
+            JavaIdeAdapter.this.refreshRunButtonsForCurrentFile();
+        }
+
+        @Override
+        public void reloadBuildToolsPanel() {
+            if (buildToolsPanel != null) {
+                buildToolsPanel.reload();
+            }
+        }
+
+        @Override
+        public void reloadStructurePanel() {
+            JavaProjectStructurePanel panel = structurePanel;
+            if (panel != null) {
+                panel.reload();
+            }
+        }
+
+        @Override
+        public void setStatusBarText(String value) {
+            JavaIdeAdapter.this.setStatusBarText(value);
+        }
+
+        @Override
+        public DownloadProgressListener progressListener() {
+            return JavaIdeAdapter.this.progressListener();
+        }
+
+        @Override
+        public void resolveProjectJdk(long ticket, Path root) {
+            JavaIdeAdapter.this.resolveProjectJdk(ticket, root);
+        }
+
+        @Override
+        public JavaPluginSettings settings() {
+            return JavaIdeAdapter.this.settings();
+        }
+
+        @Override
+        public JComponent dependencyLibrariesView() {
+            DependencyService dependencies = ensureDependencyService();
+            if (dependencies == null || !dependencies.isSupported()) {
+                return null;
+            }
+            DependencyManagerPanel panel = dependencyPanel;
+            if (panel == null) {
+                panel = new DependencyManagerPanel(dependencyManagerHost(),
+                        JavaIdeAdapter.this::createModernDialogBuilder);
+                dependencyPanel = panel;
+            }
+            return panel;
+        }
+
+        @Override
+        public void syncProject() {
+            JavaIdeAdapter.this.syncProject();
         }
     }
 
@@ -9191,7 +9299,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     public void openProjectStructure() {
         JavaProjectStructurePanel panel = structurePanel;
         if (panel == null) {
-            panel = new JavaProjectStructurePanel(new ProjectStructureHost());
+            panel = new JavaProjectStructurePanel(new ProjectStructureSupport(adapterHost));
             structurePanel = panel;
         } else {
             panel.reload();
@@ -9201,253 +9309,16 @@ public class JavaIdeAdapter extends IdeAdapter {
         switchToCenterTab(STRUCTURE_TAB_ID);
     }
 
-    private final class ProjectStructureHost implements JavaProjectStructurePanel.Host {
-
-        @Override
-        public List<JavaModule> modules() {
-            JavaProjectDescriptor current = descriptor;
-            return current == null ? List.of() : current.modules();
-        }
-
-        @Override
-        public List<JdkInstallation> installations() {
-            return ensureJdkService().available();
-        }
-
-        @Override
-        public JdkInstallation projectJdk() {
-            return projectJdk;
-        }
-
-        @Override
-        public Integer languageLevel() {
-            JavaProjectDescriptor current = descriptor;
-            if (current == null) {
-                return null;
-            }
-            JavaModule root = current.rootModule();
-            return root == null ? current.jdkMajor().orElse(null)
-                    : LanguageLevelEditor.read(root.root())
-                            .orElseGet(() -> current.jdkMajor().orElse(null));
-        }
-
-        @Override
-        public Path projectRoot() {
-            return projectRoot;
-        }
-
-        @Override
-        public JComponent librariesView() {
-            DependencyService dependencies = ensureDependencyService();
-            if (dependencies == null || !dependencies.isSupported()) {
-                return null;
-            }
-            DependencyManagerPanel panel = dependencyPanel;
-            if (panel == null) {
-                panel = new DependencyManagerPanel(dependencyManagerHost(),
-                        JavaIdeAdapter.this::createModernDialogBuilder);
-                dependencyPanel = panel;
-            }
-            return panel;
-        }
-
-        @Override
-        public List<JavaProjectStructurePanel.FolderRole> folders() {
-            JavaProjectDescriptor current = descriptor;
-            Path root = projectRoot;
-            if (current == null || root == null) {
-                return List.of();
-            }
-            ProjectLayout layout = ProjectLayout.of(root);
-            Map<Path, ProjectLayout.Role> byFolder = new LinkedHashMap<>();
-            for (JavaModule module : current.modules()) {
-                module.sourceRoots().forEach(folder ->
-                        byFolder.putIfAbsent(folder, ProjectLayout.Role.SOURCE));
-                module.testRoots().forEach(folder ->
-                        byFolder.putIfAbsent(folder, ProjectLayout.Role.TEST));
-            }
-            for (ProjectLayout.Role role : ProjectLayout.Role.values()) {
-                layout.foldersWith(role).forEach(folder -> byFolder.put(folder, role));
-            }
-            return byFolder.entrySet().stream()
-                    .map(entry -> new JavaProjectStructurePanel.FolderRole(
-                            entry.getKey(), entry.getValue()))
-                    .toList();
-        }
-
-        @Override
-        public void apply(JdkInstallation jdk, Integer level,
-                          JavaProjectStructurePanel.ProjectLayoutChange change) {
-            Path root = projectRoot;
-            if (root == null) {
-                return;
-            }
-            background.submit(() -> {
-                if (jdk != null) {
-                    ensureJdkService().selectHomeForProject(root, jdk.home());
-                    projectJdk = jdk;
-                }
-                if (level != null) {
-                    JavaProjectDescriptor current = descriptor;
-                    JavaModule rootModule = current == null ? null : current.rootModule();
-                    if (rootModule != null) {
-                        LanguageLevelEditor.write(rootModule.root(), level);
-                    }
-                }
-                if (change != null) {
-                    ProjectLayout layout = ProjectLayout.of(root);
-                    layout.clearRoles();
-                    change.folders().forEach(folder ->
-                            layout.setRole(folder.folder(), folder.role()));
-                    layout.save();
-                }
-                syncProject();
-                JavaProjectStructurePanel panel = structurePanel;
-                if (panel != null) {
-                    panel.reload();
-                }
-            });
-        }
-    }
-
     public void openJdkManager() {
         JdkManagerPanel panel = jdkManagerPanel;
         if (panel == null) {
-            panel = new JdkManagerPanel(new JdkManagerHost(), this::createModernDialogBuilder);
+            panel = new JdkManagerPanel(new JdkManagerSupport(adapterHost), this::createModernDialogBuilder);
             jdkManagerPanel = panel;
         } else {
             panel.reload();
         }
         openCenterTab(JDK_TAB_ID, text("tab.jdkManager", "JDKs"), panel, true);
         switchToCenterTab(JDK_TAB_ID);
-    }
-
-    private final class JdkManagerHost implements JdkManagerPanel.Host {
-
-        @Override
-        public List<JdkInstallation> installations() {
-            return ensureJdkService().available();
-        }
-
-        @Override
-        public JdkInstallation projectJdk() {
-            return projectJdk;
-        }
-
-        @Override
-        public void refreshInstallations() {
-            ensureJdkService().refresh();
-        }
-
-        @Override
-        public void download(int major, java.util.function.Consumer<String> onDone) {
-            background.submit(() -> {
-                try {
-                    JdkInstallation installed = ensureJdkService().install(major, progressListener());
-                    adoptIfRequired(installed);
-                    onDone.accept(null);
-                } catch (Exception e) {
-                    log.warn("Falha ao instalar a JDK {}", major, e);
-                    onDone.accept(text("status.downloadFailed", "Falha ao baixar a JDK") + ": "
-                            + rootMessage(e));
-                }
-            });
-        }
-
-        @Override
-        public void addExisting(Path home, java.util.function.Consumer<String> onDone) {
-            background.submit(() -> {
-                try {
-                    Optional<JdkInstallation> inspected = ensureJdkService().inspectExisting(home);
-                    if (inspected.isEmpty()) {
-                        onDone.accept(text("status.notAJdk",
-                                "O diretorio selecionado nao contem uma JDK utilizavel:") + " " + home);
-                        return;
-                    }
-                    JdkInstallation installation = inspected.get();
-                    ensureJdkService().refresh();
-                    useForProject(installation);
-                    onDone.accept(null);
-                } catch (Exception e) {
-                    log.warn("Falha ao adicionar a JDK {}", home, e);
-                    onDone.accept(text("status.addFailed", "Falha ao adicionar a JDK") + ": "
-                            + rootMessage(e));
-                }
-            });
-        }
-
-        @Override
-        public Integer requiredMajor() {
-            JavaProjectDescriptor current = descriptor;
-            if (current == null) {
-                return settings().getDefaultJdkVersion();
-            }
-            return current.jdkMajor().orElseGet(() -> settings().getDefaultJdkVersion());
-        }
-
-        private void adoptIfRequired(JdkInstallation installed) {
-            Integer required = requiredMajor();
-            if (installed == null || projectRoot == null) {
-                return;
-            }
-            if (projectJdk == null || (required != null && required == installed.major())) {
-                useForProject(installed);
-            }
-        }
-
-        @Override
-        public void useForProject(JdkInstallation installation) {
-            Path root = projectRoot;
-            if (root == null || installation == null) {
-                return;
-            }
-            long ticket = lifecycle.get();
-            background.submit(() -> {
-                try {
-                    ensureJdkService().selectHomeForProject(root, installation.home());
-                    JavaProjectDescriptor described = timed("describe(useForProject)",
-                            () -> JavaProjectConventions.describe(root));
-                    if (!current(ticket, root)) {
-                        return;
-                    }
-                    projectJdk = installation;
-                    descriptor = described;
-                    if (described != null) {
-                        lexicalIndex.rebuild(described);
-                    }
-                    SwingUtilities.invokeLater(() -> {
-                        if (!current(ticket, root)) {
-                            return;
-                        }
-                        refreshRunButtonsForCurrentFile();
-                        if (buildToolsPanel != null) {
-                            buildToolsPanel.reload();
-                        }
-                        setStatusBarText("Java: " + installation.displayName());
-                    });
-                } catch (Exception e) {
-                    log.warn("Falha ao selecionar JDK para {}", root, e);
-                    SwingUtilities.invokeLater(() -> {
-                        if (current(ticket, root)) {
-                            setStatusBarText("Java: " + rootMessage(e));
-                        }
-                    });
-                }
-            });
-        }
-
-        @Override
-        public boolean remove(JdkInstallation installation) {
-            boolean removed = ensureJdkService().remove(installation);
-            if (removed && installation.equals(projectJdk)) {
-                projectJdk = null;
-                Path root = projectRoot;
-                if (root != null) {
-                    resolveProjectJdk(lifecycle.incrementAndGet(), root);
-                }
-            }
-            return removed;
-        }
     }
 
     @Override
@@ -9647,12 +9518,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     static String rootMessage(Throwable error) {
-        Throwable cause = error;
-        while (cause.getCause() != null && cause.getCause() != cause) {
-            cause = cause.getCause();
-        }
-        String message = cause.getMessage();
-        return message == null || message.isBlank() ? cause.getClass().getSimpleName() : message;
+        return AdapterFailures.rootMessage(error);
     }
 
     public Path getProjectRoot() {
