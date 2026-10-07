@@ -22,7 +22,6 @@ class ArchitectureRulesTest {
             "\\b(JdtLs\\w*|JavaClassFileNavigation|ImportCandidates)\\b|\"jdt:|\"vscode\\.java|\"java/[A-Za-z]+\"|\"java\\.project\\.");
 
     private static final Set<String> STILL_COUPLED_TO_JDT_LS = Set.of(
-            "dtm/ide/JavaIdeAdapter.java",
             "dtm/ide/debug/JavaDebugSession.java",
             "dtm/ide/ui/JavaDebugPanel.java");
 

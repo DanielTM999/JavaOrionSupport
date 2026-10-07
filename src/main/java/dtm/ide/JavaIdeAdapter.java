@@ -135,9 +135,7 @@ import dtm.ide.navigation.JavaNavigation.Result;
 import dtm.ide.navigation.JavaNavigation.Status;
 import dtm.ide.navigation.JavaNavigation.Extent;
 import dtm.ide.editor.theme.JavaEditorTheme;
-import dtm.ide.lsp.JdtLsExtensionBundles;
-import dtm.ide.lsp.JdtLsProvisioner;
-import dtm.ide.lsp.JdtLsService;
+import dtm.ide.lsp.LanguageServers;
 import dtm.ide.lsp.LombokAccessorRename;
 import dtm.ide.lsp.LombokAccessors;
 import dtm.ide.lsp.LombokAgentResolver;
@@ -1184,10 +1182,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         JdkService jdks = ensureJdkService();
         SdkDownloader downloader = new SdkDownloader(resolveDownloadObserver());
-        JdtLsProvisioner provisioner = new JdtLsProvisioner(downloader, jdks.sdkRoot());
-        JdtLsExtensionBundles extensionBundles = new JdtLsExtensionBundles(downloader, jdks.sdkRoot());
-
-        JdtLsService created = new JdtLsService(jdks, provisioner, extensionBundles,
+        JavaLanguageServer created = LanguageServers.defaultProvider().create(jdks, downloader,
                 this::onLspDiagnosticsPublished);
         created.setMaxHeap(settings().getLanguageServerMemory());
         created.setInlayHintsMode(settings().getInlayHints());
