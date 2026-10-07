@@ -96,11 +96,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    enum ResyncMode {
-        REOPEN,
-        TOUCH
-    }
-
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
 
     private static final long INITIALIZE_CEILING_MS = 900_000;
@@ -121,9 +116,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static final long CRASH_RESTART_WINDOW_MS = 600_000;
     private static final Set<JdtLsService> LIVE_SERVICES = ConcurrentHashMap.newKeySet();
     private static final AtomicBoolean SHUTDOWN_HOOK_INSTALLED = new AtomicBoolean();
-    private static final long DOCUMENT_RECOVERY_COOLDOWN_MS = 5_000;
     private static final long PROJECT_CONFIGURATION_COOLDOWN_MS = 2_000;
-    private static final int MAX_REOPEN_DOCUMENTS = 30;
     private static final long WARM_UP_TIMEOUT_MS = 8_000;
 
     private final JdkService jdkService;
@@ -134,11 +127,10 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             Thread.ofVirtual().name("jdtls-", 0).factory());
 
     private final JdtDocumentStore documents = new JdtDocumentStore();
+    private final LspDocumentSync documentSync;
     private final LspDiagnosticsStore diagnosticsStore;
     private final Set<String> workspaceWorkTokens = ConcurrentHashMap.newKeySet();
-    private final Set<String> openedDuringImport = ConcurrentHashMap.newKeySet();
     private final AtomicLong workspaceRevision = new AtomicLong();
-    private final AtomicLong lastDocumentRecovery = new AtomicLong();
     private final AtomicLong lastProjectConfigurationUpdate = new AtomicLong();
     private final Object processLock = new Object();
 
@@ -550,6 +542,86 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                     @Override
                     public void resynchronizeAfterSettle() {
                         resynchronizeOpenDocuments(resyncMode(), false, null);
+                    }
+                });
+        this.documentSync = new LspDocumentSync(documents, executor,
+                new LspDocumentSync.Host() {
+                    @Override
+                    public LspJsonRpcClient client() {
+                        return client;
+                    }
+
+                    @Override
+                    public LanguageServerState state() {
+                        return state;
+                    }
+
+                    @Override
+                    public ServerCapabilities capabilities() {
+                        return capabilities;
+                    }
+
+                    @Override
+                    public Path projectRoot() {
+                        return projectRoot;
+                    }
+
+                    @Override
+                    public void documentContentChanged(Path filePath, String uri, String previous,
+                                                       String content, boolean deferCodeLensRefresh) {
+                        JdtLsService.this.documentContentChanged(filePath, uri, previous,
+                                content, deferCodeLensRefresh);
+                    }
+
+                    @Override
+                    public void forgetRefreshTicket(String uri) {
+                        decorations.forgetRefreshTicket(uri);
+                    }
+
+                    @Override
+                    public void forgetSymbols(String uri) {
+                        navigation.forgetSymbols(uri);
+                    }
+
+                    @Override
+                    public void discardCodeLenses(String uri) {
+                        decorations.discardCodeLenses(uri);
+                    }
+
+                    @Override
+                    public void forgetCompletion(String uri) {
+                        completion.forget(uri);
+                    }
+
+                    @Override
+                    public void invalidateWorkspaceNavigation() {
+                        JdtLsService.this.invalidateWorkspaceNavigation();
+                    }
+
+                    @Override
+                    public void cancelInFlightForUri(String uri) {
+                        requests.cancelInFlightForUri(uri);
+                    }
+
+                    @Override
+                    public void removeDiagnostics(Path path) {
+                        diagnosticsStore.removeAndPublish(path);
+                    }
+
+                    @Override
+                    public void codeLensRefresh(Path path) {
+                        onCodeLensRefresh.accept(path);
+                    }
+
+                    @Override
+                    public void status(String message) {
+                        statusListener.onStatus(message, -1);
+                    }
+
+                    @Override
+                    public void resynchronizeOpenDocuments(LspDocumentSync.ResyncMode mode,
+                                                           boolean clearDiagnostics, String statusMessage) {
+                        JdtLsService.this.resynchronizeOpenDocuments(mode, clearDiagnostics, statusMessage);
                     }
                 });
         LIVE_SERVICES.add(this);
@@ -1372,7 +1444,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     private void resetServerState() {
         documents.clearSyncState();
-        openedDuringImport.clear();
+        documentSync.reset();
         watched.reset();
         diagnosticsStore.reset();
         navigation.clearSymbols();
@@ -1731,65 +1803,15 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public synchronized void openDocument(Path filePath, String text) {
-        if (filePath == null) {
-            return;
-        }
-        String uri = LspConversions.toUri(filePath);
-        String content = text == null ? "" : text;
-        String previous = documents.put(uri, content);
-        if (!content.equals(previous)) {
-            documentContentChanged(filePath, uri, previous, content, false);
-        }
-        if (!canSyncDocuments()) {
-            return;
-        }
-        if (documents.markSynced(uri)) {
-            sendDidOpen(uri, content);
-        } else if (!content.equals(previous)) {
-            sendDidChange(uri, previous, content);
-        }
+        documentSync.openDocument(filePath, text);
     }
 
     public synchronized void changeDocument(Path filePath, String text) {
-        if (filePath == null) {
-            return;
-        }
-        String uri = LspConversions.toUri(filePath);
-        String content = text == null ? "" : text;
-        if (content.equals(documents.content(uri))) {
-            return;
-        }
-        String previous = documents.put(uri, content);
-        documentContentChanged(filePath, uri, previous, content, true);
-
-        if (!canSyncDocuments()) {
-            return;
-        }
-        if (documents.markSynced(uri)) {
-            sendDidOpen(uri, content);
-            return;
-        }
-        sendDidChange(uri, previous, content);
+        documentSync.changeDocument(filePath, text);
     }
 
     public synchronized void closeDocument(Path filePath) {
-        if (filePath == null) {
-            return;
-        }
-        String uri = LspConversions.toUri(filePath);
-        decorations.forgetRefreshTicket(uri);
-        boolean wasSynced = documents.unmarkSynced(uri);
-        documents.remove(uri);
-        navigation.forgetSymbols(uri);
-        decorations.discardCodeLenses(uri);
-        completion.forget(uri);
-        invalidateWorkspaceNavigation();
-        requests.cancelInFlightForUri(uri);
-
-        LspJsonRpcClient rpc = client;
-        if (wasSynced && rpc != null && canSyncDocuments()) {
-            rpc.notify("textDocument/didClose", Map.of("textDocument", Map.of("uri", uri)));
-        }
+        documentSync.closeDocument(filePath);
     }
 
     public void pathCreated(Path createdPath) {
@@ -1809,7 +1831,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return;
         }
         invalidateWorkspaceNavigation();
-        executor.execute(() -> resynchronizeOpenDocuments(ResyncMode.REOPEN, true,
+        executor.execute(() -> resynchronizeOpenDocuments(LspDocumentSync.ResyncMode.REOPEN, true,
                 "Java: sincronizado com o disco"));
     }
 
@@ -1898,28 +1920,11 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public synchronized void saveDocument(Path filePath, String text) {
-        if (filePath == null) {
-            return;
-        }
-        changeDocument(filePath, text);
-        String uri = LspConversions.toUri(filePath);
-        LspJsonRpcClient rpc = client;
-        if (rpc != null && canSyncDocuments() && documents.isSynced(uri)) {
-            rpc.notify("textDocument/didSave", Map.of("textDocument", Map.of("uri", uri)));
-        }
+        documentSync.saveDocument(filePath, text);
     }
 
     private synchronized void flushOpenDocuments() {
-        Path root = projectRoot;
-        documents.forEach((uri, content) -> {
-            Path path = LspConversions.toPath(uri);
-            if (root != null && (path == null || !path.startsWith(root))) {
-                return;
-            }
-            if (documents.markSynced(uri)) {
-                sendDidOpen(uri, content);
-            }
-        });
+        documentSync.flushOpenDocuments();
     }
 
     static boolean isRecoverableDocumentError(String line) {
@@ -1935,97 +1940,24 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     private boolean canSyncDocuments() {
-        LanguageServerState current = state;
-        LspJsonRpcClient rpc = client;
-        return (current == LanguageServerState.INDEXING || current == LanguageServerState.READY)
-                && rpc != null && !rpc.isClosed();
+        return documentSync.canSyncDocuments();
     }
 
     private void recoverDocumentSynchronization() {
-        long now = System.currentTimeMillis();
-        long previous = lastDocumentRecovery.get();
-        if (now - previous < DOCUMENT_RECOVERY_COOLDOWN_MS
-                || !lastDocumentRecovery.compareAndSet(previous, now)
-                || !canSyncDocuments()) {
-            return;
-        }
-        LspJsonRpcClient rpc = client;
-        if (rpc == null) {
-            return;
-        }
-        CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS, executor)
-                .execute(this::performDocumentResynchronization);
+        documentSync.recoverDocumentSynchronization();
     }
 
-    private void performDocumentResynchronization() {
-        log.warn("JDT LS perdeu a posicao de um documento; resincronizando {} buffer(s)",
-                documents.size());
-        resynchronizeOpenDocuments(ResyncMode.REOPEN, true, "Java: documentos resincronizados");
+    private LspDocumentSync.ResyncMode resyncMode() {
+        return documentSync.resyncMode();
     }
 
-    private ResyncMode resyncMode() {
-        return documents.size() > MAX_REOPEN_DOCUMENTS ? ResyncMode.TOUCH : ResyncMode.REOPEN;
-    }
-
-    private synchronized void resynchronizeOpenDocuments(ResyncMode mode, boolean clearDiagnostics,
-                                                         String statusMessage) {
-        if (!canSyncDocuments()) {
-            return;
-        }
-        LspJsonRpcClient rpc = client;
-        if (rpc == null) {
-            return;
-        }
-        documents.forEach((uri, content) -> {
-            requests.cancelInFlightForUri(uri);
-            if (mode == ResyncMode.REOPEN) {
-                if (documents.unmarkSynced(uri)) {
-                    rpc.notify("textDocument/didClose", Map.of("textDocument", Map.of("uri", uri)));
-                }
-                documents.incrementVersion(uri);
-                if (documents.markSynced(uri)) {
-                    sendDidOpen(uri, content);
-                }
-            } else if (documents.isSynced(uri)) {
-                sendDidChange(uri, content, content);
-            }
-            navigation.forgetSymbols(uri);
-            decorations.discardCodeLenses(uri);
-            completion.forget(uri);
-            Path path = LspConversions.toPath(uri);
-            if (path == null) {
-                return;
-            }
-            if (clearDiagnostics) {
-                diagnosticsStore.removeAndPublish(path);
-            }
-            onCodeLensRefresh.accept(path);
-        });
-        if (statusMessage != null) {
-            statusListener.onStatus(statusMessage, -1);
-        }
+    private synchronized void resynchronizeOpenDocuments(LspDocumentSync.ResyncMode mode,
+                                                         boolean clearDiagnostics, String statusMessage) {
+        documentSync.resynchronizeOpenDocuments(mode, clearDiagnostics, statusMessage);
     }
 
     private synchronized void reopenDocumentsOpenedDuringImport() {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || openedDuringImport.isEmpty()) {
-            openedDuringImport.clear();
-            return;
-        }
-        List<String> uris = List.copyOf(openedDuringImport);
-        openedDuringImport.clear();
-        for (String uri : uris) {
-            String content = documents.content(uri);
-            if (content == null || !documents.unmarkSynced(uri)) {
-                continue;
-            }
-            rpc.notify("textDocument/didClose", Map.of("textDocument", Map.of("uri", uri)));
-            documents.incrementVersion(uri);
-            if (documents.markSynced(uri)) {
-                sendDidOpen(uri, content);
-            }
-        }
-        log.debug("{} documento(s) aberto(s) durante a importacao foram reabertos", uris.size());
+        documentSync.reopenDocumentsOpenedDuringImport();
     }
 
     private void refreshOpenDocuments() {
@@ -2040,36 +1972,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 onDocumentUpgrade.accept(path);
             }
         });
-    }
-
-    private void sendDidOpen(String uri, String content) {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null) {
-            return;
-        }
-        int version = documents.ensureVersion(uri);
-        if (state != LanguageServerState.READY) {
-            openedDuringImport.add(uri);
-        }
-        rpc.notify("textDocument/didOpen", Map.of("textDocument", Map.of(
-                "uri", uri,
-                "languageId", "java",
-                "version", version,
-                "text", content)));
-    }
-
-    private void sendDidChange(String uri, String previous, String content) {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null) {
-            return;
-        }
-        int version = documents.incrementVersion(uri);
-        Map<String, Object> change = capabilities.incrementalSync()
-                ? incrementalDocumentChange(previous, content)
-                : Map.of("text", content);
-        rpc.notify("textDocument/didChange", Map.of(
-                "textDocument", Map.of("uri", uri, "version", version),
-                "contentChanges", List.of(change)));
     }
 
     private void invalidateWorkspaceNavigation() {
@@ -2102,44 +2004,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     static Map<String, Object> incrementalDocumentChange(String previous, String current) {
-        String before = previous == null ? "" : previous;
-        String after = current == null ? "" : current;
-        int prefix = 0;
-        int shared = Math.min(before.length(), after.length());
-        while (prefix < shared && before.charAt(prefix) == after.charAt(prefix)) {
-            prefix++;
-        }
-        if (prefix > 0 && prefix < before.length()
-                && Character.isLowSurrogate(before.charAt(prefix))
-                && Character.isHighSurrogate(before.charAt(prefix - 1))) {
-            prefix--;
-        }
-        int beforeEnd = before.length();
-        int afterEnd = after.length();
-        while (beforeEnd > prefix && afterEnd > prefix
-                && before.charAt(beforeEnd - 1) == after.charAt(afterEnd - 1)) {
-            beforeEnd--;
-            afterEnd--;
-        }
-        Map<String, Integer> start = lspPosition(before, prefix);
-        Map<String, Integer> end = lspPosition(before, beforeEnd);
-        return Map.of(
-                "range", Map.of("start", start, "end", end),
-                "rangeLength", beforeEnd - prefix,
-                "text", after.substring(prefix, afterEnd));
-    }
-
-    private static Map<String, Integer> lspPosition(String text, int offset) {
-        int bounded = Math.max(0, Math.min(offset, text.length()));
-        int line = 0;
-        int lineStart = 0;
-        for (int index = 0; index < bounded; index++) {
-            if (text.charAt(index) == '\n') {
-                line++;
-                lineStart = index + 1;
-            }
-        }
-        return Map.of("line", line, "character", bounded - lineStart);
+        return LspDocumentSync.incrementalDocumentChange(previous, current);
     }
 
     public List<AutoCompleteItem> complete(Path filePath, String text, int line, int col) {
@@ -2603,29 +2468,13 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         return normalized;
     }
 
-    private boolean syncBeforeRequest(Path filePath, String text) {
-        return syncBeforeRequest(filePath, text, false);
+    private synchronized boolean syncBeforeRequest(Path filePath, String text) {
+        return documentSync.syncBeforeRequest(filePath, text);
     }
 
-    private synchronized boolean syncBeforeRequest(Path filePath, String text, boolean authoritative) {
-        if (filePath == null || text == null) {
-            return filePath != null;
-        }
-        String uri = LspConversions.toUri(filePath);
-        String current = documents.content(uri);
-        if (current == null) {
-            openDocument(filePath, text);
-            return true;
-        }
-        if (!current.equals(text)) {
-            if (!authoritative && documents.hasSeen(uri, text)) {
-                log.debug("Requisicao descartada para {}: revisao anterior do editor", uri);
-                return false;
-            }
-            log.debug("Sincronizando {} antes da requisicao interativa", uri);
-            changeDocument(filePath, text);
-        }
-        return true;
+    private synchronized boolean syncBeforeRequest(Path filePath, String text,
+                                                   boolean authoritative) {
+        return documentSync.syncBeforeRequest(filePath, text, authoritative);
     }
 
     private void clearNavigationCache(String uri) {
