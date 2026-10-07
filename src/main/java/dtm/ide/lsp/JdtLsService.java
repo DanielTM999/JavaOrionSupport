@@ -443,6 +443,55 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
     });
 
+    private final JdtProjectCommands projectCommands = new JdtProjectCommands(requests,
+            new JdtProjectCommands.Host() {
+                @Override
+                public LspJsonRpcClient client() {
+                    return client;
+                }
+
+                @Override
+                public boolean isInteractive() {
+                    return JdtLsService.this.isInteractive();
+                }
+
+                @Override
+                public Path launchedMavenRepository() {
+                    return launchedMavenRepository;
+                }
+
+                @Override
+                public Path resolveMavenRepository() {
+                    return JdtLsService.this.resolveMavenRepository();
+                }
+
+                @Override
+                public Map<String, Object> effectiveSettings() {
+                    return effectiveSettings;
+                }
+
+                @Override
+                public void effectiveSettings(Map<String, Object> settings) {
+                    effectiveSettings = settings;
+                }
+
+                @Override
+                public void clearNavigationCache() {
+                    JdtLsService.this.clearNavigationCache(null);
+                }
+
+                @Override
+                public void resynchronizeAfterProjectUpdate() {
+                    resynchronizeOpenDocuments(resyncMode(), false,
+                            "Java: documentos sincronizados com o projeto");
+                }
+
+                @Override
+                public void workspaceBuildProgress(StatusListener progress) {
+                    workspaceBuildProgress = progress;
+                }
+            });
+
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
         this.jdkService = jdkService;
@@ -1465,68 +1514,27 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public boolean updateProjectConfiguration(Path projectRoot) {
-        if (projectRoot == null || !isInteractive()) {
-            return false;
-        }
-        LspJsonRpcClient rpc = client;
-        if (rpc == null) {
-            return false;
-        }
-        if (!java.util.Objects.equals(launchedMavenRepository, resolveMavenRepository())) return false;
-        effectiveSettings = JdtLsSettings.withMavenSettings(effectiveSettings, projectRoot);
-        rpc.notify("workspace/didChangeConfiguration", Map.of("settings", effectiveSettings));
-        clearNavigationCache(null);
-        rpc.notify("java/projectConfigurationUpdate",
-                Map.of("uri", LspConversions.toUri(projectRoot)));
-        return true;
+        return projectCommands.updateProjectConfiguration(projectRoot);
     }
 
     public void resynchronizeAfterProjectUpdate() {
-        resynchronizeOpenDocuments(resyncMode(), false, "Java: documentos sincronizados com o projeto");
+        projectCommands.resynchronizeAfterProjectUpdate();
     }
 
     public String buildWorkspace(boolean fullBuild) {
-        return buildWorkspace(fullBuild, null);
+        return projectCommands.buildWorkspace(fullBuild);
     }
 
     public String buildWorkspace(boolean fullBuild, StatusListener progress) {
-        workspaceBuildProgress = progress;
-        try {
-            JsonNode result = requests.requestInteractive("java/buildWorkspace", fullBuild, 120_000);
-            return result == null || result.isNull() ? "FAILED" : result.asText("FAILED");
-        } finally {
-            workspaceBuildProgress = null;
-        }
+        return projectCommands.buildWorkspace(fullBuild, progress);
     }
 
     public java.util.Optional<String> runtimeClasspath(Path projectOrSource) {
-        if (projectOrSource == null || !isInteractive()) {
-            return java.util.Optional.empty();
-        }
-        JsonNode result = requests.requestInteractive("workspace/executeCommand", Map.of(
-                "command", "java.project.getClasspaths",
-                "arguments", runtimeClasspathArguments(projectOrSource)), 30_000);
-        if (result == null || result.isNull()) {
-            return java.util.Optional.empty();
-        }
-        List<String> entries = new ArrayList<>();
-        for (JsonNode value : result.path("classpaths")) {
-            if (!value.asText("").isBlank()) {
-                entries.add(value.asText());
-            }
-        }
-        for (JsonNode value : result.path("modulepaths")) {
-            if (!value.asText("").isBlank()) {
-                entries.add(value.asText());
-            }
-        }
-        return entries.isEmpty() ? java.util.Optional.empty()
-                : java.util.Optional.of(String.join(java.io.File.pathSeparator, entries));
+        return projectCommands.runtimeClasspath(projectOrSource);
     }
 
     static List<String> runtimeClasspathArguments(Path projectOrSource) {
-        String options = JSON.createObjectNode().put("scope", "runtime").toString();
-        return List.of(LspConversions.toUri(projectOrSource), options);
+        return JdtProjectCommands.runtimeClasspathArguments(projectOrSource);
     }
 
     private void registerHandlers(LspJsonRpcClient rpc) {
