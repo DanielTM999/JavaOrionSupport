@@ -54,6 +54,7 @@ import dtm.ide.api.project.editor.IdeGhostTextContext;
 import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildToolsSupport;
+import dtm.ide.adapter.CompletionEngine;
 import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.JdkManagerSupport;
@@ -383,13 +384,10 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String HIDE_OCCURRENCE_COMMAND = "java.orion.hideInspectionOccurrence";
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
-    private static final long AUTO_COMPLETE_IDLE_DELAY_MS = 150;
     private static final long RUN_BUTTONS_REFRESH_DELAY_MS = 300;
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
     private static final long DELETE_REFERENCES_TIMEOUT_MS = 30_000;
     private static final int DELETE_SEARCH_PARALLELISM = 4;
-    private static final Set<Character> JAVA_COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$');
-    private static final Set<Character> BUILD_FILE_TRIGGER_CHARACTERS = Set.of('.', ':', '$', '<', '/', '\'', '"');
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final int CODE_LENS_TOOLTIP_TARGETS = 8;
     private static final int NAVIGATION_RETRIES = 2;
@@ -798,6 +796,41 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestOpenFile(Path file) {
             JavaIdeAdapter.this.requestOpenFile(file);
         }
+
+        @Override
+        public IdeEditorContext activeJavaEditor() {
+            return activeJavaEditor;
+        }
+
+        @Override
+        public void requestCodeEditorAutocomplete() {
+            JavaIdeAdapter.this.requestCodeEditorAutocomplete();
+        }
+
+        @Override
+        public SpringSupport spring() {
+            return spring;
+        }
+
+        @Override
+        public BuildFileCompletionProvider buildFileCompletion() {
+            return buildFileCompletion;
+        }
+
+        @Override
+        public JavaFastCompletionProvider fastCompletion() {
+            return fastCompletion;
+        }
+
+        @Override
+        public JavaLexicalIndex lexicalIndex() {
+            return lexicalIndex;
+        }
+
+        @Override
+        public boolean isSpringNavigationEnabled() {
+            return JavaIdeAdapter.this.isSpringNavigationEnabled();
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -807,6 +840,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AdapterHost adapterHost = new HostBridge();
     private final SpringSupport spring = new SpringSupport(adapterHost);
     private final CoverageSupport coverageSupport = new CoverageSupport(adapterHost);
+    private final CompletionEngine completionEngine = new CompletionEngine(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -837,12 +871,12 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final PluginTaskExecutor background =
             new PluginTaskExecutor("java-orion-support");
     private final AutoCompleteIdleTrigger autoCompleteIdle = new AutoCompleteIdleTrigger(
-            AUTO_COMPLETE_IDLE_DELAY_MS,
+            CompletionEngine.AUTO_COMPLETE_IDLE_DELAY_MS,
             (task, delay) -> background.schedule(task, delay, TimeUnit.MILLISECONDS),
-            this::isIdleCompletionEligible,
-            this::isIdleCompletionReady,
-            this::currentIdleCaret,
-            this::fireIdleCompletion
+            completionEngine::isIdleCompletionEligible,
+            completionEngine::isIdleCompletionReady,
+            completionEngine::currentIdleCaret,
+            completionEngine::fireIdleCompletion
     );
 
     private static final Color DELETE_ACCENT = new Color(220, 53, 69);
@@ -1544,7 +1578,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
         });
         created.setWarmUpCompleteListener(this::refreshJavaEditorsAfterIndexing);
-        created.setLateCompletionListener(this::onLateCompletion);
+        created.setLateCompletionListener(completionEngine::onLateCompletion);
         created.setDocumentUpgradeListener(this::onLanguageServerDocumentUpgrade);
         languageServerReadyHandled.set(false);
         classFileUris = created.extension(ClassFileSupport.class);
@@ -1862,243 +1896,38 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public Set<Character> getCompletionTriggerCharacters() {
-        return JAVA_COMPLETION_TRIGGER_CHARACTERS;
+        return completionEngine.getCompletionTriggerCharacters();
     }
 
     @Override
     public Set<Character> getCompletionTriggerCharacters(Path filePath) {
-        return BuildFileCompletionProvider.handles(filePath) && settings().isBuildFileCompletion()
-                ? BUILD_FILE_TRIGGER_CHARACTERS
-                : JAVA_COMPLETION_TRIGGER_CHARACTERS;
+        return completionEngine.getCompletionTriggerCharacters(filePath);
     }
 
     @Override
     public boolean shouldAutoTriggerCompletion(IdeCompletionContext context) {
-        if (debugActive.get() || context == null) {
-            return false;
-        }
-        if (BuildFileCompletionProvider.handles(context.filePath())) {
-            return settings().isBuildFileCompletion();
-        }
-        if (SpringConfigSupport.isConfigFile(context.filePath())) {
-            return settings().isSpringSupport();
-        }
-        if (!JavaProjectConventions.isJava(context.filePath())) {
-            return false;
-        }
-        String line = context.currentLine();
-        int col = context.caretCol();
-        if (line == null || col <= 0 || col > line.length()) {
-            return false;
-        }
-        char previous = line.charAt(col - 1);
-        if (previous == '"') {
-            return isJpaQueryLiteral(context) || isSpringAnnotationLiteral(line, col);
-        }
-        return JavaTypingContext.allowsTriggerCharacter(context.text(), context.caretOffset(), previous);
-    }
-
-    private boolean isIdleCompletionEligible(Path filePath) {
-        return !debugActive.get() && JavaProjectConventions.isJava(filePath);
-    }
-
-    private boolean isIdleCompletionReady() {
-        return !debugActive.get() && !isAutoCompletePopupVisible();
-    }
-
-    private boolean isAutoCompletePopupVisible() {
-        IdeEditorContext editor = activeJavaEditor;
-        return editor != null && editor.isAutoCompleteVisible();
-    }
-
-    private AutoCompleteIdleTrigger.Caret currentIdleCaret() {
-        IdeEditorContext editor = activeJavaEditor;
-        if (editor == null) {
-            return null;
-        }
-        return new AutoCompleteIdleTrigger.Caret(
-                JavaProjectConventions.normalize(editor.filePath()), editor.getCaretOffset());
-    }
-
-    private void onLateCompletion(Path filePath, int line, int col) {
-        SwingUtilities.invokeLater(() -> {
-            IdeEditorContext editor = activeJavaEditor;
-            if (editor == null || debugActive.get() || !Objects.equals(
-                    JavaProjectConventions.normalize(editor.filePath()),
-                    JavaProjectConventions.normalize(filePath))) {
-                return;
-            }
-            if (editor.getCaretLine() == line && editor.getCaretCol() == col) {
-                requestCodeEditorAutocomplete();
-            }
-        });
-    }
-
-    private void fireIdleCompletion() {
-        SwingUtilities.invokeLater(() -> {
-            IdeEditorContext editor = activeJavaEditor;
-            if (editor == null || editor.isAutoCompleteVisible()
-                    || !JavaTypingContext.allowsIdleCompletion(editor.getText(), editor.getCaretOffset())) {
-                return;
-            }
-            log.debug("Autocomplete: disparo automatico apos {} ms de pausa", AUTO_COMPLETE_IDLE_DELAY_MS);
-            requestCodeEditorAutocomplete();
-        });
+        return completionEngine.shouldAutoTriggerCompletion(context);
     }
 
     @Override
     public boolean isAutoCompletionOnTypingEnabled() {
-        return !debugActive.get();
+        return completionEngine.isAutoCompletionOnTypingEnabled();
     }
 
     @Override
     public List<AutoCompleteItem> getCompletionSuggestions(IdeCompletionContext context) {
-        if (debugActive.get() || context == null) {
-            return null;
-        }
-        if (SpringConfigSupport.isConfigFile(context.filePath())) {
-            List<AutoCompleteItem> values = SpringConfigSupport.completeValues(spring.configIndex(),
-                    context.filePath(), context.text(), context.caretLine(), context.caretCol());
-            if (!values.isEmpty()) {
-                return values;
-            }
-            return SpringConfigSupport.complete(spring.metadata(), context.filePath(),
-                    context.text(), context.caretLine(), context.caretCol());
-        }
-        List<AutoCompleteItem> query = jpaQueryCompletion(context);
-        if (query != null) {
-            return query;
-        }
-        List<AutoCompleteItem> springAnnotation = springAnnotationCompletion(context);
-        if (springAnnotation != null) {
-            return springAnnotation;
-        }
-        if (BuildFileCompletionProvider.handles(context.filePath())) {
-            return settings().isBuildFileCompletion()
-                    ? buildFileCompletion.suggestions(context)
-                    : null;
-        }
-        if (!JavaProjectConventions.isJava(context.filePath())) {
-            return null;
-        }
-        List<AutoCompleteItem> snippetsLocal = javaSnippets(context);
-
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null && lsp.isInteractive() && lsp.isReady()) {
-            long started = System.nanoTime();
-            List<AutoCompleteItem> semantic = reusableJavaCompletions(lsp, context);
-            boolean reused = !semantic.isEmpty();
-            if (!reused) {
-                CompletionTrigger trigger = javaCompletionTrigger(context);
-                semantic = lsp.complete(context.filePath(), context.text(),
-                        context.caretLine(), context.caretCol(), trigger, javaTriggerCharacter(context),
-                        lsp.documentVersion(context.filePath()), true);
-            }
-            return finishSemanticCompletion(lsp, context, semantic, snippetsLocal, started,
-                    reused ? "cache" : "jdtls");
-        }
-
-        List<AutoCompleteItem> lexical = fastCompletion.suggestions(context);
-        List<AutoCompleteItem> local = mergeCompletionSuggestions(lexical, snippetsLocal);
-        List<AutoCompleteItem> contextual = List.of();
-        if (lsp != null && lsp.isInteractive()) {
-            contextual = filterCompletionSuggestions(lsp.cachedCompletions(context.filePath(),
-                    context.text(), context.caretLine(), context.caretCol()), context.prefix());
-            lsp.warmCompletion(context.filePath(), context.text(),
-                    context.caretLine(), context.caretCol());
-        }
-        return javaCompletion(mergeCompletionSuggestions(contextual, local), context);
+        return completionEngine.getCompletionSuggestions(context);
     }
 
     @Override
     public CompletableFuture<List<AutoCompleteItem>> getCompletionSuggestionsAsync(
             IdeCompletionContext context) {
-        JavaLanguageServer lsp = jdtLs;
-        if (debugActive.get() || context == null || !JavaProjectConventions.isJava(context.filePath())
-                || lsp == null || !lsp.isInteractive() || !lsp.isReady()) {
-            return CompletableFuture.completedFuture(getCompletionSuggestions(context));
-        }
-        List<AutoCompleteItem> query = jpaQueryCompletion(context);
-        if (query != null) {
-            return CompletableFuture.completedFuture(query);
-        }
-        List<AutoCompleteItem> springAnnotation = springAnnotationCompletion(context);
-        if (springAnnotation != null) {
-            return CompletableFuture.completedFuture(springAnnotation);
-        }
-        long started = System.nanoTime();
-        List<AutoCompleteItem> snippetsLocal = javaSnippets(context);
-        List<AutoCompleteItem> reusable = reusableJavaCompletions(lsp, context);
-        if (!reusable.isEmpty()) {
-            return CompletableFuture.completedFuture(
-                    finishSemanticCompletion(lsp, context, reusable, snippetsLocal, started, "cache"));
-        }
-        return lsp.completeAsync(context.filePath(), context.text(), context.caretLine(),
-                        context.caretCol(), javaCompletionTrigger(context), javaTriggerCharacter(context),
-                        lsp.documentVersion(context.filePath()))
-                .thenApply(semantic -> finishSemanticCompletion(lsp, context, semantic, snippetsLocal,
-                        started, "jdtls"));
+        return completionEngine.getCompletionSuggestionsAsync(context);
     }
 
     @Override
     public CompletableFuture<AutoCompleteItem> resolveCompletionItem(AutoCompleteItem item) {
-        JavaLanguageServer lsp = jdtLs;
-        return lsp == null || !lsp.isInteractive() ? CompletableFuture.completedFuture(item)
-                : lsp.resolveCompletionAsync(item);
-    }
-
-    private List<AutoCompleteItem> javaSnippets(IdeCompletionContext context) {
-        if (JavaFastCompletionProvider.isMemberAccess(context)) {
-            return PostfixCompletionProvider.suggestions(context.text(), context.caretOffset());
-        }
-        JavaProjectDescriptor current = descriptor;
-        return snippets.suggestions(context.prefix(), current != null && current.spring());
-    }
-
-    private static List<AutoCompleteItem> reusableJavaCompletions(JavaLanguageServer lsp,
-                                                                  IdeCompletionContext context) {
-        return filterCompletionSuggestions(lsp.reusableCompletions(context.filePath(), context.text(),
-                context.caretLine(), context.caretCol()), context.prefix());
-    }
-
-    private static Character javaTriggerCharacter(IdeCompletionContext context) {
-        return completionTriggerCharacter(context.currentLine(), context.caretCol(),
-                JAVA_COMPLETION_TRIGGER_CHARACTERS);
-    }
-
-    private static CompletionTrigger javaCompletionTrigger(IdeCompletionContext context) {
-        return context.triggerKind() == IdeCompletionTriggerKind.TYPING && javaTriggerCharacter(context) != null
-                ? CompletionTrigger.TRIGGER_CHARACTER
-                : CompletionTrigger.INVOKED;
-    }
-
-    private List<AutoCompleteItem> finishSemanticCompletion(JavaLanguageServer lsp, IdeCompletionContext context,
-                                                            List<AutoCompleteItem> semantic,
-                                                            List<AutoCompleteItem> snippetsLocal,
-                                                            long started, String origin) {
-        List<AutoCompleteItem> items = semantic == null ? List.of() : semantic;
-        if (items.isEmpty()) {
-            items = filterCompletionSuggestions(lsp.cachedCompletions(context.filePath(),
-                    context.text(), context.caretLine(), context.caretCol()), context.prefix());
-        }
-        if (items.isEmpty()) {
-            items = fastCompletion.suggestions(context);
-        }
-        long fetched = System.nanoTime();
-        List<AutoCompleteItem> result = javaCompletion(
-                mergeCompletionSuggestions(items, snippetsLocal), context);
-        log.debug("Autocomplete: {} item(ns) em {} ms (origem {}, pos-processamento {} ms)",
-                result.size(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), origin,
-                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - fetched));
-        return result;
-    }
-
-    private List<AutoCompleteItem> javaCompletion(List<AutoCompleteItem> items,
-                                                  IdeCompletionContext context) {
-        List<AutoCompleteItem> ranked = CallParentheses.apply(CompletionRanking.rank(items, context.prefix()),
-                context.text(), context.prefixOffset(), context.caretOffset());
-        return markUnusedMethods(ranked, names -> lexicalIndex.unusedMethods(names,
-                context.filePath(), context.text()));
+        return completionEngine.resolveCompletionItem(item);
     }
 
     @Override
@@ -5802,41 +5631,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!log.isDebugEnabled()) return;
         log.debug("navegacao {} em {}: status={} spring={}ms lsp={}ms localScope={}ms",
                 kind, filePath == null ? "?" : filePath.getFileName(), status, springMs, lspMs, scopeMs);
-    }
-
-    private boolean isSpringAnnotationLiteral(String line, int col) {
-        return isSpringNavigationEnabled()
-                && SpringAnnotationCompletionProvider.opensAnnotationLiteral(line, col);
-    }
-
-    private boolean isJpaQueryLiteral(IdeCompletionContext context) {
-        return isJpaCompletionEnabled(context)
-                && JpaQueryCompletionProvider.isInsideQuery(context.text(), context.caretOffset());
-    }
-
-    private List<AutoCompleteItem> jpaQueryCompletion(IdeCompletionContext context) {
-        if (!isJpaCompletionEnabled(context)) {
-            return null;
-        }
-        return JpaQueryCompletionProvider.suggestions(spring.index().snapshot(), context.filePath(),
-                context.text(), context.caretOffset());
-    }
-
-    private boolean isJpaCompletionEnabled(IdeCompletionContext context) {
-        JavaProjectDescriptor current = descriptor;
-        return context != null && JavaProjectConventions.isJava(context.filePath())
-                && current != null && current.spring() && settings().isSpringSupport()
-                && settings().isSpringJpa();
-    }
-
-    private List<AutoCompleteItem> springAnnotationCompletion(IdeCompletionContext context) {
-        if (!isSpringNavigationEnabled()
-                || !JavaProjectConventions.isJava(context.filePath())) {
-            return null;
-        }
-        return SpringAnnotationCompletionProvider.suggestions(spring.index().snapshot(),
-                context.filePath(), context.currentLine(), context.caretCol(),
-                context.caretLine());
     }
 
     private SpringNavigation.Target springTargetAt(Path filePath, String text, int line, int col) {

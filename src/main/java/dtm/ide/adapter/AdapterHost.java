@@ -10,6 +10,9 @@ import dtm.ide.build.BuildSystem;
 import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.coverage.CoverageProvisioner;
 import dtm.ide.debug.BuildToolDebugListener;
+import dtm.ide.editor.BuildFileCompletionProvider;
+import dtm.ide.editor.JavaFastCompletionProvider;
+import dtm.ide.index.JavaLexicalIndex;
 import dtm.ide.lsp.api.JavaLanguageServer;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
@@ -96,4 +99,11 @@ public interface AdapterHost extends AdapterContext {
     JavaTestExplorerPanel testPanel();
     Map<Path, IdeEditorContext> javaEditors();
     void requestOpenFile(Path file);
+    IdeEditorContext activeJavaEditor();
+    void requestCodeEditorAutocomplete();
+    SpringSupport spring();
+    BuildFileCompletionProvider buildFileCompletion();
+    JavaFastCompletionProvider fastCompletion();
+    JavaLexicalIndex lexicalIndex();
+    boolean isSpringNavigationEnabled();
 }
