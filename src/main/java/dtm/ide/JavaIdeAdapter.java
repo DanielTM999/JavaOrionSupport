@@ -359,6 +359,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static dtm.ide.adapter.AdapterText.text;
+import static dtm.ide.adapter.DiagnosticsSupport.unusedFieldDiagnostics;
+import static dtm.ide.adapter.DiagnosticsSupport.unusedMethodDiagnostics;
 import static dtm.ide.adapter.CompletionSupport.completionTriggerCharacter;
 import static dtm.ide.adapter.CompletionSupport.filterCompletionSuggestions;
 import static dtm.ide.adapter.CompletionSupport.markUnusedMethods;
@@ -1849,84 +1851,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         List<Diagnostic> visible = InspectionSuppressions.filter(merged, context.getText(),
                 settings().getDisabledInspections(), occurrenceFilterFor(filePath));
         return visible.isEmpty() && (lsp == null || !lsp.isInteractive()) ? null : visible;
-    }
-
-    static List<Diagnostic> unusedMethodDiagnostics(String text, Collection<Diagnostic> existing,
-                                                    Function<Set<String>, Set<String>> unusedLookup) {
-        return unusedDeclarationDiagnostics(text, existing, unusedLookup, SymbolKind.METHOD,
-                "diagnostic.unusedMethod", "Metodo sem uso no projeto", JavaInspection.UNUSED_METHOD.id());
-    }
-
-    static List<Diagnostic> unusedFieldDiagnostics(String text, Collection<Diagnostic> existing,
-                                                   Function<Set<String>, Set<String>> unusedLookup) {
-        return unusedDeclarationDiagnostics(text, existing, unusedLookup, SymbolKind.FIELD,
-                "diagnostic.unusedField", "Campo sem uso no projeto", JavaInspection.UNUSED_FIELD.id());
-    }
-
-    private static List<Diagnostic> unusedDeclarationDiagnostics(String text, Collection<Diagnostic> existing,
-            Function<Set<String>, Set<String>> unusedLookup, SymbolKind kind,
-            String labelKey, String fallback, String inspectionId) {
-        if (text == null || text.isBlank() || !DiagnosticTags.isSupported()) {
-            return List.of();
-        }
-        List<JavaLexicalSource.Declared> methods = declarationsOf(text).stream()
-                .filter(declared -> declared.kind() == kind)
-                .toList();
-        if (methods.isEmpty()) {
-            return List.of();
-        }
-        Set<String> names = new LinkedHashSet<>();
-        methods.forEach(method -> names.add(method.name()));
-        Set<String> unused = unusedLookup.apply(names);
-        if (unused == null || unused.isEmpty()) {
-            return List.of();
-        }
-        String label = text(labelKey, fallback);
-        List<Diagnostic> diagnostics = new ArrayList<>();
-        for (JavaLexicalSource.Declared method : methods) {
-            Range range = method.range();
-            if (!unused.contains(method.name()) || alreadyMarkedUnnecessary(existing, range)) {
-                continue;
-            }
-            Diagnostic hint = DiagnosticTags.unnecessary(new Diagnostic(range.start().line(),
-                    range.start().col(), range.end().line(), range.end().col(), DiagnosticSeverity.HINT,
-                    label + ": " + method.name(), inspectionId, null), true);
-            if (!DiagnosticTags.isUnnecessary(hint)) {
-                return List.of();
-            }
-            diagnostics.add(hint);
-        }
-        return List.copyOf(diagnostics);
-    }
-
-    private record DeclarationsMemo(String text, List<JavaLexicalSource.Declared> declarations) {
-    }
-
-    private static volatile DeclarationsMemo declarationsMemo;
-
-    private static List<JavaLexicalSource.Declared> declarationsOf(String text) {
-        DeclarationsMemo memo = declarationsMemo;
-        if (memo != null && (memo.text() == text || memo.text().equals(text))) {
-            return memo.declarations();
-        }
-        List<JavaLexicalSource.Declared> declarations = JavaLexicalSource.declarations(text);
-        declarationsMemo = new DeclarationsMemo(text, declarations);
-        return declarations;
-    }
-
-    private static boolean alreadyMarkedUnnecessary(Collection<Diagnostic> existing, Range range) {
-        if (existing == null) {
-            return false;
-        }
-        int line = range.start().line();
-        for (Diagnostic diagnostic : existing) {
-            if (DiagnosticTags.isUnnecessary(diagnostic) && diagnostic.startLine() <= line && diagnostic.endLine() >= line
-                    && diagnostic.startCol() <= range.end().col()
-                    && (diagnostic.endLine() > line || diagnostic.endCol() >= range.start().col())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private List<Diagnostic> pluginDiagnostics(Path filePath, String text) {

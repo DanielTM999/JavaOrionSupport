@@ -1,4 +1,4 @@
-package dtm.ide;
+package dtm.ide.adapter;
 
 import org.junit.jupiter.api.Test;
 
@@ -8,7 +8,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class JavaIdeAdapterCompletionTest {
+class DiagnosticsSupportTest {
 
     @Test
     void unusedMethodsBecomeFadeOnlyHintsOnTheirName() {
@@ -19,7 +19,7 @@ class JavaIdeAdapterCompletionTest {
                 "}");
 
         List<dtm.stools.component.panels.editor.code.diagnostics.Diagnostic> hints =
-                JavaIdeAdapter.unusedMethodDiagnostics(text, List.of(), names -> Set.of("orphan"));
+                DiagnosticsSupport.unusedMethodDiagnostics(text, List.of(), names -> Set.of("orphan"));
 
         assertEquals(1, hints.size());
         var hint = hints.getFirst();
@@ -38,14 +38,14 @@ class JavaIdeAdapterCompletionTest {
                 dtm.stools.component.panels.editor.code.diagnostics.DiagnosticSeverity.WARNING,
                 "never used locally", "Java", null, true);
 
-        assertEquals(List.of(), JavaIdeAdapter.unusedMethodDiagnostics(text, List.of(fromServer),
+        assertEquals(List.of(), DiagnosticsSupport.unusedMethodDiagnostics(text, List.of(fromServer),
                 names -> Set.of("orphan")));
     }
 
     @Test
     void unusedFieldHintFadesOnlyTheFieldName() {
         String text = "class Service {\n    private int orphan;\n}";
-        var hints = JavaIdeAdapter.unusedFieldDiagnostics(text, List.of(), names -> Set.of("orphan"));
+        var hints = DiagnosticsSupport.unusedFieldDiagnostics(text, List.of(), names -> Set.of("orphan"));
 
         assertEquals(1, hints.size());
         var hint = hints.getFirst();
