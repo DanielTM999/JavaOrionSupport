@@ -106,7 +106,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
     private static final long RENAME_TIMEOUT_MS = 60_000;
 
-    private volatile String lastRenameProblem;
     private volatile String lastMoveProblem;
     private static final long INITIALIZE_CEILING_MS = 900_000;
     private static final long INITIALIZE_WAIT_SLICE_MS = 5_000;
@@ -371,6 +370,58 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         @Override
         public void lateCompletion(Path filePath, int line, int col) {
             lateCompletionListener.onLateCompletion(filePath, line, col);
+        }
+    });
+
+    private final LspRefactoring refactoring = new LspRefactoring(requests, new LspRefactoring.Host() {
+        @Override
+        public LspJsonRpcClient client() {
+            return client;
+        }
+
+        @Override
+        public ServerCapabilities capabilities() {
+            return capabilities;
+        }
+
+        @Override
+        public boolean isReady() {
+            return JdtLsService.this.isReady();
+        }
+
+        @Override
+        public boolean isInteractive() {
+            return JdtLsService.this.isInteractive();
+        }
+
+        @Override
+        public boolean syncBeforeRequest(Path path, String text) {
+            return JdtLsService.this.syncBeforeRequest(path, text);
+        }
+
+        @Override
+        public boolean isCurrentText(Path path, String text) {
+            return JdtLsService.this.isCurrentText(path, text);
+        }
+
+        @Override
+        public void drainPendingWatchedFiles() {
+            JdtLsService.this.drainPendingWatchedFiles();
+        }
+
+        @Override
+        public JdtDocumentStore documents() {
+            return documents;
+        }
+
+        @Override
+        public List<JsonNode> rawDiagnostics(Path path) {
+            return rawDiagnosticsByPath.getOrDefault(normalizePath(path), List.of());
+        }
+
+        @Override
+        public String applyCodeActionCommand() {
+            return APPLY_CODE_ACTION_COMMAND;
         }
     });
 
@@ -2425,62 +2476,15 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public List<TextEdit> rename(Path filePath, String text, int line, int col, String newName) {
-        IdeWorkspaceEdit workspaceEdit = renameWorkspace(filePath, text, line, col, newName);
-        return workspaceEdit == null ? List.of() : workspaceEdit.editsFor(filePath);
+        return refactoring.rename(filePath, text, line, col, newName);
     }
 
     public IdeWorkspaceEdit renameWorkspace(Path filePath, String text, int line, int col, String newName) {
-        lastRenameProblem = null;
-        if (!capabilities.rename()) {
-            return IdeWorkspaceEdit.empty();
-        }
-        Map<String, Object> params = positionParams(filePath, line, col);
-        params.put("newName", newName);
-        if (!syncBeforeRequest(filePath, text)) {
-            return IdeWorkspaceEdit.empty();
-        }
-        drainPendingWatchedFiles();
-        String oldName = renamedName(filePath, text, line, col);
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || !isReady()) {
-            lastRenameProblem = "o servidor Java nao esta pronto";
-            return IdeWorkspaceEdit.empty();
-        }
-        CompletableFuture<JsonNode> future = rpc.request("textDocument/rename", params);
-        JsonNode result;
-        try {
-            result = future.get(RENAME_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            future.cancel(false);
-            Thread.currentThread().interrupt();
-            return IdeWorkspaceEdit.empty();
-        } catch (Exception e) {
-            future.cancel(false);
-            requests.logRequestFailure("textDocument/rename", e);
-            String message = LspConversions.errorMessage(e);
-            lastRenameProblem = message == null ? "o servidor Java nao conseguiu renomear" : message;
-            return IdeWorkspaceEdit.empty();
-        }
-        IdeWorkspaceEdit edit = LspConversions.workspaceEdit(result);
-        if (oldName == null) {
-            log.debug("Rename sem nome original conhecido em {}:{}:{}; edicoes nao verificadas", filePath, line, col);
-            return edit;
-        }
-        Path current = normalizePath(filePath);
-        RenameEditVerifier.Result verified = RenameEditVerifier.verify(edit, oldName, newName,
-                file -> renameSourceOf(file, current, text));
-        if (verified.rejected()) {
-            lastRenameProblem = verified.problem() + (verified.rejectedFile() == null ? ""
-                    : " (" + verified.rejectedFile().getFileName() + ")");
-            log.warn("Rename '{}' -> '{}' cancelado: {} file={}", oldName, newName, verified.problem(),
-                    verified.rejectedFile());
-            return IdeWorkspaceEdit.empty();
-        }
-        return verified.edit();
+        return refactoring.renameWorkspace(filePath, text, line, col, newName);
     }
 
     public String lastRenameProblem() {
-        return lastRenameProblem;
+        return refactoring.lastRenameProblem();
     }
 
     public IdeWorkspaceEdit moveTypesWorkspace(List<Path> sources, Path targetDirectory) {
@@ -2591,169 +2595,29 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         return null;
     }
 
-    private String renamedName(Path filePath, String text, int line, int col) {
-        PrepareRenameResult prepared = prepareRename(filePath, text, line, col);
-        if (prepared != null && prepared.renameable() && prepared.range() != null) {
-            String name = textIn(text, prepared.range());
-            if (name != null && !name.isBlank()) {
-                return name;
-            }
-        }
-        if (prepared != null && prepared.placeholder() != null && !prepared.placeholder().isBlank()) {
-            return prepared.placeholder();
-        }
-        return identifierAt(text, line, col);
-    }
-
-    private String renameSourceOf(Path file, Path current, String currentText) {
-        if (file == null) {
-            return null;
-        }
-        Path target = normalizePath(file);
-        if (target.equals(current)) {
-            return currentText;
-        }
-        String open = documents.content(LspConversions.toUri(target));
-        if (open != null) {
-            return open;
-        }
-        try {
-            String disk = Files.readString(target, StandardCharsets.UTF_8);
-            return disk.startsWith("﻿") ? disk.substring(1) : disk;
-        } catch (IOException e) {
-            return null;
-        }
-    }
-
     static String textIn(String text, Range range) {
-        if (text == null || range == null || range.start() == null || range.end() == null) {
-            return null;
-        }
-        String normalized = LspConversions.normalizeLineBreaks(text);
-        int start = offsetIn(normalized, range.start());
-        int end = offsetIn(normalized, range.end());
-        return start < 0 || end < start ? null : normalized.substring(start, end);
+        return LspRefactoring.textIn(text, range);
     }
 
     static String identifierAt(String text, int line, int col) {
-        if (text == null) {
-            return null;
-        }
-        String normalized = LspConversions.normalizeLineBreaks(text);
-        int offset = offsetIn(normalized, new Position(line, col));
-        if (offset < 0) {
-            return null;
-        }
-        int start = offset;
-        int end = offset;
-        while (start > 0 && Character.isJavaIdentifierPart(normalized.charAt(start - 1))) {
-            start--;
-        }
-        while (end < normalized.length() && Character.isJavaIdentifierPart(normalized.charAt(end))) {
-            end++;
-        }
-        return end > start ? normalized.substring(start, end) : null;
+        return LspRefactoring.identifierAt(text, line, col);
     }
 
     public PrepareRenameResult prepareRename(Path filePath, String text, int line, int col) {
-        if (!capabilities.rename() || !capabilities.prepareRename()) {
-            return null;
-        }
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || !isInteractive()) {
-            return null;
-        }
-        if (!syncBeforeRequest(filePath, text)) {
-            return null;
-        }
-        CompletableFuture<JsonNode> future = rpc.request("textDocument/prepareRename",
-                positionParams(filePath, line, col));
-        JsonNode result;
-        try {
-            result = future.get(REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            future.cancel(false);
-            Thread.currentThread().interrupt();
-            return null;
-        } catch (TimeoutException e) {
-            future.cancel(false);
-            return null;
-        } catch (Exception e) {
-            return PrepareRenameResult.rejected(LspConversions.errorMessage(e));
-        }
-        if (!isCurrentText(filePath, text)) {
-            return null;
-        }
-        return LspConversions.prepareRename(result);
+        return refactoring.prepareRename(filePath, text, line, col);
     }
 
     public List<CodeAction> codeActions(Path filePath, String text, Range range,
                                         List<Diagnostic> diagnostics) {
-        if (!capabilities.codeAction()) {
-            return List.of();
-        }
-        List<JsonNode> known = rawDiagnosticsByPath.getOrDefault(normalizePath(filePath), List.of());
-        if (!syncBeforeRequest(filePath, text)) {
-            return List.of();
-        }
-        Map<String, Object> params = new LinkedHashMap<>();
-        params.put("textDocument", documentId(filePath));
-        params.put("range", rangeParam(range));
-        params.put("context", Map.of("diagnostics", diagnosticsIntersecting(known, range)));
-
-        JsonNode result = requests.requestInteractive("textDocument/codeAction", params,
-                requests.interactiveTimeoutMs());
-        if (result == null || !result.isArray()) {
-            return List.of();
-        }
-        List<CodeAction> actions = new ArrayList<>(result.size());
-        for (JsonNode node : result) {
-            CodeAction action = LspConversions.codeAction(node, APPLY_CODE_ACTION_COMMAND);
-            if (action != null) {
-                actions.add(action);
-            }
-        }
-        return actions;
+        return refactoring.codeActions(filePath, text, range, diagnostics);
     }
 
     static List<JsonNode> diagnosticsIntersecting(List<JsonNode> diagnostics, Range range) {
-        if (diagnostics == null || diagnostics.isEmpty() || range == null) {
-            return List.of();
-        }
-        int first = Math.min(range.start().line(), range.end().line());
-        int last = Math.max(range.start().line(), range.end().line());
-        List<JsonNode> matching = new ArrayList<>();
-        for (JsonNode diagnostic : diagnostics) {
-            JsonNode span = diagnostic.path("range");
-            int start = span.path("start").path("line").asInt(-1);
-            int end = span.path("end").path("line").asInt(start);
-            if (start >= 0 && start <= last && end >= first) {
-                matching.add(diagnostic);
-            }
-        }
-        return matching;
+        return LspRefactoring.diagnosticsIntersecting(diagnostics, range);
     }
 
     public ResolvedCodeAction resolveCodeAction(String rawJson) {
-        if (rawJson == null || rawJson.isBlank()) {
-            return null;
-        }
-        JsonNode action;
-        try {
-            action = JSON.readTree(rawJson);
-        } catch (Exception e) {
-            log.debug("Code action Java invalida: {}", rootMessage(e));
-            return null;
-        }
-        if (!action.hasNonNull("edit") && !action.hasNonNull("command")
-                && action.hasNonNull("data")) {
-            action = requests.requestInteractive("codeAction/resolve", action, REQUEST_TIMEOUT_MS);
-            if (action == null || action.isNull()) {
-                return null;
-            }
-        }
-        return new ResolvedCodeAction(LspConversions.workspaceEdit(action.get("edit")),
-                action.hasNonNull("command") ? action.toString() : null);
+        return refactoring.resolveCodeAction(rawJson);
     }
 
     public ImportLookup importCandidates(Path filePath, String text, Range pasted,
@@ -2783,32 +2647,11 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public List<TypeSymbol> workspaceTypes(String query) {
-        if (!capabilities.workspaceSymbol() || query == null || query.isBlank()) {
-            return List.of();
-        }
-        return parseWorkspaceTypes(requests.requestInteractive("workspace/symbol",
-                Map.of("query", query.trim()), REQUEST_TIMEOUT_MS));
+        return refactoring.workspaceTypes(query);
     }
 
     static List<TypeSymbol> parseWorkspaceTypes(JsonNode result) {
-        if (result == null || !result.isArray()) {
-            return List.of();
-        }
-        Map<String, TypeSymbol> types = new LinkedHashMap<>();
-        for (JsonNode symbol : result) {
-            int kind = symbol.path("kind").asInt(0);
-            if (kind != 5 && kind != 11) {
-                continue;
-            }
-            String name = symbol.path("name").asText("");
-            if (name.isBlank()) {
-                continue;
-            }
-            String container = symbol.path("containerName").asText("");
-            String qualified = container.isBlank() ? name : container + "." + name;
-            types.putIfAbsent(qualified, new TypeSymbol(qualified, kind == 11));
-        }
-        return List.copyOf(types.values());
+        return LspRefactoring.parseWorkspaceTypes(result);
     }
 
     public OverrideStatus overridableMethods(Path filePath, String text, int line, int col) {
@@ -3030,27 +2873,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public void executeCodeAction(String rawJson) {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || !isInteractive() || rawJson == null || rawJson.isBlank()) {
-            return;
-        }
-        try {
-            JsonNode action = JSON.readTree(rawJson);
-            JsonNode command = action.path("command");
-            if (command.isTextual()) {
-                command = action;
-            }
-            String id = command.path("command").asText("");
-            if (id.isBlank()) {
-                return;
-            }
-            List<Object> arguments = command.hasNonNull("arguments")
-                    ? JSON.convertValue(command.get("arguments"), List.class) : List.of();
-            requests.requestInteractive("workspace/executeCommand",
-                    Map.of("command", id, "arguments", arguments), REQUEST_TIMEOUT_MS * 2);
-        } catch (Exception e) {
-            log.debug("Falha ao executar code action Java: {}", rootMessage(e));
-        }
+        refactoring.executeCodeAction(rawJson);
     }
 
     public CompletableFuture<List<InlayHint>> inlayHintsAsync(Path filePath, String text,
@@ -3086,21 +2909,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public String format(Path filePath, String text, int tabSize, boolean insertSpaces) {
-        if (!capabilities.formatting()) {
-            return null;
-        }
-        if (!syncBeforeRequest(filePath, text)) {
-            return null;
-        }
-        Map<String, Object> params = Map.of(
-                "textDocument", documentId(filePath),
-                "options", Map.of(
-                        "tabSize", Math.max(1, tabSize),
-                        "insertSpaces", insertSpaces));
-
-        JsonNode result = requests.request("textDocument/formatting", params, REQUEST_TIMEOUT_MS * 2);
-        List<TextEdit> edits = LspConversions.textEdits(result);
-        return edits.isEmpty() ? null : TextEditApplier.apply(text, edits);
+        return refactoring.format(filePath, text, tabSize, insertSpaces);
     }
 
     public String prepareSave(Path file, String source, boolean organize, boolean format,
@@ -3131,30 +2940,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public String organizeImports(Path filePath, String text) {
-        if (!capabilities.codeAction()) {
-            return null;
-        }
-        if (!syncBeforeRequest(filePath, text)) {
-            return null;
-        }
-        Map<String, Object> params = new LinkedHashMap<>();
-        params.put("textDocument", documentId(filePath));
-        params.put("range", rangeParam(Range.point(0, 0)));
-        params.put("context", Map.of(
-                "diagnostics", List.of(),
-                "only", List.of("source.organizeImports")));
-
-        JsonNode result = requests.request("textDocument/codeAction", params, REQUEST_TIMEOUT_MS);
-        if (result == null || !result.isArray()) {
-            return null;
-        }
-        for (JsonNode action : result) {
-            List<TextEdit> edits = LspConversions.singleDocumentEdits(action.get("edit"));
-            if (!edits.isEmpty()) {
-                return TextEditApplier.apply(text, edits);
-            }
-        }
-        return null;
+        return refactoring.organizeImports(filePath, text);
     }
 
     public Collection<Diagnostic> diagnostics(Path filePath) {
