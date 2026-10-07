@@ -1,0 +1,1071 @@
+{
+  "launch" : {
+    "args" : [ "-configuration", "<SDK>\\jdtls\\1.60.0\\config_win", "-data", "<WORKSPACE>" ],
+    "jvm" : [ "-Declipse.application=org.eclipse.jdt.ls.core.id1", "-Dosgi.bundles.defaultStartLevel=4", "-Declipse.product=org.eclipse.jdt.ls.core.product", "-Dlog.level=WARNING", "-Dfile.encoding=UTF-8", "-Dmaven.repo.local=<M2_REPO>", "-Djava.import.generatesMetadataFilesAtProjectRoot=false", "-DDetectVMInstallationsJob.disabled=true", "-Dsun.zip.disableMemoryMapping=true", "-Xms256m", "-Xmx2G", "-XX:+UseParallelGC", "-XX:GCTimeRatio=4", "-XX:AdaptiveSizePolicyWeight=90", "-Xlog:disable", "-XX:+AutoCreateSharedArchive", "-XX:SharedArchiveFile=<SDK>\\jdtls\\1.60.0\\jdtls-jdk25.jsa", "--add-modules=ALL-SYSTEM", "--add-opens=java.base/java.util=ALL-UNNAMED", "--add-opens=java.base/java.lang=ALL-UNNAMED" ]
+  },
+  "messages" : {
+    "exit" : [ { } ],
+    "initialize" : [ {
+      "capabilities" : {
+        "textDocument" : {
+          "callHierarchy" : {
+            "dynamicRegistration" : false
+          },
+          "codeAction" : {
+            "codeActionLiteralSupport" : {
+              "codeActionKind" : {
+                "valueSet" : [ "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports" ]
+              }
+            },
+            "dynamicRegistration" : false,
+            "isPreferredSupport" : true,
+            "resolveSupport" : {
+              "properties" : [ "edit" ]
+            }
+          },
+          "codeLens" : {
+            "dynamicRegistration" : false
+          },
+          "completion" : {
+            "completionItem" : {
+              "documentationFormat" : [ "markdown", "plaintext" ],
+              "labelDetailsSupport" : true,
+              "snippetSupport" : true
+            },
+            "contextSupport" : true,
+            "dynamicRegistration" : false
+          },
+          "definition" : {
+            "dynamicRegistration" : false,
+            "linkSupport" : true
+          },
+          "documentHighlight" : {
+            "dynamicRegistration" : false
+          },
+          "documentSymbol" : {
+            "dynamicRegistration" : false,
+            "hierarchicalDocumentSymbolSupport" : true
+          },
+          "foldingRange" : {
+            "dynamicRegistration" : false,
+            "lineFoldingOnly" : true
+          },
+          "formatting" : {
+            "dynamicRegistration" : false
+          },
+          "hover" : {
+            "contentFormat" : [ "markdown", "plaintext" ],
+            "dynamicRegistration" : false
+          },
+          "implementation" : {
+            "dynamicRegistration" : false,
+            "linkSupport" : true
+          },
+          "inlayHint" : {
+            "dynamicRegistration" : false
+          },
+          "publishDiagnostics" : {
+            "relatedInformation" : true,
+            "tagSupport" : {
+              "valueSet" : [ 1, 2 ]
+            }
+          },
+          "rangeFormatting" : {
+            "dynamicRegistration" : false
+          },
+          "references" : {
+            "dynamicRegistration" : false
+          },
+          "rename" : {
+            "dynamicRegistration" : false,
+            "prepareSupport" : true
+          },
+          "selectionRange" : {
+            "dynamicRegistration" : false
+          },
+          "semanticTokens" : {
+            "dynamicRegistration" : false,
+            "formats" : [ "relative" ],
+            "requests" : {
+              "full" : {
+                "delta" : false
+              },
+              "range" : false
+            },
+            "tokenModifiers" : [ "abstract", "static", "final", "deprecated", "declaration", "documentation", "public", "private", "protected", "native", "generic", "typeArgument", "importDeclaration", "constructor" ],
+            "tokenTypes" : [ "namespace", "class", "interface", "enum", "enumMember", "type", "typeParameter", "method", "property", "variable", "parameter", "record", "recordComponent", "annotation", "annotationMember", "modifier", "keyword", "comment", "string", "number", "operator" ]
+          },
+          "signatureHelp" : {
+            "dynamicRegistration" : false,
+            "signatureInformation" : {
+              "documentationFormat" : [ "markdown", "plaintext" ],
+              "parameterInformation" : {
+                "labelOffsetSupport" : true
+              }
+            }
+          },
+          "synchronization" : {
+            "didSave" : true,
+            "dynamicRegistration" : false,
+            "willSave" : false
+          },
+          "typeDefinition" : {
+            "dynamicRegistration" : false,
+            "linkSupport" : true
+          },
+          "typeHierarchy" : {
+            "dynamicRegistration" : false
+          }
+        },
+        "window" : {
+          "showMessage" : {
+            "messageActionItem" : {
+              "additionalPropertiesSupport" : false
+            }
+          },
+          "workDoneProgress" : true
+        },
+        "workspace" : {
+          "applyEdit" : false,
+          "codeLens" : {
+            "refreshSupport" : true
+          },
+          "configuration" : true,
+          "didChangeWatchedFiles" : {
+            "dynamicRegistration" : false,
+            "relativePatternSupport" : false
+          },
+          "executeCommand" : {
+            "dynamicRegistration" : false
+          },
+          "symbol" : {
+            "dynamicRegistration" : false
+          },
+          "workspaceEdit" : {
+            "documentChanges" : true,
+            "resourceOperations" : [ "create", "rename", "delete" ]
+          },
+          "workspaceFolders" : true
+        }
+      },
+      "initializationOptions" : {
+        "extendedClientCapabilities" : {
+          "advancedGenerateAccessorsSupport" : true,
+          "advancedOrganizeImportsSupport" : true,
+          "classFileContentsSupport" : true,
+          "generateConstructorsPromptSupport" : true,
+          "generateDelegateMethodsPromptSupport" : true,
+          "generateToStringPromptSupport" : true,
+          "hashCodeEqualsPromptSupport" : true,
+          "overrideMethodsPromptSupport" : true,
+          "progressReportProvider" : true
+        },
+        "settings" : {
+          "java" : {
+            "autobuild" : {
+              "enabled" : false
+            },
+            "completion" : {
+              "enabled" : true,
+              "favoriteStaticMembers" : [ "org.junit.jupiter.api.Assertions.*", "org.junit.jupiter.api.Assumptions.*", "org.mockito.Mockito.*", "org.mockito.ArgumentMatchers.*", "org.assertj.core.api.Assertions.*", "org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*", "org.springframework.test.web.servlet.result.MockMvcResultMatchers.*", "java.util.Objects.requireNonNull" ],
+              "filteredTypes" : [ "com.sun.*", "sun.*", "jdk.internal.*", "org.graalvm.*", "io.micrometer.shaded.*" ],
+              "guessMethodArguments" : true,
+              "importOrder" : [ "java", "javax", "jakarta", "org", "com" ]
+            },
+            "configuration" : {
+              "maven" : {
+                "userSettings" : "<HOME>\\.m2\\settings.xml"
+              },
+              "runtimes" : [ {
+                "default" : true,
+                "name" : "JavaSE-25",
+                "path" : "<JAVA_HOME>"
+              } ],
+              "updateBuildConfiguration" : "automatic"
+            },
+            "contentProvider" : {
+              "preferred" : "fernflower"
+            },
+            "edit" : {
+              "validateAllOpenBuffersOnChanges" : false
+            },
+            "errors" : {
+              "incompleteClasspath" : {
+                "severity" : "warning"
+              }
+            },
+            "format" : {
+              "comments" : {
+                "enabled" : true
+              },
+              "enabled" : true,
+              "onType" : {
+                "enabled" : false
+              }
+            },
+            "home" : "<JAVA_HOME>",
+            "implementationCodeLens" : "all",
+            "import" : {
+              "exclusions" : [ "**/node_modules/**", "**/.metadata/**", "**/target/**", "**/build/**", "**/.orion/**" ],
+              "generatesMetadataFilesAtProjectRoot" : false,
+              "gradle" : {
+                "enabled" : true,
+                "wrapper" : {
+                  "enabled" : true
+                }
+              },
+              "maven" : {
+                "enabled" : true
+              }
+            },
+            "inlayHints" : {
+              "parameterNames" : {
+                "enabled" : "literals"
+              },
+              "parameterTypes" : {
+                "enabled" : false
+              },
+              "variableTypes" : {
+                "enabled" : false
+              }
+            },
+            "jdt" : {
+              "ls" : {
+                "lombokSupport" : {
+                  "enabled" : true
+                }
+              }
+            },
+            "maxConcurrentBuilds" : 4,
+            "references" : {
+              "includeDecompiledSources" : true
+            },
+            "referencesCodeLens" : {
+              "enabled" : true
+            },
+            "signatureHelp" : {
+              "description" : {
+                "enabled" : true
+              },
+              "enabled" : true
+            },
+            "sources" : {
+              "organizeImports" : {
+                "starThreshold" : 99,
+                "staticStarThreshold" : 99
+              }
+            },
+            "symbols" : {
+              "includeSourceMethodDeclarations" : true
+            }
+          }
+        }
+      },
+      "rootUri" : "file://<PROJECT>/",
+      "workspaceFolders" : [ {
+        "name" : "wire",
+        "uri" : "file://<PROJECT>/"
+      } ]
+    } ],
+    "initialized" : [ { } ],
+    "java/checkConstructorsStatus" : [ {
+      "context" : {
+        "diagnostics" : [ ]
+      },
+      "range" : {
+        "end" : {
+          "character" : 4,
+          "line" : 4
+        },
+        "start" : {
+          "character" : 4,
+          "line" : 4
+        }
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "java/checkDelegateMethodsStatus" : [ {
+      "context" : {
+        "diagnostics" : [ ]
+      },
+      "range" : {
+        "end" : {
+          "character" : 4,
+          "line" : 4
+        },
+        "start" : {
+          "character" : 4,
+          "line" : 4
+        }
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "java/checkHashCodeEqualsStatus" : [ {
+      "context" : {
+        "diagnostics" : [ ]
+      },
+      "range" : {
+        "end" : {
+          "character" : 4,
+          "line" : 4
+        },
+        "start" : {
+          "character" : 4,
+          "line" : 4
+        }
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "java/checkToStringStatus" : [ {
+      "context" : {
+        "diagnostics" : [ ]
+      },
+      "range" : {
+        "end" : {
+          "character" : 4,
+          "line" : 4
+        },
+        "start" : {
+          "character" : 4,
+          "line" : 4
+        }
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "java/classFileContents" : [ {
+      "uri" : "jdt://contents/rt.jar/java.lang/String.class"
+    } ],
+    "java/listOverridableMethods" : [ {
+      "context" : {
+        "diagnostics" : [ ]
+      },
+      "range" : {
+        "end" : {
+          "character" : 4,
+          "line" : 4
+        },
+        "start" : {
+          "character" : 4,
+          "line" : 4
+        }
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "java/projectConfigurationUpdate" : [ {
+      "uri" : "file://<PROJECT>/"
+    } ],
+    "java/resolveUnimplementedAccessors" : [ {
+      "context" : {
+        "diagnostics" : [ ]
+      },
+      "kind" : 2,
+      "range" : {
+        "end" : {
+          "character" : 4,
+          "line" : 4
+        },
+        "start" : {
+          "character" : 4,
+          "line" : 4
+        }
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "response:cfg-1" : [ [ {
+      "comments" : {
+        "enabled" : true
+      },
+      "enabled" : true,
+      "onType" : {
+        "enabled" : false
+      }
+    }, {
+      "enabled" : true,
+      "favoriteStaticMembers" : [ "org.junit.jupiter.api.Assertions.*", "org.junit.jupiter.api.Assumptions.*", "org.mockito.Mockito.*", "org.mockito.ArgumentMatchers.*", "org.assertj.core.api.Assertions.*", "org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*", "org.springframework.test.web.servlet.result.MockMvcResultMatchers.*", "java.util.Objects.requireNonNull" ],
+      "filteredTypes" : [ "com.sun.*", "sun.*", "jdk.internal.*", "org.graalvm.*", "io.micrometer.shaded.*" ],
+      "guessMethodArguments" : true,
+      "importOrder" : [ "java", "javax", "jakarta", "org", "com" ]
+    }, {
+      "java" : {
+        "autobuild" : {
+          "enabled" : false
+        },
+        "completion" : {
+          "enabled" : true,
+          "favoriteStaticMembers" : [ "org.junit.jupiter.api.Assertions.*", "org.junit.jupiter.api.Assumptions.*", "org.mockito.Mockito.*", "org.mockito.ArgumentMatchers.*", "org.assertj.core.api.Assertions.*", "org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*", "org.springframework.test.web.servlet.result.MockMvcResultMatchers.*", "java.util.Objects.requireNonNull" ],
+          "filteredTypes" : [ "com.sun.*", "sun.*", "jdk.internal.*", "org.graalvm.*", "io.micrometer.shaded.*" ],
+          "guessMethodArguments" : true,
+          "importOrder" : [ "java", "javax", "jakarta", "org", "com" ]
+        },
+        "configuration" : {
+          "maven" : {
+            "userSettings" : "<HOME>\\.m2\\settings.xml"
+          },
+          "runtimes" : [ {
+            "default" : true,
+            "name" : "JavaSE-25",
+            "path" : "<JAVA_HOME>"
+          } ],
+          "updateBuildConfiguration" : "automatic"
+        },
+        "contentProvider" : {
+          "preferred" : "fernflower"
+        },
+        "edit" : {
+          "validateAllOpenBuffersOnChanges" : false
+        },
+        "errors" : {
+          "incompleteClasspath" : {
+            "severity" : "warning"
+          }
+        },
+        "format" : {
+          "comments" : {
+            "enabled" : true
+          },
+          "enabled" : true,
+          "onType" : {
+            "enabled" : false
+          }
+        },
+        "home" : "<JAVA_HOME>",
+        "implementationCodeLens" : "all",
+        "import" : {
+          "exclusions" : [ "**/node_modules/**", "**/.metadata/**", "**/target/**", "**/build/**", "**/.orion/**" ],
+          "generatesMetadataFilesAtProjectRoot" : false,
+          "gradle" : {
+            "enabled" : true,
+            "wrapper" : {
+              "enabled" : true
+            }
+          },
+          "maven" : {
+            "enabled" : true
+          }
+        },
+        "inlayHints" : {
+          "parameterNames" : {
+            "enabled" : "literals"
+          },
+          "parameterTypes" : {
+            "enabled" : false
+          },
+          "variableTypes" : {
+            "enabled" : false
+          }
+        },
+        "jdt" : {
+          "ls" : {
+            "lombokSupport" : {
+              "enabled" : true
+            }
+          }
+        },
+        "maxConcurrentBuilds" : 4,
+        "references" : {
+          "includeDecompiledSources" : true
+        },
+        "referencesCodeLens" : {
+          "enabled" : true
+        },
+        "signatureHelp" : {
+          "description" : {
+            "enabled" : true
+          },
+          "enabled" : true
+        },
+        "sources" : {
+          "organizeImports" : {
+            "starThreshold" : 99,
+            "staticStarThreshold" : 99
+          }
+        },
+        "symbols" : {
+          "includeSourceMethodDeclarations" : true
+        }
+      }
+    } ] ],
+    "shutdown" : [ { } ],
+    "textDocument/codeAction" : [ {
+      "context" : {
+        "diagnostics" : [ ]
+      },
+      "range" : {
+        "end" : {
+          "character" : 23,
+          "line" : 6
+        },
+        "start" : {
+          "character" : 20,
+          "line" : 6
+        }
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/codeLens" : [ {
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/completion" : [ {
+      "context" : {
+        "triggerCharacter" : ".",
+        "triggerKind" : 2
+      },
+      "position" : {
+        "character" : 24,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/definition" : [ {
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/didChange" : [ {
+      "contentChanges" : [ {
+        "range" : {
+          "end" : {
+            "character" : 32,
+            "line" : 6
+          },
+          "start" : {
+            "character" : 24,
+            "line" : 6
+          }
+        },
+        "rangeLength" : 8,
+        "text" : ""
+      } ],
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java",
+        "version" : 2
+      }
+    }, {
+      "contentChanges" : [ {
+        "range" : {
+          "end" : {
+            "character" : 24,
+            "line" : 6
+          },
+          "start" : {
+            "character" : 24,
+            "line" : 6
+          }
+        },
+        "rangeLength" : 0,
+        "text" : "length()"
+      } ],
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java",
+        "version" : 3
+      }
+    } ],
+    "textDocument/didClose" : [ {
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/didOpen" : [ {
+      "textDocument" : {
+        "languageId" : "java",
+        "text" : "package demo;\n\npublic class Demo {\n    private String name = \"x\";\n\n    int size() {\n        int size = name.length();\n        return size;\n    }\n}\n",
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java",
+        "version" : 1
+      }
+    } ],
+    "textDocument/didSave" : [ {
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/documentHighlight" : [ {
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/documentSymbol" : [ {
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/foldingRange" : [ {
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/formatting" : [ {
+      "options" : {
+        "insertSpaces" : true,
+        "tabSize" : 4
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/hover" : [ {
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/implementation" : [ {
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/inlayHint" : [ {
+      "range" : {
+        "end" : {
+          "character" : 0,
+          "line" : 10
+        },
+        "start" : {
+          "character" : 0,
+          "line" : 0
+        }
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/prepareCallHierarchy" : [ {
+      "position" : {
+        "character" : 6,
+        "line" : 5
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/prepareRename" : [ {
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    }, {
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/prepareTypeHierarchy" : [ {
+      "position" : {
+        "character" : 14,
+        "line" : 2
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/references" : [ {
+      "context" : {
+        "includeDeclaration" : false
+      },
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/rename" : [ {
+      "newName" : "label",
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/selectionRange" : [ {
+      "positions" : [ {
+        "character" : 20,
+        "line" : 6
+      } ],
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/semanticTokens/full" : [ {
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "textDocument/signatureHelp" : [ {
+      "position" : {
+        "character" : 20,
+        "line" : 6
+      },
+      "textDocument" : {
+        "uri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      }
+    } ],
+    "workspace/didChangeConfiguration" : [ {
+      "settings" : {
+        "java" : {
+          "autobuild" : {
+            "enabled" : false
+          },
+          "completion" : {
+            "enabled" : true,
+            "favoriteStaticMembers" : [ "org.junit.jupiter.api.Assertions.*", "org.junit.jupiter.api.Assumptions.*", "org.mockito.Mockito.*", "org.mockito.ArgumentMatchers.*", "org.assertj.core.api.Assertions.*", "org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*", "org.springframework.test.web.servlet.result.MockMvcResultMatchers.*", "java.util.Objects.requireNonNull" ],
+            "filteredTypes" : [ "com.sun.*", "sun.*", "jdk.internal.*", "org.graalvm.*", "io.micrometer.shaded.*" ],
+            "guessMethodArguments" : true,
+            "importOrder" : [ "java", "javax", "jakarta", "org", "com" ]
+          },
+          "configuration" : {
+            "maven" : {
+              "userSettings" : "<HOME>\\.m2\\settings.xml"
+            },
+            "runtimes" : [ {
+              "default" : true,
+              "name" : "JavaSE-25",
+              "path" : "<JAVA_HOME>"
+            } ],
+            "updateBuildConfiguration" : "automatic"
+          },
+          "contentProvider" : {
+            "preferred" : "fernflower"
+          },
+          "edit" : {
+            "validateAllOpenBuffersOnChanges" : false
+          },
+          "errors" : {
+            "incompleteClasspath" : {
+              "severity" : "warning"
+            }
+          },
+          "format" : {
+            "comments" : {
+              "enabled" : true
+            },
+            "enabled" : true,
+            "onType" : {
+              "enabled" : false
+            }
+          },
+          "home" : "<JAVA_HOME>",
+          "implementationCodeLens" : "all",
+          "import" : {
+            "exclusions" : [ "**/node_modules/**", "**/.metadata/**", "**/target/**", "**/build/**", "**/.orion/**" ],
+            "generatesMetadataFilesAtProjectRoot" : false,
+            "gradle" : {
+              "enabled" : true,
+              "wrapper" : {
+                "enabled" : true
+              }
+            },
+            "maven" : {
+              "enabled" : true
+            }
+          },
+          "inlayHints" : {
+            "parameterNames" : {
+              "enabled" : "literals"
+            },
+            "parameterTypes" : {
+              "enabled" : false
+            },
+            "variableTypes" : {
+              "enabled" : false
+            }
+          },
+          "jdt" : {
+            "ls" : {
+              "lombokSupport" : {
+                "enabled" : true
+              }
+            }
+          },
+          "maxConcurrentBuilds" : 4,
+          "references" : {
+            "includeDecompiledSources" : true
+          },
+          "referencesCodeLens" : {
+            "enabled" : true
+          },
+          "signatureHelp" : {
+            "description" : {
+              "enabled" : true
+            },
+            "enabled" : true
+          },
+          "sources" : {
+            "organizeImports" : {
+              "starThreshold" : 99,
+              "staticStarThreshold" : 99
+            }
+          },
+          "symbols" : {
+            "includeSourceMethodDeclarations" : true
+          }
+        }
+      }
+    }, {
+      "settings" : {
+        "java" : {
+          "autobuild" : {
+            "enabled" : false
+          },
+          "completion" : {
+            "enabled" : true,
+            "favoriteStaticMembers" : [ "org.junit.jupiter.api.Assertions.*", "org.junit.jupiter.api.Assumptions.*", "org.mockito.Mockito.*", "org.mockito.ArgumentMatchers.*", "org.assertj.core.api.Assertions.*", "org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*", "org.springframework.test.web.servlet.result.MockMvcResultMatchers.*", "java.util.Objects.requireNonNull" ],
+            "filteredTypes" : [ "com.sun.*", "sun.*", "jdk.internal.*", "org.graalvm.*", "io.micrometer.shaded.*" ],
+            "guessMethodArguments" : true,
+            "importOrder" : [ "java", "javax", "jakarta", "org", "com" ]
+          },
+          "configuration" : {
+            "maven" : {
+              "userSettings" : "<HOME>\\.m2\\settings.xml"
+            },
+            "runtimes" : [ {
+              "default" : true,
+              "name" : "JavaSE-25",
+              "path" : "<JAVA_HOME>"
+            } ],
+            "updateBuildConfiguration" : "automatic"
+          },
+          "contentProvider" : {
+            "preferred" : "fernflower"
+          },
+          "edit" : {
+            "validateAllOpenBuffersOnChanges" : false
+          },
+          "errors" : {
+            "incompleteClasspath" : {
+              "severity" : "warning"
+            }
+          },
+          "format" : {
+            "comments" : {
+              "enabled" : true
+            },
+            "enabled" : true,
+            "onType" : {
+              "enabled" : false
+            }
+          },
+          "home" : "<JAVA_HOME>",
+          "implementationCodeLens" : "all",
+          "import" : {
+            "exclusions" : [ "**/node_modules/**", "**/.metadata/**", "**/target/**", "**/build/**", "**/.orion/**" ],
+            "generatesMetadataFilesAtProjectRoot" : false,
+            "gradle" : {
+              "enabled" : true,
+              "wrapper" : {
+                "enabled" : true
+              }
+            },
+            "maven" : {
+              "enabled" : true
+            }
+          },
+          "inlayHints" : {
+            "parameterNames" : {
+              "enabled" : "literals"
+            },
+            "parameterTypes" : {
+              "enabled" : false
+            },
+            "variableTypes" : {
+              "enabled" : false
+            }
+          },
+          "jdt" : {
+            "ls" : {
+              "lombokSupport" : {
+                "enabled" : true
+              }
+            }
+          },
+          "maxConcurrentBuilds" : 4,
+          "references" : {
+            "includeDecompiledSources" : true
+          },
+          "referencesCodeLens" : {
+            "enabled" : true
+          },
+          "signatureHelp" : {
+            "description" : {
+              "enabled" : true
+            },
+            "enabled" : true
+          },
+          "sources" : {
+            "organizeImports" : {
+              "starThreshold" : 99,
+              "staticStarThreshold" : 99
+            }
+          },
+          "symbols" : {
+            "includeSourceMethodDeclarations" : true
+          }
+        }
+      }
+    }, {
+      "settings" : {
+        "java" : {
+          "autobuild" : {
+            "enabled" : false
+          },
+          "completion" : {
+            "enabled" : true,
+            "favoriteStaticMembers" : [ "org.junit.jupiter.api.Assertions.*", "org.junit.jupiter.api.Assumptions.*", "org.mockito.Mockito.*", "org.mockito.ArgumentMatchers.*", "org.assertj.core.api.Assertions.*", "org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*", "org.springframework.test.web.servlet.result.MockMvcResultMatchers.*", "java.util.Objects.requireNonNull" ],
+            "filteredTypes" : [ "com.sun.*", "sun.*", "jdk.internal.*", "org.graalvm.*", "io.micrometer.shaded.*" ],
+            "guessMethodArguments" : true,
+            "importOrder" : [ "java", "javax", "jakarta", "org", "com" ]
+          },
+          "configuration" : {
+            "maven" : {
+              "userSettings" : "<HOME>\\.m2\\settings.xml"
+            },
+            "runtimes" : [ {
+              "default" : true,
+              "name" : "JavaSE-25",
+              "path" : "<JAVA_HOME>"
+            } ],
+            "updateBuildConfiguration" : "automatic"
+          },
+          "contentProvider" : {
+            "preferred" : "fernflower"
+          },
+          "edit" : {
+            "validateAllOpenBuffersOnChanges" : false
+          },
+          "errors" : {
+            "incompleteClasspath" : {
+              "severity" : "warning"
+            }
+          },
+          "format" : {
+            "comments" : {
+              "enabled" : true
+            },
+            "enabled" : true,
+            "onType" : {
+              "enabled" : false
+            }
+          },
+          "home" : "<JAVA_HOME>",
+          "implementationCodeLens" : "all",
+          "import" : {
+            "exclusions" : [ "**/node_modules/**", "**/.metadata/**", "**/target/**", "**/build/**", "**/.orion/**" ],
+            "generatesMetadataFilesAtProjectRoot" : false,
+            "gradle" : {
+              "enabled" : true,
+              "wrapper" : {
+                "enabled" : true
+              }
+            },
+            "maven" : {
+              "enabled" : true
+            }
+          },
+          "inlayHints" : {
+            "parameterNames" : {
+              "enabled" : "all"
+            },
+            "parameterTypes" : {
+              "enabled" : true
+            },
+            "variableTypes" : {
+              "enabled" : true
+            }
+          },
+          "jdt" : {
+            "ls" : {
+              "lombokSupport" : {
+                "enabled" : true
+              }
+            }
+          },
+          "maxConcurrentBuilds" : 4,
+          "references" : {
+            "includeDecompiledSources" : true
+          },
+          "referencesCodeLens" : {
+            "enabled" : true
+          },
+          "signatureHelp" : {
+            "description" : {
+              "enabled" : true
+            },
+            "enabled" : true
+          },
+          "sources" : {
+            "organizeImports" : {
+              "starThreshold" : 99,
+              "staticStarThreshold" : 99
+            }
+          },
+          "symbols" : {
+            "includeSourceMethodDeclarations" : true
+          }
+        }
+      }
+    } ],
+    "workspace/didChangeWatchedFiles" : [ {
+      "changes" : [ {
+        "type" : 1,
+        "uri" : "file://<PROJECT>/src/main/java/demo/extra.java"
+      } ]
+    } ],
+    "workspace/executeCommand" : [ {
+      "arguments" : [ ],
+      "command" : "java.project.getAll"
+    }, {
+      "arguments" : [ "file://<PROJECT>/", "{\"scope\":\"runtime\"}" ],
+      "command" : "java.project.getClasspaths"
+    } ],
+    "workspace/symbol" : [ {
+      "query" : "Demo"
+    } ],
+    "workspace/willRenameFiles" : [ {
+      "files" : [ {
+        "newUri" : "file://<PROJECT>/src/main/java/demo/Renamed.java",
+        "oldUri" : "file://<PROJECT>/src/main/java/demo/Demo.java"
+      } ]
+    } ]
+  }
+}

@@ -5583,20 +5583,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         else runSourceAction(selected, context);
     }
 
-    private static String sourceActionTitle(String command, String fallback) {
-        return switch (command) {
-            case JdtLsService.GENERATE_CONSTRUCTORS_PROMPT ->
-                    text("generate.constructor", "Constructor...");
-            case JdtLsService.GENERATE_ACCESSORS_PROMPT ->
-                    text("generate.accessors", "Getter and Setter...");
-            case JdtLsService.HASHCODE_EQUALS_PROMPT -> "equals() and hashCode()...";
-            case JdtLsService.GENERATE_TOSTRING_PROMPT -> "toString()...";
-            case JdtLsService.GENERATE_DELEGATE_METHODS_PROMPT ->
-                    text("generate.delegate", "Delegate Methods...");
-            default -> fallback;
-        };
-    }
-
     private void runSourceAction(String command, IdeEditorContext context) {
         if (context == null || !JavaProjectConventions.isJava(context.filePath())) return;
         switch (command) {

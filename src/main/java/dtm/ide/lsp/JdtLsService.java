@@ -114,9 +114,6 @@ public class JdtLsService {
         }
     }
 
-    public record SourceAction(String title, String command) {
-    }
-
     public record SourceItem(JsonNode value, String label, String detail, boolean selected) {
     }
 
@@ -400,10 +397,6 @@ public class JdtLsService {
         }
         lombokAgentJar = jar;
         return true;
-    }
-
-    public Path getLombokAgentJar() {
-        return lombokAgentJar;
     }
 
     public boolean needsRestartForLombokAgent() {
@@ -2642,57 +2635,6 @@ public class JdtLsService {
         return content.isBlank() ? null : content;
     }
 
-    public List<Location> implementations(Path filePath, String text, int line, int col) {
-        return implementations(filePath, text, line, col, false);
-    }
-
-    public List<Location> implementationsInteractive(Path filePath, String text, int line, int col) {
-        return implementations(filePath, text, line, col, true);
-    }
-
-    private List<Location> implementations(Path filePath, String text, int line, int col,
-                                           boolean interactive) {
-        if (!capabilities.implementation()) {
-            return List.of();
-        }
-        return navigate("textDocument/implementation", filePath, text, line, col,
-                interactive, null);
-    }
-
-    public List<Location> typeDefinitions(Path filePath, String text, int line, int col) {
-        return typeDefinitions(filePath, text, line, col, false);
-    }
-
-    public List<Location> typeDefinitionsInteractive(Path filePath, String text, int line, int col) {
-        return typeDefinitions(filePath, text, line, col, true);
-    }
-
-    private List<Location> typeDefinitions(Path filePath, String text, int line, int col,
-                                           boolean interactive) {
-        if (!capabilities.typeDefinition()) {
-            return List.of();
-        }
-        return navigate("textDocument/typeDefinition", filePath, text, line, col,
-                interactive, null);
-    }
-
-    public List<Location> references(Path filePath, String text, int line, int col) {
-        return references(filePath, text, line, col, false);
-    }
-
-    public List<Location> referencesInteractive(Path filePath, String text, int line, int col) {
-        return references(filePath, text, line, col, true);
-    }
-
-    private List<Location> references(Path filePath, String text, int line, int col,
-                                      boolean interactive) {
-        if (!capabilities.references()) {
-            return List.of();
-        }
-        return navigate("textDocument/references", filePath, text, line, col, interactive,
-                Map.of("context", Map.of("includeDeclaration", false)));
-    }
-
     public boolean supportsTypeHierarchy() {
         return capabilities.typeHierarchy();
     }
@@ -3290,39 +3232,6 @@ public class JdtLsService {
             ImportCandidates.merge(candidates, ImportCandidates.fromActions(result));
         }
         return new ImportCandidates.Lookup(true, candidates, unresolved.keySet());
-    }
-
-    public List<SourceAction> sourceActions(Path filePath, String text, int line, int col) {
-        if (!capabilities.codeAction()) {
-            return List.of();
-        }
-        Map<String, Object> params = sourceActionParams(filePath, text, line, col);
-        if (params == null) {
-            return List.of();
-        }
-        @SuppressWarnings("unchecked")
-        Map<String, Object> context = (Map<String, Object>) params.get("context");
-        Map<String, Object> filteredContext = new LinkedHashMap<>(context);
-        filteredContext.put("only", List.of("source"));
-        params.put("context", filteredContext);
-        JsonNode result = request("textDocument/codeAction", params, REQUEST_TIMEOUT_MS * 2);
-        if (result == null || !result.isArray()) {
-            return List.of();
-        }
-        Map<String, SourceAction> unique = new LinkedHashMap<>();
-        for (JsonNode action : result) {
-            JsonNode command = action.path("command");
-            if (command.isTextual()) {
-                command = action;
-            }
-            String id = command.path("command").asText("");
-            if (!isSourcePrompt(id)) {
-                continue;
-            }
-            String title = action.path("title").asText(command.path("title").asText(id));
-            unique.putIfAbsent(id, new SourceAction(title, id));
-        }
-        return List.copyOf(unique.values());
     }
 
     public record TypeSymbol(String qualifiedName, boolean isInterface) {
