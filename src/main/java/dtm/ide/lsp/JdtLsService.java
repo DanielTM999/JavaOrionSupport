@@ -90,9 +90,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     private static final long INITIALIZE_CEILING_MS = 900_000;
     private static final long INITIALIZE_WAIT_SLICE_MS = 5_000;
-    private static final long SERVICE_READY_TIMEOUT_MS = 300_000;
-    private static final long SERVICE_READY_POLL_MS = 250;
-    private static final long SERVICE_READY_AFTER_PROJECTS_MS = 30_000;
     private static final long SHUTDOWN_TIMEOUT_MS = 10_000;
     private static final long EXIT_TIMEOUT_MS = 5_000;
     private static final long UNLOAD_SHUTDOWN_TIMEOUT_MS = 500;
@@ -915,7 +912,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             flushOpenDocuments();
             drainPendingWatchedFiles();
             provisionBundlesInBackground(progress);
-            awaitWorkspaceReady(rpc, launchGeneration);
+            dialect.awaitWorkspaceReady(rpc, serviceReadyLatch, () -> isCurrent(launchGeneration));
             if (startupFailure != null) {
                 throw new IllegalStateException(startupFailure);
             }
@@ -1072,48 +1069,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                     throw new IllegalStateException("o processo do JDT LS encerrou durante a inicializacao");
                 }
                 onWaiting.accept(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
-            }
-        }
-    }
-
-    private void awaitWorkspaceReady(LspJsonRpcClient rpc, long launchGeneration) throws Exception {
-        if (rpc == null) {
-            throw new IllegalStateException("Cliente LSP indisponivel durante a indexacao");
-        }
-        CountDownLatch ready = serviceReadyLatch;
-        CompletableFuture<JsonNode> projects = rpc.request("workspace/executeCommand", Map.of(
-                "command", "java.project.getAll",
-                "arguments", List.of()));
-        long deadline = System.nanoTime()
-                + TimeUnit.MILLISECONDS.toNanos(SERVICE_READY_TIMEOUT_MS);
-        long projectsListedAt = 0L;
-        try {
-            while (System.nanoTime() < deadline) {
-                if (ready.await(SERVICE_READY_POLL_MS, TimeUnit.MILLISECONDS)) {
-                    projects.cancel(false);
-                    return;
-                }
-                if (!isCurrent(launchGeneration)) {
-                    projects.cancel(false);
-                    return;
-                }
-                if (projects.isDone()) {
-                    if (projectsListedAt == 0L) {
-                        projects.get();
-                        projectsListedAt = System.nanoTime();
-                    } else if (System.nanoTime() - projectsListedAt
-                            >= TimeUnit.MILLISECONDS.toNanos(SERVICE_READY_AFTER_PROJECTS_MS)) {
-                        log.info("JDT LS listou os projetos mas nao enviou ServiceReady em {} ms",
-                                SERVICE_READY_AFTER_PROJECTS_MS);
-                        return;
-                    }
-                }
-            }
-            projects.cancel(false);
-            log.info("JDT LS ainda indexando apos {} ms; liberando o IntelliSense", SERVICE_READY_TIMEOUT_MS);
-        } catch (Exception commandFailure) {
-            if (ready.getCount() > 0) {
-                throw commandFailure;
             }
         }
     }
@@ -1537,7 +1492,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return;
         }
         String message = params.path("message").asText("");
-        if ("ServiceReady".equalsIgnoreCase(params.path("type").asText(""))) {
+        if (dialect.isReadyStatus(params)) {
             serviceReadyLatch.countDown();
             return;
         }
