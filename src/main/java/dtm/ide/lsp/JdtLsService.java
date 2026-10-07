@@ -147,7 +147,8 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private volatile Path lombokAgentJar;
     private volatile Path launchedLombokAgentJar;
     private volatile boolean springSupport;
-    private final JdtDialect dialect = new JdtDialect();
+    private final JdtDialect dialect = new JdtDialect(progressAggregator, this::publishProgress,
+            () -> serviceReadyLatch);
     private volatile Map<String, Object> effectiveSettings = Map.of();
     private volatile Consumer<Path> onCodeLensRefresh = path -> {
     };
@@ -558,7 +559,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
         @Override
         public void onLanguageStatus(JsonNode params) {
-            JdtLsService.this.onLanguageStatus(params);
+            dialect.onLanguageStatus(params);
         }
 
         @Override
@@ -573,7 +574,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
         @Override
         public void onProgressReport(JsonNode params) {
-            JdtLsService.this.onProgressReport(params);
+            dialect.onProgressReport(params);
         }
 
         @Override
@@ -1434,20 +1435,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         diagnosticsStore.settle();
     }
 
-    private void onLanguageStatus(JsonNode params) {
-        if (params == null) {
-            return;
-        }
-        String message = params.path("message").asText("");
-        if (dialect.isReadyStatus(params)) {
-            serviceReadyLatch.countDown();
-            return;
-        }
-        if (!message.isBlank()) {
-            publishProgress(progressAggregator.status(message));
-        }
-    }
-
     private void publishProgress(LspProgressAggregator.Snapshot snapshot) {
         LanguageServerState current = state;
         if (current == LanguageServerState.READY) {
@@ -1462,24 +1449,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (current == LanguageServerState.STARTING || current == LanguageServerState.INDEXING) {
             statusListener.onStatus("Java: " + snapshot.label(), snapshot.percent());
         }
-    }
-
-    private void onProgressReport(JsonNode params) {
-        if (params == null) {
-            return;
-        }
-        String token = "report:" + params.path("id").asText("");
-        String task = params.path("task").asText("");
-        String status = params.path("status").asText("");
-        if (status.isBlank()) {
-            status = params.path("subTask").asText("");
-        }
-        long total = params.path("totalWork").asLong(0);
-        long done = params.path("workDone").asLong(0);
-        int percent = total > 0 ? (int) Math.min(100, done * 100 / total) : -1;
-        publishProgress(params.path("complete").asBoolean(false)
-                ? progressAggregator.end(token)
-                : progressAggregator.report(token, task, status, percent));
     }
 
     private void onServerLogMessage(JsonNode params) {

@@ -12,4 +12,6 @@ interface ServerDialect {
     void awaitWorkspaceReady(LspJsonRpcClient rpc, CountDownLatch ready,
                              BooleanSupplier current) throws Exception;
     boolean isReadyStatus(JsonNode params);
+    void onLanguageStatus(JsonNode params);
+    void onProgressReport(JsonNode params);
 }
