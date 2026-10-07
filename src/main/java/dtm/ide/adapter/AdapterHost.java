@@ -4,6 +4,7 @@ import dtm.ide.api.extension.PlatformPopupBuilder;
 import dtm.ide.api.extension.output.OutputPanelHandle;
 import dtm.ide.api.extension.output.OutputPanelOptions;
 import dtm.ide.api.extension.runconfig.RunConfigurationData;
+import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.build.MavenPluginGoals;
@@ -18,6 +19,7 @@ import dtm.ide.sdk.JdkService;
 import dtm.ide.settings.JavaPluginSettings;
 import dtm.ide.test.JavaTestRunner;
 import dtm.ide.ui.JavaBuildToolsPanel;
+import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaTodoPanel;
 
 import javax.swing.Icon;
@@ -26,6 +28,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -89,4 +92,8 @@ public interface AdapterHost extends AdapterContext {
     void requestSetRunButtonRunning(boolean running);
     void warmUpDebugAdapter();
     boolean hasRunningProcess();
+    JdkService currentJdkService();
+    JavaTestExplorerPanel testPanel();
+    Map<Path, IdeEditorContext> javaEditors();
+    void requestOpenFile(Path file);
 }

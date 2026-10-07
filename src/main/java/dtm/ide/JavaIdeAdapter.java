@@ -54,6 +54,7 @@ import dtm.ide.api.project.editor.IdeGhostTextContext;
 import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildToolsSupport;
+import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.ProjectStructureSupport;
@@ -389,8 +390,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final int DELETE_SEARCH_PARALLELISM = 4;
     private static final Set<Character> JAVA_COMPLETION_TRIGGER_CHARACTERS = Set.of('.', '@', '(', ':', '$');
     private static final Set<Character> BUILD_FILE_TRIGGER_CHARACTERS = Set.of('.', ':', '$', '<', '/', '\'', '"');
-    private static final long COVERAGE_POLL_INTERVAL_MS = 400L;
-    private static final long COVERAGE_SETTLE_TIMEOUT_MS = 5000L;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final int CODE_LENS_TOOLTIP_TARGETS = 8;
     private static final int NAVIGATION_RETRIES = 2;
@@ -716,17 +715,17 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public void clearCoverage() {
-            JavaIdeAdapter.this.clearCoverage();
+            coverageSupport.clear();
         }
 
         @Override
         public CoverageProvisioner coverageProvisioner() {
-            return JavaIdeAdapter.this.coverageProvisioner();
+            return coverageSupport.provisioner();
         }
 
         @Override
         public void readCoverage(Path execFile, JavaProjectDescriptor current) {
-            JavaIdeAdapter.this.readCoverage(execFile, current);
+            coverageSupport.readCoverage(execFile, current);
         }
 
         @Override
@@ -779,6 +778,26 @@ public class JavaIdeAdapter extends IdeAdapter {
         public boolean hasRunningProcess() {
             return JavaIdeAdapter.this.hasRunningProcess();
         }
+
+        @Override
+        public JdkService currentJdkService() {
+            return jdkService;
+        }
+
+        @Override
+        public JavaTestExplorerPanel testPanel() {
+            return testPanel;
+        }
+
+        @Override
+        public Map<Path, IdeEditorContext> javaEditors() {
+            return javaEditors;
+        }
+
+        @Override
+        public void requestOpenFile(Path file) {
+            JavaIdeAdapter.this.requestOpenFile(file);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -787,6 +806,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
     private final AdapterHost adapterHost = new HostBridge();
     private final SpringSupport spring = new SpringSupport(adapterHost);
+    private final CoverageSupport coverageSupport = new CoverageSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -889,8 +909,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile RunFormChoicesLoader runFormChoicesLoader;
     private volatile RunProcessHandle debugProcessHandle;
     private volatile JavaTestExplorerPanel testPanel;
-    private final CoverageStore coverageStore = new CoverageStore();
-    private volatile CoverageProvisioner coverageProvisioner;
     private volatile String testPanelId;
     private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
     private final Set<Path> pendingModuleDirectoryRenames = ConcurrentHashMap.newKeySet();
@@ -1025,8 +1043,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         problems.clearAll();
         diagnosticReanalysisRunning.set(false);
         refreshProblemsPanel();
-        clearCoverage();
-        detachAllCoverageGutters();
+        coverageSupport.clear();
+        coverageSupport.detachAllGutters();
         javaEditors.clear();
         diskBaseline.clear();
         lastEditorContents.clear();
@@ -1143,7 +1161,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         dependencyService = null;
         problems.clearAll();
         refreshProblemsPanel();
-        clearCoverage();
+        coverageSupport.clear();
         JavaLanguageServer lsp = jdtLs;
 
         background.submit(() -> {
@@ -1832,7 +1850,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         editorContext.setFoldingEnabled(true);
         editorContext.setAutoCompleteOnTyping(!debugActive.get());
         configureGhostText(editorContext);
-        installCoverageGutter(editorContext);
+        coverageSupport.installGutter(editorContext);
         installTestGutter(editorContext);
         installCodeActionCommandHandler(editorContext);
         installJavaShortcuts(editorContext);
@@ -3168,7 +3186,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void addCoverageLens(List<CodeLens> lenses, IdeCodeLensContext context) {
-        FileCoverage coverage = coverageStore.forFile(context.filePath()).orElse(null);
+        FileCoverage coverage = coverageSupport.store().forFile(context.filePath()).orElse(null);
         if (coverage == null || coverage.isEmpty()) {
             return;
         }
@@ -4875,166 +4893,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
 
-    private CoverageProvisioner coverageProvisioner() {
-        CoverageProvisioner existing = coverageProvisioner;
-        if (existing != null) {
-            return existing;
-        }
-        JdkService jdks = jdkService;
-        if (jdks == null) {
-            return null;
-        }
-        CoverageProvisioner created = new CoverageProvisioner(jdks);
-        coverageProvisioner = created;
-        return created;
-    }
-
-    private void readCoverage(Path execFile, JavaProjectDescriptor current) {
-        if (execFile == null || current == null) {
-            return;
-        }
-        List<Path> classDirectories = new ArrayList<>();
-        List<Path> sourceRoots = new ArrayList<>();
-        for (JavaModule module : current.modules()) {
-            if (module.outputDir() != null) {
-                classDirectories.add(module.outputDir());
-            }
-            sourceRoots.addAll(module.existingSourceRoots());
-            sourceRoots.addAll(module.existingTestRoots());
-        }
-        CoverageReadResult result = JacocoExecReader.read(execFile, classDirectories, sourceRoots);
-        if (!result.isSuccess()) {
-            setStatusBarText(coverageFailureText(result));
-            return;
-        }
-        coverageStore.set(result.report());
-        JavaTestExplorerPanel panel = testPanel;
-        if (panel != null) {
-            panel.setCoverage(result.report());
-        }
-        Path root = projectRoot;
-        if (root != null) {
-            requestRefreshCodeLenses(root);
-        }
-        SwingUtilities.invokeLater(this::refreshCoverageGutters);
-        setStatusBarText(coverageSummaryText(result.report()));
-        showCoveragePopup(result.report());
-    }
-
-    private void showCoveragePopup(CoverageReport report) {
-        if (report == null || report.totals().isEmpty()) {
-            return;
-        }
-        SwingUtilities.invokeLater(() -> showPopup(PlatformPopupBuilder.builder()
-                .component(new JavaCoveragePanel(report, this::openCoverageRow))
-                .title(text("coverage.popupTitle", "Cobertura de codigo"))
-                .size(760, 460)
-                .modalityType(java.awt.Dialog.ModalityType.MODELESS)
-                .build()));
-    }
-
-    private void openCoverageRow(JavaCoveragePanel.Row row) {
-        if (row == null || row.file() == null) {
-            return;
-        }
-        requestOpenFile(row.file());
-    }
-
-    private String coverageSummaryText(CoverageReport report) {
-        CoverageReport.Totals totals = report.totals();
-        if (totals.isEmpty()) {
-            return text("coverage.empty",
-                    "Java: nenhuma classe compilada foi coberta pela execucao");
-        }
-        return text("coverage.summary", "Java: cobertura")
-                + " " + CoverageDisplay.percent(totals.linePercentage())
-                + " (" + totals.coveredLines() + "/" + totals.totalLines() + " "
-                + text("coverage.lines", "linhas") + ")";
-    }
-
-    private static boolean awaitExecFile(Path execFile) {
-        long deadline = System.currentTimeMillis() + COVERAGE_SETTLE_TIMEOUT_MS;
-        long lastSize = -1;
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                if (Files.isRegularFile(execFile)) {
-                    long size = Files.size(execFile);
-                    if (size > 0 && size == lastSize) {
-                        return true;
-                    }
-                    lastSize = size;
-                }
-                Thread.sleep(COVERAGE_POLL_INTERVAL_MS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                return Files.isRegularFile(execFile);
-            } catch (Exception error) {
-                log.debug("Falha ao aguardar estabilizacao do arquivo de cobertura {}",
-                        execFile, error);
-                return Files.isRegularFile(execFile);
-            }
-        }
-        return Files.isRegularFile(execFile);
-    }
-
-    private String coverageFailureText(CoverageReadResult result) {
-        return switch (result.failure()) {
-            case MISSING_EXEC -> text("coverage.missingExec",
-                    "Java: a execucao nao gerou dados de cobertura");
-            case UNREADABLE_EXEC -> text("coverage.unreadableExec",
-                    "Java: dados de cobertura ilegiveis") + ": " + result.detail();
-            case UNSUPPORTED_BYTECODE -> text("coverage.unsupportedBytecode",
-                    "Java: cobertura indisponivel, bytecode nao suportado pela versao do JaCoCo");
-            case NO_CLASSES -> text("coverage.noClasses",
-                    "Java: compile o projeto antes de medir a cobertura");
-            case NONE -> "";
-        };
-    }
-
-    private void clearCoverage() {
-        coverageStore.clear();
-        JavaTestExplorerPanel panel = testPanel;
-        if (panel != null) {
-            panel.setCoverage(null);
-        }
-        SwingUtilities.invokeLater(this::refreshCoverageGutters);
-    }
-
-    private void detachCoverageGutter(Path filePath) {
-        IdeEditorContext context = javaEditors.get(JavaProjectConventions.normalize(filePath));
-        if (context != null) {
-            CoverageGutter.detach(context);
-        }
-    }
-
-    private void detachAllCoverageGutters() {
-        javaEditors.values().forEach(CoverageGutter::detach);
-    }
-
-    private void installCoverageGutter(IdeEditorContext context) {
-        if (context == null) {
-            return;
-        }
-        Path file = JavaProjectConventions.normalize(context.filePath());
-        if (file == null || !JavaProjectConventions.isJava(file)) {
-            return;
-        }
-        CoverageGutterLayer layer = CoverageGutter.attach(context);
-        if (layer == null) {
-            return;
-        }
-        if (settings().isCoverageGutter()) {
-            CoverageGutter.apply(layer, coverageStore.forFile(file).orElse(null));
-        } else {
-            CoverageGutter.clear(layer);
-        }
-        context.repaintGutter();
-    }
-
-    private void refreshCoverageGutters() {
-        javaEditors.values().forEach(this::installCoverageGutter);
-    }
-
     private void installTestGutter(IdeEditorContext context) {
         if (context == null) {
             return;
@@ -5061,37 +4919,13 @@ public class JavaIdeAdapter extends IdeAdapter {
                         action -> runTestFromLens(test, false))
                 .item(text("lens.debugAction", "Depurar"), JavaIcons.debug(JavaIcons.SMALL),
                         action -> runTestFromLens(test, true));
-        if (coverageSupportedForProject()) {
+        if (coverageSupport.supportedForProject()) {
             menu.item(text("action.runCoverage", "Rodar com cobertura"),
                     JavaIcons.test(JavaIcons.SMALL), action -> runTestWithCoverage(test));
         }
         menu.getMenu().getPopupMenu().show(event.getComponent(), event.getX(), event.getY());
     }
 
-
-    private void awaitCoverageRun(RunProcessHandle handle, Path execFile,
-                                  JavaProjectDescriptor current) {
-        if (handle == null) {
-            return;
-        }
-        background.submit(() -> {
-            while (handle.isAlive()) {
-                try {
-                    Thread.sleep(COVERAGE_POLL_INTERVAL_MS);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
-            awaitExecFile(execFile);
-            readCoverage(execFile, current);
-        });
-    }
-
-    private boolean coverageSupportedForProject() {
-        JavaProjectDescriptor current = descriptor;
-        return current != null && (current.isMaven() || current.isGradle());
-    }
 
     private void runTestWithCoverage(JavaTest test) {
         SwingUtilities.invokeLater(() -> {
@@ -5172,7 +5006,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public void onEditorOpen(IdeEditorContext editorContext) {
         configureGhostText(editorContext);
-        installCoverageGutter(editorContext);
+        coverageSupport.installGutter(editorContext);
         installTestGutter(editorContext);
         installCodeActionCommandHandler(editorContext);
         installJavaShortcuts(editorContext);
@@ -5835,7 +5669,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         JavaLanguageServer lsp = jdtLs;
         if (JavaProjectConventions.isJava(filePath)) {
-            detachCoverageGutter(filePath);
+            coverageSupport.detachGutter(filePath);
             javaEditors.remove(JavaProjectConventions.normalize(filePath));
             diskBaseline.remove(JavaProjectConventions.normalize(filePath));
             lastEditorContents.remove(JavaProjectConventions.normalize(filePath));
@@ -6965,7 +6799,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 cancelled -> ensureRunSupport().launchWithCoverage(resolved, context,
                         coverageArgument, cancelled));
         trackRunningProcess(configuration, handle);
-        awaitCoverageRun(handle, CoverageAgent.execFileFor(descriptor.root()), descriptor);
+        coverageSupport.awaitRun(handle, CoverageAgent.execFileFor(descriptor.root()), descriptor);
         return handle;
     }
 
@@ -6977,7 +6811,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (!JavaRunTypes.LOCAL_JVM.contains(configuration.getType())) {
             return null;
         }
-        CoverageProvisioner provisioner = coverageProvisioner();
+        CoverageProvisioner provisioner = coverageSupport.provisioner();
         Path agent = provisioner == null ? null : provisioner.ensureAgent().orElse(null);
         Path execFile = CoverageAgent.execFileFor(current.root());
         if (agent == null || execFile == null) {
@@ -7247,7 +7081,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void refreshCoverageButton() {
-        boolean available = coverageSupportedForProject() && coverageRunnableConfiguration();
+        boolean available = coverageSupport.supportedForProject() && coverageRunnableConfiguration();
         SwingUtilities.invokeLater(() -> {
             requestSetCoverageButtonVisible(available);
             requestSetCoverageButtonEnabled(available);
@@ -8905,7 +8739,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (root != null) {
             requestRefreshCodeLenses(root);
         }
-        SwingUtilities.invokeLater(this::refreshCoverageGutters);
+        SwingUtilities.invokeLater(coverageSupport::refreshGutters);
         if (!applyBuildModeChange(current.getJdtBuildMode(), root)) {
             applyLombokSettingChange(root);
         }
