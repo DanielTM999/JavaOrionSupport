@@ -45,8 +45,15 @@ public final class SwingViewClient {
     }
 
     public ViewResult view(String className, ConstructorUse constructor, int width, int height) {
+        return view(className, constructor, List.of(), width, height);
+    }
+
+    public ViewResult view(String className, ConstructorUse constructor, List<String> designInit,
+                           int width, int height) {
         ObjectNode params = host.params();
         params.put("className", className);
+        ArrayNode hooks = params.putArray("designInit");
+        designInit.forEach(hooks::add);
         if (constructor != null) {
             params.set("constructor", constructor.toJson());
         }
@@ -94,8 +101,14 @@ public final class SwingViewClient {
     }
 
     public String preview(String className, ConstructorUse constructor) {
+        return preview(className, constructor, List.of());
+    }
+
+    public String preview(String className, ConstructorUse constructor, List<String> designInit) {
         ObjectNode params = host.params();
         params.put("className", className);
+        ArrayNode hooks = params.putArray("designInit");
+        designInit.forEach(hooks::add);
         if (constructor != null) {
             params.set("constructor", constructor.toJson());
         }
@@ -121,6 +134,10 @@ public final class SwingViewClient {
         for (JsonNode attempt : result.path("attempts")) {
             attempts.add(attempt.asText());
         }
+        List<String> warnings = new ArrayList<>();
+        for (JsonNode warning : result.path("warnings")) {
+            warnings.add(warning.asText());
+        }
         return new ViewResult(image,
                 result.path("width").asInt(),
                 result.path("height").asInt(),
@@ -130,7 +147,8 @@ public final class SwingViewClient {
                 result.hasNonNull("error") ? result.get("error").asText() : null,
                 result.hasNonNull("stackTrace") ? result.get("stackTrace").asText() : null,
                 result.path("window").asBoolean(false),
-                result.hasNonNull("title") ? result.get("title").asText() : null);
+                result.hasNonNull("title") ? result.get("title").asText() : null,
+                warnings);
     }
 
     private static void paths(ArrayNode array, Collection<Path> paths) {

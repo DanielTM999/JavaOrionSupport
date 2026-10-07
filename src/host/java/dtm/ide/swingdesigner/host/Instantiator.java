@@ -95,7 +95,7 @@ final class Instantiator {
             }
             return true;
         } catch (Throwable error) {
-            result.attempts.add(label + ": " + describe(error));
+            result.attempts.add(label + ": " + describe(error) + Lifecycle.location(rootCause(error)));
             result.failure = rootCause(error);
             return false;
         }

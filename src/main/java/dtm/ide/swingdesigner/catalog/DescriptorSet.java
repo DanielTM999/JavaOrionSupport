@@ -17,6 +17,7 @@ public record DescriptorSet(String name,
 
     public enum Layer {
         JDK,
+        BUNDLED,
         LIBRARY,
         PROJECT
     }

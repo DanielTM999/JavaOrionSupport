@@ -85,6 +85,16 @@ final class CatalogFixtures {
                     package lib.ui.internal;
                     public class Gutter extends javax.swing.JComponent { }
                     """,
+            "dtm/stools/activity/Activity.java", """
+                    package dtm.stools.activity;
+                    public abstract class Activity extends javax.swing.JFrame {
+                        protected final void dispatchDrawing() { }
+                    }
+                    """,
+            "lib/ui/MainScreen.java", """
+                    package lib.ui;
+                    public class MainScreen extends dtm.stools.activity.Activity { }
+                    """,
             "lib/ui/Card.java", """
                     package lib.ui;
                     public class Card extends javax.swing.JPanel {

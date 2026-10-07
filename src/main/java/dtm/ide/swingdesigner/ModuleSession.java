@@ -95,6 +95,10 @@ public final class ModuleSession implements AutoCloseable {
         return client;
     }
 
+    public synchronized boolean hasLiveClient() {
+        return client != null && client.host().isAlive();
+    }
+
     public synchronized void refreshAfterBuild() {
         List<ClasspathEntry> previous = entries;
         refreshCatalog();

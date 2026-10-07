@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "library": { "name": "SwingTools" },
+  "components": {
+    "dtm.stools.activity.Activity": { "designInit": ["dispatchDrawing"] },
+    "dtm.stools.activity.DialogActivity": { "designInit": ["dispatchDrawing"] },
+    "dtm.stools.activity.FragmentActivity": { "designInit": ["dispatchDrawing"] },
+    "dtm.stools.activity.TransientPopupActivity": { "designInit": ["dispatchDrawing"] }
+  }
+}

@@ -133,52 +133,67 @@ final class HostSession {
         final String className = Json.string(request, "className");
         final Class<?> type = Class.forName(className, false, workspace);
         final Map<String, Object> constructor = Json.object(request.get("constructor"));
+        final List<String> designInit = strings(Json.array(request.get("designInit")));
         final int width = Json.integer(request, "width", -1);
         final int height = Json.integer(request, "height", -1);
-        Map<String, Object> result = onEdt(new Callable<Map<String, Object>>() {
+        final Map<String, Object> response = new LinkedHashMap<String, Object>();
+        final List<String> warnings = new ArrayList<String>();
+        response.put("warnings", warnings);
+        final Object instance = onEdt(new Callable<Object>() {
             @Override
-            public Map<String, Object> call() throws Exception {
+            public Object call() {
                 disposeView();
                 Thread.currentThread().setContextClassLoader(workspace);
                 Beans.setDesignTime(true);
-                Instantiator.Result created;
                 try {
-                    created = instantiate(type, constructor);
+                    Instantiator.Result created = instantiate(type, constructor);
+                    response.put("constructor", constructorInfo(created));
+                    response.put("attempts", created.attempts);
+                    if (created.instance == null) {
+                        response.put("error", created.failure == null ? "Nao foi possivel instanciar "
+                                + className : Instantiator.describe(created.failure));
+                        response.put("stackTrace", stackTrace(created.failure));
+                        return null;
+                    }
+                    if (!(created.instance instanceof Component)) {
+                        response.put("error", className + " nao e um java.awt.Component");
+                        return null;
+                    }
+                    Lifecycle.run(created.instance, designInit, warnings);
+                    return created.instance;
                 } finally {
                     Beans.setDesignTime(false);
                 }
-                Map<String, Object> response = new LinkedHashMap<String, Object>();
-                response.put("constructor", constructorInfo(created));
-                response.put("attempts", created.attempts);
-                if (created.instance == null) {
-                    response.put("error", created.failure == null ? "Nao foi possivel instanciar "
-                            + className : Instantiator.describe(created.failure));
-                    response.put("stackTrace", stackTrace(created.failure));
-                    return response;
-                }
-                if (!(created.instance instanceof Component)) {
-                    response.put("error", className + " nao e um java.awt.Component");
-                    return response;
-                }
-                viewInstance = created.instance;
-                renderRoot = stage((Component) created.instance, width, height);
+            }
+        });
+        if (instance == null) {
+            blob[0] = null;
+            return response;
+        }
+        onEdt(new Callable<Object>() {
+            @Override
+            public Object call() throws Exception {
+                viewInstance = instance;
+                renderRoot = stage((Component) instance, width, height);
                 response.put("root", snapshots.describe(renderRoot, viewInstance));
                 response.put("width", renderRoot.getWidth());
                 response.put("height", renderRoot.getHeight());
-                response.put("window", created.instance instanceof Window);
-                String title = windowTitle(created.instance);
+                response.put("window", instance instanceof Window);
+                String title = windowTitle(instance);
                 if (title != null) {
                     response.put("title", title);
                 }
+                if (Lifecycle.looksEmpty(renderRoot) && designInit.isEmpty()) {
+                    warnings.add("Nenhum componente foi montado pelo construtor. Se a tela e criada em um metodo"
+                            + " de ciclo de vida (init, onCreate, onDrawing...), declare-o em \"designInit\" no"
+                            + " .orion/swing-components.json do projeto.");
+                }
                 lastImage = Snapshots.render(renderRoot);
-                return response;
+                return null;
             }
         });
         blob[0] = lastImage;
-        if (!result.containsKey("root")) {
-            blob[0] = null;
-        }
-        return result;
+        return response;
     }
 
     private Map<String, Object> render(byte[][] blob) throws Exception {
@@ -286,6 +301,9 @@ final class HostSession {
                             + className : Instantiator.describe(created.failure));
                     return response;
                 }
+                List<String> warnings = new ArrayList<String>();
+                Lifecycle.run(created.instance, strings(Json.array(request.get("designInit"))), warnings);
+                response.put("warnings", warnings);
                 Window window;
                 if (created.instance instanceof Window) {
                     window = (Window) created.instance;

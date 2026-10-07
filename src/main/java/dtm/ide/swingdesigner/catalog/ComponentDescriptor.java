@@ -26,7 +26,8 @@ public record ComponentDescriptor(String className,
                                   List<EventDescriptor> events,
                                   ContainerSpec container,
                                   Boolean beanInfo,
-                                  Boolean spi) {
+                                  Boolean spi,
+                                  List<String> designInit) {
 
     public ComponentDescriptor {
         Objects.requireNonNull(className, "className");
@@ -35,6 +36,7 @@ public record ComponentDescriptor(String className,
         properties = properties == null ? null
                 : Collections.unmodifiableMap(new LinkedHashMap<>(properties));
         events = events == null ? null : List.copyOf(events);
+        designInit = designInit == null ? null : List.copyOf(designInit);
     }
 
     public static ComponentDescriptor named(String className) {
@@ -66,6 +68,7 @@ public record ComponentDescriptor(String className,
         builder.container = container;
         builder.beanInfo = beanInfo;
         builder.spi = spi;
+        builder.designInit = designInit;
         return builder;
     }
 
@@ -95,6 +98,7 @@ public record ComponentDescriptor(String className,
         merged.container = container == null ? top.container : container.overlay(top.container);
         merged.beanInfo = PropertyDescriptor.pick(top.beanInfo, beanInfo);
         merged.spi = PropertyDescriptor.pick(top.spi, spi);
+        merged.designInit = PropertyDescriptor.pick(top.designInit, designInit);
         return merged.build();
     }
 
@@ -111,6 +115,7 @@ public record ComponentDescriptor(String className,
             merged.container = parent.container.overlay(container);
         }
         merged.window = PropertyDescriptor.pick(window, parent.window);
+        merged.designInit = PropertyDescriptor.pick(designInit, parent.designInit);
         return merged.build();
     }
 
@@ -159,6 +164,10 @@ public record ComponentDescriptor(String className,
 
     public List<EventDescriptor> eventsOrEmpty() {
         return events == null ? List.of() : events;
+    }
+
+    public List<String> designInitOrEmpty() {
+        return designInit == null ? List.of() : designInit;
     }
 
     public List<ConstructorInfo> constructorsOrEmpty() {
@@ -217,6 +226,7 @@ public record ComponentDescriptor(String className,
         private ContainerSpec container;
         private Boolean beanInfo;
         private Boolean spi;
+        private List<String> designInit;
 
         private Builder(String className) {
             this.className = className;
@@ -317,11 +327,16 @@ public record ComponentDescriptor(String className,
             return this;
         }
 
+        public Builder designInit(List<String> value) {
+            designInit = value;
+            return this;
+        }
+
         public ComponentDescriptor build() {
             return new ComponentDescriptor(className, superClass, typeParameters, displayName,
                     category, icon, description, origin, source, abstractType, window, hidden,
                     described, constructors, preferredConstructor, properties, events, container,
-                    beanInfo, spi);
+                    beanInfo, spi, designInit);
         }
     }
 }

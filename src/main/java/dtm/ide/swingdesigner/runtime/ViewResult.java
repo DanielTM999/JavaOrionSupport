@@ -12,10 +12,12 @@ public record ViewResult(BufferedImage image,
                          String error,
                          String stackTrace,
                          boolean window,
-                         String title) {
+                         String title,
+                         List<String> warnings) {
 
     public ViewResult {
         attempts = attempts == null ? List.of() : List.copyOf(attempts);
+        warnings = warnings == null ? List.of() : List.copyOf(warnings);
     }
 
     public boolean failed() {

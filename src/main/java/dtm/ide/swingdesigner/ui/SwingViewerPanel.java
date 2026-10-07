@@ -16,6 +16,7 @@ import dtm.ide.ui.FlatTreeRenderer;
 import dtm.ide.ui.JavaIcons;
 import dtm.ide.ui.PillButtons;
 import dtm.ide.ui.UiSupport;
+import dtm.stools.component.panels.loading.LoadingPanel;
 import dtm.stools.component.tree.TreeNode;
 import dtm.stools.component.tree.TreeView;
 import dtm.stools.component.tree.event.EventTreeView;
@@ -63,6 +64,8 @@ public final class SwingViewerPanel extends JPanel {
     private final ViewerInspector inspector = new ViewerInspector();
     private final JTextArea message = new JTextArea();
     private final JPanel center = new JPanel(new CardLayout());
+    private final JTextArea warnings = new JTextArea();
+    private final LoadingPanel loading = new LoadingPanel();
     private final JLabel status = new JLabel(" ");
     private final Timer saveDebounce;
 
@@ -123,6 +126,7 @@ public final class SwingViewerPanel extends JPanel {
     public void refresh(boolean rebuild) {
         long ticket = generation.incrementAndGet();
         setStatus(rebuild ? "Compilando..." : "Renderizando...");
+        showLoading(rebuild ? "Compilando o modulo..." : "Renderizando...");
         worker.submit(() -> {
             try {
                 if (rebuild) {
@@ -138,8 +142,12 @@ public final class SwingViewerPanel extends JPanel {
                             + " o que desenhar.", null);
                     return;
                 }
+                if (!session.hasLiveClient()) {
+                    showLoading("Iniciando a JVM do designer...");
+                }
                 SwingViewClient client = session.client();
-                ViewResult result = client.view(className, constructor, -1, -1);
+                showLoading("Renderizando " + simpleName(className) + "...");
+                ViewResult result = client.view(className, constructor, designInit(), -1, -1);
                 SwingUtilities.invokeLater(() -> {
                     if (ticket == generation.get()) {
                         apply(result);
@@ -155,6 +163,8 @@ public final class SwingViewerPanel extends JPanel {
 
     private void apply(ViewResult result) {
         current = result;
+        hideLoading();
+        showWarnings(result.warnings());
         if (result.constructor() != null) {
             constructor = result.constructor();
         }
@@ -263,7 +273,8 @@ public final class SwingViewerPanel extends JPanel {
                 ViewResult merged = new ViewResult(result.image(), result.width(), result.height(),
                         result.root(), constructor, current == null ? List.of() : current.attempts(),
                         null, null, current != null && current.window(),
-                        current == null ? null : current.title());
+                        current == null ? null : current.title(),
+                        current == null ? List.of() : current.warnings());
                 SwingUtilities.invokeLater(() -> {
                     if (ticket == generation.get()) {
                         apply(merged);
@@ -290,7 +301,7 @@ public final class SwingViewerPanel extends JPanel {
         setStatus("Abrindo preview...");
         worker.submit(() -> {
             try {
-                String error = session.client().preview(className, constructor);
+                String error = session.client().preview(className, constructor, designInit());
                 SwingUtilities.invokeLater(() -> setStatus(error == null ? "Preview aberto" : "Preview: " + error));
             } catch (Exception failure) {
                 SwingUtilities.invokeLater(() -> setStatus("Preview: " + rootMessage(failure)));
@@ -405,7 +416,30 @@ public final class SwingViewerPanel extends JPanel {
         center.add(canvasScroll, CARD_CANVAS);
         center.add(UiSupport.plainScroll(new JScrollPane(message)), CARD_MESSAGE);
 
-        JSplitPane right = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, center, inspector);
+        java.awt.Color amber = new java.awt.Color(0xD29922);
+        warnings.setEditable(false);
+        warnings.setLineWrap(true);
+        warnings.setWrapStyleWord(true);
+        warnings.setFont(UiTokens.fontSmall());
+        warnings.setForeground(UiTokens.foreground());
+        warnings.setBackground(UiTokens.overlay(amber, 0.18F));
+        warnings.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, UiTokens.overlay(amber, 0.6F)),
+                BorderFactory.createEmptyBorder(UiTokens.space(1), UiTokens.space(2), UiTokens.space(1),
+                        UiTokens.space(2))));
+        warnings.setVisible(false);
+        JPanel stage = new JPanel(new BorderLayout());
+        stage.setOpaque(false);
+        stage.add(warnings, BorderLayout.NORTH);
+        stage.add(center, BorderLayout.CENTER);
+        loading.setContent(stage);
+        loading.setBlockInput(true);
+        loading.setAccentColor(UiTokens.accent());
+        loading.setTextColor(UiTokens.foreground());
+        loading.setTrackColor(UiTokens.border());
+        loading.setOverlayColor(UiTokens.overlay(UiTokens.background(), 0.9F));
+
+        JSplitPane right = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, loading, inspector);
         right.setResizeWeight(1.0);
         right.setBorder(null);
         right.setContinuousLayout(true);
@@ -423,12 +457,47 @@ public final class SwingViewerPanel extends JPanel {
             if (ticket != generation.get()) {
                 return;
             }
+            hideLoading();
+            showWarnings(List.of());
             message.setText(detail == null ? text : text + "\n\n" + detail);
             message.setCaretPosition(0);
             ((CardLayout) center.getLayout()).show(center, CARD_MESSAGE);
             inspector.clear(" ");
             setStatus(" ");
         });
+    }
+
+    private List<String> designInit() {
+        return session.catalog().descriptor(className)
+                .map(ComponentDescriptor::designInitOrEmpty).orElse(List.of());
+    }
+
+    private void showLoading(String text) {
+        Runnable show = () -> {
+            loading.setMessage(text);
+            loading.start();
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            show.run();
+        } else {
+            SwingUtilities.invokeLater(show);
+        }
+    }
+
+    private void hideLoading() {
+        loading.stop();
+    }
+
+    private void showWarnings(List<String> items) {
+        if (items == null || items.isEmpty()) {
+            warnings.setVisible(false);
+            warnings.setText("");
+            return;
+        }
+        warnings.setText(String.join("\n", items.stream().map(item -> "\u26A0  " + item).toList()));
+        warnings.setCaretPosition(0);
+        warnings.setVisible(true);
+        warnings.revalidate();
     }
 
     private List<PropertyDescriptor> readable(ComponentDescriptor descriptor) {

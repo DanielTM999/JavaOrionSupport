@@ -39,6 +39,7 @@ public final class ComponentCatalog {
     public static ComponentCatalog standard(ClasspathIndex index, DescriptorSet project) {
         List<DescriptorSet> layers = new ArrayList<>();
         layers.add(DescriptorSetReader.jdk());
+        layers.addAll(DescriptorSetReader.bundled());
         layers.addAll(DescriptorSetReader.libraries(index));
         if (project != null) {
             layers.add(project);

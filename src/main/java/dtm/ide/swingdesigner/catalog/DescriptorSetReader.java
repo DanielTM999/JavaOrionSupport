@@ -24,6 +24,7 @@ public final class DescriptorSetReader {
     public static final String LIBRARY_RESOURCE = "META-INF/orion/swing-components.json";
     public static final String PROJECT_FILE = ".orion/swing-components.json";
     public static final String JDK_RESOURCE = "/swingdesigner/swing-jdk.json";
+    public static final String BUNDLED_INDEX = "/swingdesigner/libraries/index.txt";
 
     private static final ObjectMapper JSON = JsonMapper.builder()
             .enable(JsonReadFeature.ALLOW_JAVA_COMMENTS)
@@ -43,6 +44,29 @@ public final class DescriptorSetReader {
             log.warn("Could not read the built-in Swing descriptor: {}", e.toString());
             return empty("Swing", DescriptorSet.Layer.JDK);
         }
+    }
+
+    public static List<DescriptorSet> bundled() {
+        List<DescriptorSet> sets = new ArrayList<>();
+        try (InputStream index = DescriptorSetReader.class.getResourceAsStream(BUNDLED_INDEX)) {
+            if (index == null) {
+                return sets;
+            }
+            for (String line : new String(index.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).split("\\R")) {
+                String name = line.trim();
+                if (name.isEmpty()) {
+                    continue;
+                }
+                try (InputStream in = DescriptorSetReader.class.getResourceAsStream("/swingdesigner/libraries/" + name)) {
+                    if (in != null) {
+                        sets.add(read(JSON.readTree(in), name, DescriptorSet.Layer.BUNDLED, null));
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not read the bundled library descriptors: {}", e.toString());
+        }
+        return sets;
     }
 
     public static Optional<DescriptorSet> project(Path projectRoot) {
@@ -110,7 +134,8 @@ public final class DescriptorSetReader {
                 .description(text(node, "description").orElse(null))
                 .hidden(bool(node, "hidden"))
                 .window(bool(node, "window"))
-                .typeParameters(node.has("typeParameters") ? strings(node.path("typeParameters")) : null);
+                .typeParameters(node.has("typeParameters") ? strings(node.path("typeParameters")) : null)
+                .designInit(node.has("designInit") ? strings(node.path("designInit")) : null);
         if (node.has("constructor")) {
             builder.preferredConstructor(constructor(node.path("constructor")));
         }

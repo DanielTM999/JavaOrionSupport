@@ -56,6 +56,44 @@ class DesignerHostIntegrationTest {
                         public Quebra() { throw new IllegalStateException("sem banco"); }
                     }
                     """,
+            "demo/BaseActivity.java", """
+                    package demo;
+                    public abstract class BaseActivity extends javax.swing.JFrame {
+                        private boolean drawn;
+                        protected final void dispatchDrawing() {
+                            if (!drawn) {
+                                drawn = true;
+                                onDrawing();
+                            }
+                        }
+                        protected void onDrawing() { }
+                    }
+                    """,
+            "demo/Principal.java", """
+                    package demo;
+                    import javax.swing.*;
+                    import java.awt.BorderLayout;
+                    public class Principal extends BaseActivity {
+                        private final Runnable controller;
+                        public Principal(Runnable controller) { this.controller = controller; }
+                        @Override
+                        protected void onDrawing() {
+                            setTitle("Principal");
+                            getContentPane().add(new JLabel("cabecalho"), BorderLayout.NORTH);
+                            controller.run();
+                            getContentPane().add(new JButton("nunca"), BorderLayout.CENTER);
+                        }
+                    }
+                    """,
+            "demo/Assincrona.java", """
+                    package demo;
+                    import javax.swing.*;
+                    public class Assincrona extends JPanel {
+                        public Assincrona() {
+                            SwingUtilities.invokeLater(() -> add(new JLabel("tarde")));
+                        }
+                    }
+                    """,
             "demo/Tela.java", """
                     package demo;
                     import javax.swing.*;
@@ -188,6 +226,46 @@ class DesignerHostIntegrationTest {
 
         assertFalse(client.view("demo.Painel", null, 200, 120).failed());
         assertEquals(200, client.render().width());
+    }
+
+    @Test
+    void lifecycleHooksBuildTheScreenAndFailuresKeepThePartialTree() {
+        ViewResult lazy = client.view("demo.Principal", null, List.of(), -1, -1);
+
+        assertFalse(lazy.failed());
+        assertTrue(lazy.root().children().stream().allMatch(child -> child.children().isEmpty()));
+        assertTrue(lazy.warnings().stream().anyMatch(warning -> warning.contains("designInit")),
+                lazy.warnings()::toString);
+
+        ViewResult drawn = client.view("demo.Principal", null, List.of("dispatchDrawing"), -1, -1);
+        List<String> classes = new ArrayList<>();
+        drawn.root().forEach(node -> classes.add(node.className()));
+
+        assertFalse(drawn.failed());
+        assertEquals("Principal", drawn.title());
+        assertTrue(classes.contains("javax.swing.JLabel"), classes::toString);
+        assertFalse(classes.contains("javax.swing.JButton"), classes::toString);
+        assertEquals(1, drawn.warnings().size(), drawn.warnings()::toString);
+        assertTrue(drawn.warnings().getFirst().contains("NullPointerException"), drawn.warnings()::toString);
+        assertTrue(drawn.warnings().getFirst().contains("Principal.onDrawing(Principal.java:"),
+                drawn.warnings()::toString);
+    }
+
+    @Test
+    void unknownLifecycleHooksAreReported() {
+        ViewResult result = client.view("demo.Painel", null, List.of("naoExiste"), -1, -1);
+
+        assertFalse(result.failed());
+        assertTrue(result.warnings().stream().anyMatch(warning -> warning.contains("naoExiste")),
+                result.warnings()::toString);
+    }
+
+    @Test
+    void componentsQueuedOnTheEventThreadAreRendered() {
+        ViewResult result = client.view("demo.Assincrona", null, 200, 100);
+
+        assertFalse(result.failed());
+        assertEquals("javax.swing.JLabel", result.root().children().getFirst().className());
     }
 
     private static PropertyDescriptor property(String name, String getter) {

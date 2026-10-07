@@ -254,6 +254,7 @@ class ComponentCatalogTest {
                     "lib.ui.Switch": { "displayName": "Interruptor", "category": "Meus" },
                     "lib.ui.internal.Gutter": { "hidden": false },
                     "fx.FluentBox": {
+                      "designInit": ["montar"],
                       "properties": { "range": { "displayName": "Intervalo" } }
                     }
                   }
@@ -271,6 +272,15 @@ class ComponentCatalogTest {
                 .properties().get("range");
         assertEquals("Intervalo", range.label());
         assertEquals(2, range.arity());
+        assertEquals(List.of("montar"), catalog.descriptor("fx.Deep").orElseThrow().designInitOrEmpty());
+    }
+
+    @Test
+    void bundledLibraryDescriptorsDeclareLifecycleHooksForSubclasses() {
+        ComponentDescriptor screen = catalog().descriptor("lib.ui.MainScreen").orElseThrow();
+
+        assertEquals(List.of("dispatchDrawing"), screen.designInitOrEmpty());
+        assertTrue(catalog().descriptor("fx.FluentBox").orElseThrow().designInitOrEmpty().isEmpty());
     }
 
     @Test
