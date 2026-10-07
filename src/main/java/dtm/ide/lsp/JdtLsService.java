@@ -49,10 +49,6 @@ import dtm.stools.component.panels.editor.code.prototype.folding.FoldRange;
 import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
 import lombok.extern.slf4j.Slf4j;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -538,6 +534,28 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         public void launchedLombokAgentJar(Path path) {
             launchedLombokAgentJar = path;
         }
+
+        @Override
+        public ExecutorService executor() {
+            return executor;
+        }
+
+        @Override
+        public void startupFailed(String line) {
+            startupFailure = line.isBlank()
+                    ? "Falha ao importar o projeto no JDT LS" : line.trim();
+            serviceReadyLatch.countDown();
+        }
+
+        @Override
+        public boolean isRecoverableDocumentError(String line) {
+            return JdtLsService.isRecoverableDocumentError(line);
+        }
+
+        @Override
+        public void recoverDocumentSynchronization() {
+            JdtLsService.this.recoverDocumentSynchronization();
+        }
     });
 
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
@@ -886,7 +904,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             started = null;
             watchServerExit(owned, launchGeneration);
             rpc.onUnexpectedDisconnect(() -> onProtocolLost(owned, launchGeneration));
-            pumpStderr(owned);
+            processSupport.pumpStderr(owned);
             registerHandlers(rpc);
 
             initialize(rpc, owned, launchGeneration, root, runtime, jdk, bundlePaths.join());
@@ -1145,40 +1163,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                               JdtLsProvisioner.JdtLsInstallation installation,
                               Path workspace) {
         return processSupport.buildCommand(runtime, installation, workspace);
-    }
-
-    private void pumpStderr(Process started) {
-        executor.submit(() -> {
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(started.getErrorStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    String lower = line.toLowerCase(java.util.Locale.ROOT);
-                    if (!isExpectedCancellationNotice(lower)) {
-                        log.debug("[jdtls] {}", line);
-                    }
-                    if (lower.contains("initialization failed")
-                            || lower.contains("failed to import projects")
-                            || lower.contains("overlaps the workspace location")) {
-                        startupFailure = line.isBlank()
-                                ? "Falha ao importar o projeto no JDT LS" : line.trim();
-                        serviceReadyLatch.countDown();
-                    }
-                    if (isRecoverableDocumentError(line)) {
-                        recoverDocumentSynchronization();
-                    }
-                }
-            } catch (Exception error) {
-                if (started.isAlive()) {
-                    log.debug("Leitura da saida de erro do JDT LS foi interrompida", error);
-                }
-            }
-        });
-    }
-
-    private static boolean isExpectedCancellationNotice(String lowerCaseLine) {
-        return lowerCaseLine.contains("handlecancellation")
-                || lowerCaseLine.contains("unmatched cancel notification");
     }
 
     public void stop() {

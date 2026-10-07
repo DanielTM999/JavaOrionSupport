@@ -5,10 +5,14 @@ import dtm.ide.sdk.JdkVendor;
 import dtm.ide.sdk.SdkDownloader;
 import lombok.extern.slf4j.Slf4j;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -22,6 +26,10 @@ final class JdtLsProcess {
         String maxHeap();
         Path lombokAgentJar();
         void launchedLombokAgentJar(Path path);
+        ExecutorService executor();
+        void startupFailed(String line);
+        boolean isRecoverableDocumentError(String line);
+        void recoverDocumentSynchronization();
     }
 
     private final Host host;
@@ -76,6 +84,38 @@ final class JdtLsProcess {
         command.add("-data");
         command.add(workspace.toString());
         return command;
+    }
+
+    void pumpStderr(Process started) {
+        host.executor().submit(() -> {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(started.getErrorStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String lower = line.toLowerCase(java.util.Locale.ROOT);
+                    if (!isExpectedCancellationNotice(lower)) {
+                        log.debug("[jdtls] {}", line);
+                    }
+                    if (lower.contains("initialization failed")
+                            || lower.contains("failed to import projects")
+                            || lower.contains("overlaps the workspace location")) {
+                        host.startupFailed(line);
+                    }
+                    if (host.isRecoverableDocumentError(line)) {
+                        host.recoverDocumentSynchronization();
+                    }
+                }
+            } catch (Exception error) {
+                if (started.isAlive()) {
+                    log.debug("Leitura da saida de erro do JDT LS foi interrompida", error);
+                }
+            }
+        });
+    }
+
+    private static boolean isExpectedCancellationNotice(String lowerCaseLine) {
+        return lowerCaseLine.contains("handlecancellation")
+                || lowerCaseLine.contains("unmatched cancel notification");
     }
 
     static void removeLegacyOverlappingWorkspace(Path root) {
