@@ -131,8 +131,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static final int WATCHED_FILES_PER_NOTIFICATION = 512;
     private static final int MAX_REOPEN_DOCUMENTS = 30;
     private static final long WARM_UP_TIMEOUT_MS = 8_000;
-    private static final long DIAGNOSTICS_SETTLE_QUIET_MS = 2_000;
-    private static final long DIAGNOSTICS_SETTLE_TIMEOUT_MS = 90_000;
 
     private final JdkService jdkService;
     private final JdtLsProvisioner provisioner;
@@ -142,8 +140,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             Thread.ofVirtual().name("jdtls-", 0).factory());
 
     private final JdtDocumentStore documents = new JdtDocumentStore();
-    private final Map<Path, List<Diagnostic>> diagnosticsByPath = new ConcurrentHashMap<>();
-    private final Map<Path, List<JsonNode>> rawDiagnosticsByPath = new ConcurrentHashMap<>();
+    private final LspDiagnosticsStore diagnosticsStore;
     private final Set<String> workspaceWorkTokens = ConcurrentHashMap.newKeySet();
     private final Set<String> openedDuringImport = ConcurrentHashMap.newKeySet();
     private final AtomicLong workspaceRevision = new AtomicLong();
@@ -204,9 +201,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private final AtomicBoolean warmingUp = new AtomicBoolean();
     private final AtomicBoolean warmUpWorkStarted = new AtomicBoolean();
     private volatile long warmUpDeadline;
-    private volatile boolean diagnosticsSettled = true;
-    private volatile long diagnosticsSettleDeadline;
-    private final AtomicLong diagnosticsSettleTicket = new AtomicLong();
 
     private final LspRequests requests = new LspRequests(new LspRequests.Host() {
         @Override
@@ -414,7 +408,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
         @Override
         public List<JsonNode> rawDiagnostics(Path path) {
-            return rawDiagnosticsByPath.getOrDefault(normalizePath(path), List.of());
+            return diagnosticsStore.raw(path);
         }
 
         @Override
@@ -499,6 +493,23 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         this.bundles = bundles;
         this.onDiagnosticsPublished = onDiagnosticsPublished == null ? path -> {
         } : onDiagnosticsPublished;
+        this.diagnosticsStore = new LspDiagnosticsStore(documents, this.onDiagnosticsPublished,
+                executor, this, new LspDiagnosticsStore.Host() {
+                    @Override
+                    public boolean isReady() {
+                        return state == LanguageServerState.READY;
+                    }
+
+                    @Override
+                    public boolean progressIdle() {
+                        return progressAggregator.snapshot().idle();
+                    }
+
+                    @Override
+                    public void resynchronizeAfterSettle() {
+                        resynchronizeOpenDocuments(resyncMode(), false, null);
+                    }
+                });
         LIVE_SERVICES.add(this);
         installShutdownHook();
     }
@@ -683,8 +694,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             readyLatch = new CountDownLatch(1);
             serviceReadyLatch = new CountDownLatch(1);
             progressAggregator.reset();
-            diagnosticsSettled = false;
-            diagnosticsSettleTicket.incrementAndGet();
+            diagnosticsStore.beginImport();
         }
 
         long launchStarted = System.nanoTime();
@@ -771,9 +781,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             refreshOpenDocuments();
             drainPendingWatchedFiles();
             progressAggregator.restartBackgroundWork();
-            diagnosticsSettleDeadline = System.nanoTime()
-                    + TimeUnit.MILLISECONDS.toNanos(DIAGNOSTICS_SETTLE_TIMEOUT_MS);
-            scheduleDiagnosticsSettle();
+            diagnosticsStore.startSettleTimer();
             readyLatch.countDown();
             long ready = System.nanoTime();
             log.info("JDT LS pronto em {} ms (preparo {} ms, processo+initialize {} ms, importacao {} ms)",
@@ -1326,11 +1334,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         watchedFiles.clear();
         watchedFlushTicket.incrementAndGet();
         resyncTicket.incrementAndGet();
-        diagnosticsSettleTicket.incrementAndGet();
-        Set<Path> diagnosed = new java.util.LinkedHashSet<>(diagnosticsByPath.keySet());
-        diagnosticsByPath.clear();
-        rawDiagnosticsByPath.clear();
-        diagnosed.forEach(onDiagnosticsPublished);
+        diagnosticsStore.reset();
         navigation.clearSymbols();
         decorations.reset();
         completion.clearCache();
@@ -1591,102 +1595,19 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     void onPublishDiagnostics(JsonNode params) {
-        if (params == null) {
-            return;
-        }
-        String uri = params.path("uri").asText("");
-        if (uri.isBlank()) {
-            return;
-        }
-        List<Diagnostic> diagnostics = new ArrayList<>();
-        List<JsonNode> rawDiagnostics = new ArrayList<>();
-        JsonNode array = params.get("diagnostics");
-        if (array != null && array.isArray()) {
-            for (JsonNode node : array) {
-                rawDiagnostics.add(node.deepCopy());
-                Diagnostic diagnostic = LspConversions.diagnostic(node);
-                if (diagnostic != null) {
-                    diagnostics.add(diagnostic);
-                }
-            }
-        }
-        Path changed = recordDiagnostics(uri, params.get("version"), diagnostics, rawDiagnostics);
-        if (changed != null) {
-            onDiagnosticsPublished.accept(changed);
-        }
-    }
-
-    private synchronized Path recordDiagnostics(String uri, JsonNode publishedVersion,
-                                                List<Diagnostic> diagnostics,
-                                                List<JsonNode> rawDiagnostics) {
-        int currentVersion = documents.version(uri);
-        if (publishedVersion != null && publishedVersion.isIntegralNumber()
-                && currentVersion != ANY_VERSION
-                && publishedVersion.asInt() != currentVersion) {
-            log.debug("Diagnosticos descartados para {}: versao {} recebida, {} atual",
-                    uri, publishedVersion.asInt(), currentVersion);
-            return null;
-        }
-        Path path = LspConversions.toPath(uri);
-        if (path == null) {
-            return null;
-        }
-        Path key = normalizePath(path);
-        String content = documents.content(uri);
-        List<Diagnostic> latest = content == null
-                ? List.copyOf(diagnostics)
-                : DiagnosticRanges.compactMultiline(diagnostics, content);
-        List<Diagnostic> previous = diagnosticsByPath.put(key, latest);
-        rawDiagnosticsByPath.put(key, List.copyOf(rawDiagnostics));
-        return diagnosticsSettled && !latest.equals(previous) ? path : null;
+        diagnosticsStore.publish(params);
     }
 
     boolean isDiagnosticsSettled() {
-        return diagnosticsSettled;
+        return diagnosticsStore.isSettled();
     }
 
-    private void scheduleDiagnosticsSettle() {
-        if (diagnosticsSettled || state != LanguageServerState.READY) {
-            return;
-        }
-        long ticket = diagnosticsSettleTicket.incrementAndGet();
-        long remainingMs = TimeUnit.NANOSECONDS.toMillis(diagnosticsSettleDeadline - System.nanoTime());
-        long delay = Math.max(0, Math.min(DIAGNOSTICS_SETTLE_QUIET_MS, remainingMs));
-        CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS, executor)
-                .execute(() -> trySettleDiagnostics(ticket));
-    }
-
-    private void trySettleDiagnostics(long ticket) {
-        if (ticket != diagnosticsSettleTicket.get() || diagnosticsSettled || state != LanguageServerState.READY) {
-            return;
-        }
-        boolean expired = System.nanoTime() - diagnosticsSettleDeadline >= 0;
-        if (!expired && !progressAggregator.snapshot().idle()) {
-            scheduleDiagnosticsSettle();
-            return;
-        }
-        settleDiagnostics();
+    void markDiagnosticsUnsettled() {
+        diagnosticsStore.beginImport();
     }
 
     void settleDiagnostics() {
-        Set<Path> affected = new java.util.LinkedHashSet<>();
-        synchronized (this) {
-            if (diagnosticsSettled) {
-                return;
-            }
-            documents.uris().forEach(uri -> {
-                Path path = LspConversions.toPath(uri);
-                if (path != null) {
-                    diagnosticsByPath.remove(normalizePath(path));
-                    rawDiagnosticsByPath.remove(normalizePath(path));
-                    affected.add(path);
-                }
-            });
-            affected.addAll(diagnosticsByPath.keySet());
-            diagnosticsSettled = true;
-        }
-        resynchronizeOpenDocuments(resyncMode(), false, null);
-        affected.forEach(onDiagnosticsPublished);
+        diagnosticsStore.settle();
     }
 
     private void onLanguageStatus(JsonNode params) {
@@ -1711,7 +1632,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             if (snapshot.idle()) {
                 progressAggregator.restartBackgroundWork();
             }
-            scheduleDiagnosticsSettle();
+            diagnosticsStore.scheduleSettle();
             return;
         }
         if (current == LanguageServerState.STARTING || current == LanguageServerState.INDEXING) {
@@ -2016,13 +1937,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 .toList();
         openBelowDeleted.forEach(this::closeDocument);
 
-        List<Path> diagnosedBelowDeleted = diagnosticsByPath.keySet().stream()
-                .filter(path -> path.startsWith(deleted)).toList();
-        diagnosedBelowDeleted.forEach(path -> {
-            diagnosticsByPath.remove(path);
-            rawDiagnosticsByPath.remove(path);
-            onDiagnosticsPublished.accept(path);
-        });
+        diagnosticsStore.removeBelow(deleted);
 
         queueWatchedFile(deleted, WatchedFileBatch.DELETED);
         if (affectsProjectStructure(deleted)) {
@@ -2145,9 +2060,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 return;
             }
             if (clearDiagnostics) {
-                diagnosticsByPath.remove(normalizePath(path));
-                rawDiagnosticsByPath.remove(normalizePath(path));
-                onDiagnosticsPublished.accept(path);
+                diagnosticsStore.removeAndPublish(path);
             }
             onCodeLensRefresh.accept(path);
         });
@@ -2243,19 +2156,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         decorations.discardCodeLenses(uri);
         invalidateNavigationForEdit();
         requests.cancelInFlightForUri(uri);
-        Path key = normalizePath(filePath);
-        List<Diagnostic> oldDiagnostics = diagnosticsByPath.get(key);
-        List<Diagnostic> nextDiagnostics = oldDiagnostics != null
-                ? JavaDiagnosticEdits.retainUnaffected(oldDiagnostics, previous, content) : null;
-        if (nextDiagnostics == null) {
-            diagnosticsByPath.remove(key);
-        } else {
-            diagnosticsByPath.put(key, nextDiagnostics);
-        }
-        rawDiagnosticsByPath.remove(key);
-        if (oldDiagnostics != null && !java.util.Objects.equals(oldDiagnostics, nextDiagnostics)) {
-            onDiagnosticsPublished.accept(filePath);
-        }
+        diagnosticsStore.retainAfterEdit(filePath, previous, content);
         if (deferCodeLensRefresh) {
             decorations.scheduleCodeLensRefresh(filePath, uri);
         } else if (filePath != null) {
@@ -2560,7 +2461,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return ImportLookup.PENDING;
         }
         Map<String, JsonNode> unresolved = ImportCandidates.unresolvedByName(
-                rawDiagnosticsByPath.getOrDefault(normalizePath(filePath), List.of()), text, pasted, handled);
+                diagnosticsStore.raw(filePath), text, pasted, handled);
         if (unresolved.isEmpty()) {
             return ImportLookup.PENDING;
         }
@@ -2738,55 +2639,19 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public Collection<Diagnostic> diagnostics(Path filePath) {
-        if (filePath == null || !diagnosticsSettled) {
-            return List.of();
-        }
-        return diagnosticsByPath.getOrDefault(normalizePath(filePath), List.of());
+        return diagnosticsStore.diagnostics(filePath);
     }
 
     public void clearDiagnostics() {
-        Set<Path> affected = new java.util.LinkedHashSet<>(diagnosticsByPath.keySet());
-        affected.addAll(rawDiagnosticsByPath.keySet());
-        diagnosticsByPath.clear();
-        rawDiagnosticsByPath.clear();
-        affected.forEach(onDiagnosticsPublished);
+        diagnosticsStore.clear();
     }
 
     public Diagnostic diagnosticAt(Path filePath, int line, int col) {
-        Diagnostic first = null;
-        for (Diagnostic diagnostic : diagnostics(filePath)) {
-            if (!contains(diagnostic, line, col)) {
-                continue;
-            }
-            if (diagnostic.severity()
-                    == dtm.stools.component.panels.editor.code.diagnostics.DiagnosticSeverity.ERROR) {
-                return diagnostic;
-            }
-            if (first == null) {
-                first = diagnostic;
-            }
-        }
-        return first;
+        return diagnosticsStore.diagnosticAt(filePath, line, col);
     }
 
     public HoverInfo diagnosticHover(Path filePath, int line, int col) {
-        Diagnostic diagnostic = diagnosticAt(filePath, line, col);
-        if (diagnostic == null || diagnostic.message() == null || diagnostic.message().isBlank()) {
-            return null;
-        }
-        return new HoverInfo(diagnostic.message(), true,
-                diagnostic.startLine(), diagnostic.startCol(),
-                diagnostic.endLine(), diagnostic.endCol());
-    }
-
-    private static boolean contains(Diagnostic diagnostic, int line, int col) {
-        if (diagnostic == null || line < diagnostic.startLine() || line > diagnostic.endLine()) {
-            return false;
-        }
-        if (line == diagnostic.startLine() && col < diagnostic.startCol()) {
-            return false;
-        }
-        return line != diagnostic.endLine() || col <= diagnostic.endCol();
+        return diagnosticsStore.diagnosticHover(filePath, line, col);
     }
 
     private static Path normalizePath(Path path) {

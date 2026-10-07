@@ -206,7 +206,7 @@ class JdtLsProtocolTest {
         set("client", client);
         set("state", LanguageServerState.READY);
         set("capabilities", allCapabilities());
-        set("diagnosticsSettled", false);
+        service.markDiagnosticsUnsettled();
         service.openDocument(FILE, TEXT);
         drainNotifications();
 
