@@ -1,6 +1,5 @@
 package dtm.ide.adapter;
 
-import dtm.ide.concurrent.PluginTaskExecutor;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.todo.TodoItem;
@@ -8,7 +7,6 @@ import dtm.ide.todo.TodoScanner;
 import dtm.ide.ui.JavaIcons;
 import dtm.ide.ui.JavaTodoPanel;
 
-import javax.swing.Icon;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -16,16 +14,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class TodoPanelHost implements JavaTodoPanel.Host {
     private static final long TODO_DEBOUNCE_MS = 400;
-
-    public interface AdapterHost {
-        Path projectRoot();
-        JavaProjectDescriptor descriptor();
-        List<String> todoMarkers();
-        PluginTaskExecutor background();
-        String registerPanel(JavaTodoPanel panel, Icon icon);
-        void requestOpenToolPanel(String panelId);
-        void openAt(Path file, int line, int column);
-    }
 
     private final AdapterHost host;
     private final TodoScanner todoScanner = new TodoScanner();
@@ -66,8 +54,7 @@ public final class TodoPanelHost implements JavaTodoPanel.Host {
         JavaTodoPanel panel = new JavaTodoPanel(this);
         todoPanel = panel;
         panel.setProjectRoot(host.projectRoot());
-        Icon icon = JavaIcons.todo(JavaIcons.SMALL);
-        todoPanelId = host.registerPanel(panel, icon);
+        todoPanelId = host.registerTodoPanel(panel, JavaIcons.todo(JavaIcons.SMALL));
         rescan();
     }
 

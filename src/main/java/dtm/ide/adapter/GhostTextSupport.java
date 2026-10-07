@@ -1,29 +1,20 @@
 package dtm.ide.adapter;
 
 import dtm.ide.api.project.editor.IdeGhostTextContext;
-import dtm.ide.editor.JavaSnippetCompletionProvider;
 import dtm.ide.lsp.api.CompletionTrigger;
 import dtm.ide.lsp.api.JavaLanguageServer;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextSuggestion;
 
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
 
 public final class GhostTextSupport {
-    public interface Host {
-        boolean debugActive();
-        JavaLanguageServer interactiveServerFor(Path file);
-        JavaProjectDescriptor descriptor();
-        JavaSnippetCompletionProvider snippets();
-    }
+    private final AdapterContext host;
 
-    private final Host host;
-
-    public GhostTextSupport(Host host) {
+    public GhostTextSupport(AdapterContext host) {
         this.host = host;
     }
 

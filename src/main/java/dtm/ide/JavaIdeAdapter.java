@@ -51,6 +51,7 @@ import dtm.ide.api.project.editor.IdeDocumentHighlightContext;
 import dtm.ide.api.project.editor.IdeDocumentSymbolContext;
 import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
+import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.TodoPanelHost;
 import dtm.ide.api.project.editor.IdeInlayHintContext;
@@ -427,13 +428,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long SYNC_WORK_MAX_MS = 120_000;
     private static final String DEPENDENCIES_TAB_ID = "javaDependencies";
     private static final Color DEBUG_LINE_COLOR = new Color(227, 100, 100, 80);
-    private final JavaEditorRegistry editors = new JavaEditorRegistry();
-    private final MavenCentralClient mavenCentral = new MavenCentralClient();
-    private final SpringBeanIndex springIndex = new SpringBeanIndex();
-    private final SpringActuatorClient actuator = new SpringActuatorClient();
-    private final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
-    private final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
-    private final GhostTextSupport ghostTextSupport = new GhostTextSupport(new GhostTextSupport.Host() {
+    private final class HostBridge implements AdapterHost {
         @Override
         public boolean debugActive() {
             return debugActive.get();
@@ -453,7 +448,49 @@ public class JavaIdeAdapter extends IdeAdapter {
         public JavaSnippetCompletionProvider snippets() {
             return snippets;
         }
-    });
+
+        @Override
+        public Path projectRoot() {
+            return projectRoot;
+        }
+
+        @Override
+        public List<String> todoMarkers() {
+            return settings().getTodoMarkers();
+        }
+
+        @Override
+        public PluginTaskExecutor background() {
+            return background;
+        }
+
+        @Override
+        public String registerTodoPanel(JavaTodoPanel panel, Icon icon) {
+            return icon == null
+                    ? registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"),
+                            ToolIconType.INFO, panel)
+                    : registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"), icon, panel);
+        }
+
+        @Override
+        public void requestOpenToolPanel(String panelId) {
+            JavaIdeAdapter.this.requestOpenToolPanel(panelId);
+        }
+
+        @Override
+        public void openAt(Path file, int line, int column) {
+            JavaIdeAdapter.this.openAt(file, line, column);
+        }
+    }
+
+    private final JavaEditorRegistry editors = new JavaEditorRegistry();
+    private final MavenCentralClient mavenCentral = new MavenCentralClient();
+    private final SpringBeanIndex springIndex = new SpringBeanIndex();
+    private final SpringActuatorClient actuator = new SpringActuatorClient();
+    private final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
+    private final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
+    private final AdapterHost adapterHost = new HostBridge();
+    private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
             new JavaFastCompletionProvider(lexicalIndex);
@@ -571,45 +608,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicBoolean naturalDebugEnd = new AtomicBoolean();
     private final Map<Path, ConditionEditorSession> conditionSessions = new ConcurrentHashMap<>();
     private final AtomicReference<ConditionEditorSession> activeConditionSession = new AtomicReference<>();
-    private final TodoPanelHost todoSupport = new TodoPanelHost(new TodoPanelHost.AdapterHost() {
-        @Override
-        public Path projectRoot() {
-            return projectRoot;
-        }
-
-        @Override
-        public JavaProjectDescriptor descriptor() {
-            return descriptor;
-        }
-
-        @Override
-        public List<String> todoMarkers() {
-            return settings().getTodoMarkers();
-        }
-
-        @Override
-        public PluginTaskExecutor background() {
-            return background;
-        }
-
-        @Override
-        public String registerPanel(JavaTodoPanel panel, Icon icon) {
-            return icon == null
-                    ? registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"),
-                            ToolIconType.INFO, panel)
-                    : registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"), icon, panel);
-        }
-
-        @Override
-        public void requestOpenToolPanel(String panelId) {
-            JavaIdeAdapter.this.requestOpenToolPanel(panelId);
-        }
-
-        @Override
-        public void openAt(Path file, int line, int column) {
-            JavaIdeAdapter.this.openAt(file, line, column);
-        }
-    });
+    private final TodoPanelHost todoSupport = new TodoPanelHost(adapterHost);
     private final AtomicLong treeIconRefreshTicket = new AtomicLong();
     private final AtomicBoolean treeIconRefreshAll = new AtomicBoolean();
     private final Set<Path> treeIconRefreshPaths = ConcurrentHashMap.newKeySet();
