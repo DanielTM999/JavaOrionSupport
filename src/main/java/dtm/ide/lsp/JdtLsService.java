@@ -79,6 +79,15 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.LongConsumer;
 
+import static dtm.ide.lsp.LspRequests.INDEXING_INTERACTIVE_TIMEOUT_MS;
+import static dtm.ide.lsp.LspRequests.INTERACTIVE_TIMEOUT_MS;
+import static dtm.ide.lsp.LspRequests.REQUEST_TIMEOUT_MS;
+import static dtm.ide.lsp.LspRequests.documentId;
+import static dtm.ide.lsp.LspRequests.positionParams;
+import static dtm.ide.lsp.LspRequests.rangeParam;
+import static dtm.ide.lsp.LspRequests.rootCause;
+import static dtm.ide.lsp.LspRequests.rootMessage;
+
 @Slf4j
 public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport, TypeMoveSupport,
         ClassFileSupport, ProjectModelSupport, DebugAdapterSupport, TestDiscoverySupport, ImportCandidateSupport,
@@ -91,11 +100,8 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         TOUCH
     }
 
-    private static final long REQUEST_TIMEOUT_MS = 4_000;
     private static final int DEBUG_MAX_STRING_LENGTH = 1_000;
     private static final long DEBUG_ADAPTER_TIMEOUT_MS = 60_000;
-    private static final long INTERACTIVE_TIMEOUT_MS = 800;
-    private static final long INDEXING_INTERACTIVE_TIMEOUT_MS = 2_000;
     private static final long IMPORT_CANDIDATES_TIMEOUT_MS = 5_000;
     private static final long RENAME_TIMEOUT_MS = 60_000;
 
@@ -165,8 +171,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private final Map<String, AtomicLong> codeLensRefreshTickets = new ConcurrentHashMap<>();
     private final Map<String, CompletionCache> completionCache = new ConcurrentHashMap<>();
     private final Map<String, List<Location>> navigationCache = new ConcurrentHashMap<>();
-    private final Map<String, CompletableFuture<JsonNode>> inFlightRequests = new ConcurrentHashMap<>();
-    private final Map<String, AtomicLong> lastFailureLog = new ConcurrentHashMap<>();
     private final Set<String> workspaceWorkTokens = ConcurrentHashMap.newKeySet();
     private final Set<String> openedDuringImport = ConcurrentHashMap.newKeySet();
     private final AtomicLong workspaceRevision = new AtomicLong();
@@ -231,6 +235,33 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private volatile boolean diagnosticsSettled = true;
     private volatile long diagnosticsSettleDeadline;
     private final AtomicLong diagnosticsSettleTicket = new AtomicLong();
+
+    private final LspRequests requests = new LspRequests(new LspRequests.Host() {
+        @Override
+        public LspJsonRpcClient client() {
+            return client;
+        }
+
+        @Override
+        public boolean isInteractive() {
+            return JdtLsService.this.isInteractive();
+        }
+
+        @Override
+        public boolean isReady() {
+            return JdtLsService.this.isReady();
+        }
+
+        @Override
+        public boolean isWarmingUp() {
+            return JdtLsService.this.isWarmingUp();
+        }
+
+        @Override
+        public boolean syncBeforeRequest(Path filePath, String text) {
+            return JdtLsService.this.syncBeforeRequest(filePath, text);
+        }
+    });
 
     public JdtLsService(JdkService jdkService, JdtLsProvisioner provisioner,
                         JdtLsExtensionBundles bundles, Consumer<Path> onDiagnosticsPublished) {
@@ -1130,7 +1161,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         codeLensCache.clear();
         codeLensRefreshTickets.clear();
         completionCache.clear();
-        inFlightRequests.clear();
+        requests.clearInFlight();
         workspaceWorkTokens.clear();
         capabilities = ServerCapabilities.none();
     }
@@ -1267,7 +1298,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             if (debugAdapterPreparedFor == rpc) {
                 return true;
             }
-            JsonNode result = requestInteractive("workspace/executeCommand", Map.of(
+            JsonNode result = requests.requestInteractive("workspace/executeCommand", Map.of(
                     "command", "vscode.java.updateDebugSettings",
                     "arguments", List.of("{\"maxStringLength\":" + DEBUG_MAX_STRING_LENGTH
                             + ",\"logLevel\":\"WARNING\",\"showStaticVariables\":true}")),
@@ -1283,7 +1314,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     public int startDebugSession() {
         prepareDebugAdapter();
-        JsonNode result = requestInteractive("workspace/executeCommand", Map.of(
+        JsonNode result = requests.requestInteractive("workspace/executeCommand", Map.of(
                 "command", "vscode.java.startDebugSession",
                 "arguments", List.of()), DEBUG_ADAPTER_TIMEOUT_MS);
         if (result == null || !result.canConvertToInt()) {
@@ -1296,7 +1327,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (file == null) {
             return null;
         }
-        return requestInteractive("workspace/executeCommand", Map.of(
+        return requests.requestInteractive("workspace/executeCommand", Map.of(
                 "command", "vscode.java.test.findTestTypesAndMethods",
                 "arguments", List.of(LspConversions.toUri(file))), 15_000);
     }
@@ -1337,7 +1368,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     public String buildWorkspace(boolean fullBuild, StatusListener progress) {
         workspaceBuildProgress = progress;
         try {
-            JsonNode result = requestInteractive("java/buildWorkspace", fullBuild, 120_000);
+            JsonNode result = requests.requestInteractive("java/buildWorkspace", fullBuild, 120_000);
             return result == null || result.isNull() ? "FAILED" : result.asText("FAILED");
         } finally {
             workspaceBuildProgress = null;
@@ -1348,7 +1379,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (projectOrSource == null || !isInteractive()) {
             return java.util.Optional.empty();
         }
-        JsonNode result = requestInteractive("workspace/executeCommand", Map.of(
+        JsonNode result = requests.requestInteractive("workspace/executeCommand", Map.of(
                 "command", "java.project.getClasspaths",
                 "arguments", runtimeClasspathArguments(projectOrSource)), 30_000);
         if (result == null || result.isNull()) {
@@ -1686,7 +1717,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         discardCodeLenses(uri);
         completionCache.remove(uri);
         invalidateWorkspaceNavigation();
-        cancelInFlightForUri(uri);
+        requests.cancelInFlightForUri(uri);
 
         LspJsonRpcClient rpc = client;
         if (wasSynced && rpc != null && canSyncDocuments()) {
@@ -1962,7 +1993,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return;
         }
         documents.forEach((uri, content) -> {
-            cancelInFlightForUri(uri);
+            requests.cancelInFlightForUri(uri);
             if (mode == ResyncMode.REOPEN) {
                 if (documents.unmarkSynced(uri)) {
                     rpc.notify("textDocument/didClose", Map.of("textDocument", Map.of("uri", uri)));
@@ -2085,7 +2116,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         symbolCache.remove(uri);
         discardCodeLenses(uri);
         invalidateNavigationForEdit();
-        cancelInFlightForUri(uri);
+        requests.cancelInFlightForUri(uri);
         Path key = normalizePath(filePath);
         List<Diagnostic> oldDiagnostics = diagnosticsByPath.get(key);
         List<Diagnostic> nextDiagnostics = oldDiagnostics != null
@@ -2192,7 +2223,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             Thread.currentThread().interrupt();
             return List.of();
         } catch (Exception failure) {
-            logRequestFailure("textDocument/completion", failure);
+            requests.logRequestFailure("textDocument/completion", failure);
             return List.of();
         }
     }
@@ -2229,15 +2260,14 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
         long started = System.nanoTime();
         String key = "completion|" + uri + "|" + version + "|" + line + "|" + col;
-        CompletableFuture<JsonNode> request = inFlightRequests.computeIfAbsent(key, ignored ->
+        CompletableFuture<JsonNode> request = requests.shareInFlight(key, ignored ->
                 rpc.request("textDocument/completion",
                         completionParams(filePath, line, col, kind, triggerCharacter)));
-        request.whenComplete((result, error) -> inFlightRequests.remove(key, request));
         CompletableFuture<List<AutoCompleteItem>> items = request.handle((result, error) -> {
             if (error != null) {
                 if (!(error instanceof java.util.concurrent.CancellationException)
                         && !(error.getCause() instanceof java.util.concurrent.CancellationException)) {
-                    logRequestFailure("textDocument/completion",
+                    requests.logRequestFailure("textDocument/completion",
                             error instanceof Exception exception ? exception : new Exception(error));
                 }
                 return List.<AutoCompleteItem>of();
@@ -2269,7 +2299,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (item == null || !capabilities.completionResolve() || !(item.data() instanceof JsonNode raw)) {
             return CompletableFuture.completedFuture(item);
         }
-        return requestAsync("completionItem/resolve", raw, interactiveTimeoutMs(), true)
+        return requests.requestAsync("completionItem/resolve", raw, requests.interactiveTimeoutMs(), true)
                 .thenApply(resolved -> LspConversions.withResolvedDocumentation(item, resolved));
     }
 
@@ -2434,7 +2464,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public CompletableFuture<HoverInfo> hoverAsync(Path filePath, String text, int line, int col) {
-        return requestAtInteractiveAsync("textDocument/hover", filePath, text, line, col)
+        return requests.requestAtInteractiveAsync("textDocument/hover", filePath, text, line, col)
                 .thenApply(result -> isCurrentText(filePath, text) ? LspConversions.hover(result) : null);
     }
 
@@ -2442,7 +2472,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!capabilities.signatureHelp()) {
             return CompletableFuture.completedFuture(null);
         }
-        return requestAtInteractiveAsync("textDocument/signatureHelp", filePath, text, line, col)
+        return requests.requestAtInteractiveAsync("textDocument/signatureHelp", filePath, text, line, col)
                 .thenApply(result -> isCurrentText(filePath, text) ? LspConversions.signatureHelp(result) : null);
     }
 
@@ -2453,13 +2483,13 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         Map<String, Object> params = Map.of(
                 "textDocument", documentId(filePath),
                 "positions", List.of(Map.of("line", Math.max(0, line), "character", Math.max(0, col))));
-        return requestAsync("textDocument/selectionRange", params, interactiveTimeoutMs(), true)
+        return requests.requestAsync("textDocument/selectionRange", params, requests.interactiveTimeoutMs(), true)
                 .thenApply(result -> isCurrentText(filePath, text)
                         ? LspConversions.selectionChain(result) : List.<Range>of());
     }
 
     public HoverInfo hover(Path filePath, String text, int line, int col) {
-        JsonNode result = requestAtInteractive("textDocument/hover", filePath, text, line, col);
+        JsonNode result = requests.requestAtInteractive("textDocument/hover", filePath, text, line, col);
         return isCurrentText(filePath, text) ? LspConversions.hover(result) : null;
     }
 
@@ -2468,7 +2498,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return null;
         }
         return LspConversions.signatureHelp(
-                requestAtInteractive("textDocument/signatureHelp", filePath, text, line, col));
+                requests.requestAtInteractive("textDocument/signatureHelp", filePath, text, line, col));
     }
 
     public List<Location> definitions(Path filePath, String text, int line, int col) {
@@ -2530,7 +2560,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         Map<String, Object> params = positionParams(filePath, line, col);
         if (extraParams != null) params.putAll(extraParams);
         long requestStart = System.nanoTime();
-        JsonNode response = requestCoalesced(method, params, timeoutMs, key, interactive);
+        JsonNode response = requests.requestCoalesced(method, params, timeoutMs, key, interactive);
         if (log.isDebugEnabled()) {
             log.debug("navegacao {} para {} respondeu em {}ms (cache miss)",
                     method, uri, (System.nanoTime() - requestStart) / 1_000_000L);
@@ -2556,7 +2586,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 "position", Map.of(
                         "line", Math.max(0, line),
                         "character", Math.max(0, col)));
-        return LspConversions.locations(requestInteractive(
+        return LspConversions.locations(requests.requestInteractive(
                 "textDocument/definition", params, INTERACTIVE_TIMEOUT_MS));
     }
 
@@ -2569,7 +2599,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 "position", Map.of(
                         "line", Math.max(0, line),
                         "character", Math.max(0, col)));
-        return LspConversions.hover(requestInteractive(
+        return LspConversions.hover(requests.requestInteractive(
                 "textDocument/hover", params, INTERACTIVE_TIMEOUT_MS));
     }
 
@@ -2589,7 +2619,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!JavaClassFileNavigation.isClassFileUri(uri)) {
             return null;
         }
-        JsonNode result = requestInteractive(
+        JsonNode result = requests.requestInteractive(
                 "java/classFileContents", Map.of("uri", uri), REQUEST_TIMEOUT_MS * 2);
         if (result == null || result.isNull()) {
             return null;
@@ -2623,7 +2653,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!syncBeforeRequest(filePath, text)) {
             return List.of();
         }
-        JsonNode result = request("textDocument/prepareCallHierarchy",
+        JsonNode result = requests.request("textDocument/prepareCallHierarchy",
                 positionParams(filePath, line, col), REQUEST_TIMEOUT_MS);
         return callHierarchyItems(result);
     }
@@ -2632,7 +2662,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!capabilities.foldingRange() || !isReady() || !syncBeforeRequest(filePath, text)) {
             return CompletableFuture.completedFuture(null);
         }
-        return requestAsync("textDocument/foldingRange", Map.of("textDocument", documentId(filePath)),
+        return requests.requestAsync("textDocument/foldingRange", Map.of("textDocument", documentId(filePath)),
                 REQUEST_TIMEOUT_MS, false)
                 .thenApply(result -> result == null || !isCurrentText(filePath, text)
                         ? null : LspConversions.foldRanges(result));
@@ -2642,7 +2672,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!capabilities.typeHierarchy() || !syncBeforeRequest(filePath, text)) {
             return List.of();
         }
-        return LspConversions.typeHierarchyItems(request("textDocument/prepareTypeHierarchy",
+        return LspConversions.typeHierarchyItems(requests.request("textDocument/prepareTypeHierarchy",
                 positionParams(filePath, line, col), REQUEST_TIMEOUT_MS));
     }
 
@@ -2659,7 +2689,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return List.of();
         }
         Object lspItem = item.data() instanceof JsonNode original ? original : serializeTypeHierarchyItem(item);
-        return LspConversions.typeHierarchyItems(request(method, Map.of("item", lspItem), REQUEST_TIMEOUT_MS));
+        return LspConversions.typeHierarchyItems(requests.request(method, Map.of("item", lspItem), REQUEST_TIMEOUT_MS));
     }
 
     private static Map<String, Object> serializeTypeHierarchyItem(TypeHierarchyItem item) {
@@ -2691,7 +2721,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (serialized == null) {
             return List.of();
         }
-        JsonNode result = request(method, Map.of("item", serialized), REQUEST_TIMEOUT_MS);
+        JsonNode result = requests.request(method, Map.of("item", serialized), REQUEST_TIMEOUT_MS);
         if (result == null || !result.isArray()) {
             return List.of();
         }
@@ -2769,9 +2799,9 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         int version = documents.version(uri);
         String key = "symbols|" + uri + "|" + version;
         JsonNode result = interactive
-                ? requestCoalescedInteractive("textDocument/documentSymbol",
+                ? requests.requestCoalescedInteractive("textDocument/documentSymbol",
                         Map.of("textDocument", documentId(filePath)), INTERACTIVE_TIMEOUT_MS, key)
-                : requestCoalescedBackground("textDocument/documentSymbol",
+                : requests.requestCoalescedBackground("textDocument/documentSymbol",
                         Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS, key);
         List<DocumentSymbol> symbols = List.copyOf(LspConversions.documentSymbols(result));
         if (requestedText.equals(documents.content(uri))) {
@@ -2796,8 +2826,8 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return List.of();
         }
         JsonNode result = interactive
-                ? requestAtInteractive("textDocument/documentHighlight", filePath, text, line, col)
-                : requestAt("textDocument/documentHighlight", filePath, text, line, col);
+                ? requests.requestAtInteractive("textDocument/documentHighlight", filePath, text, line, col)
+                : requests.requestAt("textDocument/documentHighlight", filePath, text, line, col);
         if (result == null || !result.isArray() || !isCurrentText(filePath, text)) {
             return List.of();
         }
@@ -2846,7 +2876,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return IdeWorkspaceEdit.empty();
         } catch (Exception e) {
             future.cancel(false);
-            logRequestFailure("textDocument/rename", e);
+            requests.logRequestFailure("textDocument/rename", e);
             String message = LspConversions.errorMessage(e);
             lastRenameProblem = message == null ? "o servidor Java nao conseguiu renomear" : message;
             return IdeWorkspaceEdit.empty();
@@ -2959,7 +2989,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return null;
         } catch (Exception e) {
             future.cancel(false);
-            logRequestFailure(method, e);
+            requests.logRequestFailure(method, e);
             String message = LspConversions.errorMessage(e);
             lastMoveProblem = message == null ? "o servidor Java recusou " + method : message;
             return null;
@@ -3108,8 +3138,8 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         params.put("range", rangeParam(range));
         params.put("context", Map.of("diagnostics", diagnosticsIntersecting(known, range)));
 
-        JsonNode result = requestInteractive("textDocument/codeAction", params,
-                interactiveTimeoutMs());
+        JsonNode result = requests.requestInteractive("textDocument/codeAction", params,
+                requests.interactiveTimeoutMs());
         if (result == null || !result.isArray()) {
             return List.of();
         }
@@ -3154,7 +3184,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         }
         if (!action.hasNonNull("edit") && !action.hasNonNull("command")
                 && action.hasNonNull("data")) {
-            action = requestInteractive("codeAction/resolve", action, REQUEST_TIMEOUT_MS);
+            action = requests.requestInteractive("codeAction/resolve", action, REQUEST_TIMEOUT_MS);
             if (action == null || action.isNull()) {
                 return null;
             }
@@ -3179,7 +3209,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             params.put("textDocument", documentId(filePath));
             params.put("range", diagnostic.get("range"));
             params.put("context", Map.of("diagnostics", List.of(diagnostic), "only", List.of("quickfix")));
-            JsonNode result = requestInteractive("textDocument/codeAction", params,
+            JsonNode result = requests.requestInteractive("textDocument/codeAction", params,
                     IMPORT_CANDIDATES_TIMEOUT_MS);
             if (result == null) {
                 return ImportLookup.PENDING;
@@ -3193,7 +3223,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!capabilities.workspaceSymbol() || query == null || query.isBlank()) {
             return List.of();
         }
-        return parseWorkspaceTypes(requestInteractive("workspace/symbol",
+        return parseWorkspaceTypes(requests.requestInteractive("workspace/symbol",
                 Map.of("query", query.trim()), REQUEST_TIMEOUT_MS));
     }
 
@@ -3365,7 +3395,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             context.putAll(contextExtra);
         }
         params.put("context", context);
-        JsonNode result = request(method, params, REQUEST_TIMEOUT_MS * 2);
+        JsonNode result = requests.request(method, params, REQUEST_TIMEOUT_MS * 2);
         return LspConversions.singleDocumentEdits(result);
     }
 
@@ -3378,7 +3408,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (paramsExtra != null) {
             params.putAll(paramsExtra);
         }
-        return request(method, params, REQUEST_TIMEOUT_MS * 2);
+        return requests.request(method, params, REQUEST_TIMEOUT_MS * 2);
     }
 
     private Map<String, Object> sourceActionParams(Path filePath, String text, int line, int col) {
@@ -3453,7 +3483,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             }
             List<Object> arguments = command.hasNonNull("arguments")
                     ? JSON.convertValue(command.get("arguments"), List.class) : List.of();
-            requestInteractive("workspace/executeCommand",
+            requests.requestInteractive("workspace/executeCommand",
                     Map.of("command", id, "arguments", arguments), REQUEST_TIMEOUT_MS * 2);
         } catch (Exception e) {
             log.debug("Falha ao executar code action Java: {}", rootMessage(e));
@@ -3465,7 +3495,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!capabilities.inlayHint() || isWarmingUp() || !syncBeforeRequest(filePath, text)) {
             return CompletableFuture.completedFuture(List.of());
         }
-        return requestAsync("textDocument/inlayHint", inlayHintParams(filePath, firstLine, lastLine),
+        return requests.requestAsync("textDocument/inlayHint", inlayHintParams(filePath, firstLine, lastLine),
                 REQUEST_TIMEOUT_MS, false)
                 .thenApply(result -> isCurrentText(filePath, text) ? inlayHintsOf(result) : List.<InlayHint>of());
     }
@@ -3477,7 +3507,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!syncBeforeRequest(filePath, text)) {
             return List.of();
         }
-        JsonNode result = requestBackground("textDocument/inlayHint",
+        JsonNode result = requests.requestBackground("textDocument/inlayHint",
                 inlayHintParams(filePath, firstLine, lastLine), REQUEST_TIMEOUT_MS);
         if (!isCurrentText(filePath, text)) {
             return List.of();
@@ -3544,7 +3574,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     private void resolveCodeLenses(Path file, String uri, LensWork work) {
         try {
-            JsonNode response = requestBackground("textDocument/codeLens",
+            JsonNode response = requests.requestBackground("textDocument/codeLens",
                     Map.of("textDocument", Map.of("uri", uri)), REQUEST_TIMEOUT_MS * 2);
             if (!currentLensWork(uri, work)) return;
             if (response == null || !response.isArray()) {
@@ -3620,7 +3650,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!capabilities.semanticTokens() || isWarmingUp() || !syncBeforeRequest(filePath, text)) {
             return CompletableFuture.completedFuture(List.of());
         }
-        return requestAsync("textDocument/semanticTokens/full", Map.of("textDocument", documentId(filePath)),
+        return requests.requestAsync("textDocument/semanticTokens/full", Map.of("textDocument", documentId(filePath)),
                 REQUEST_TIMEOUT_MS, false)
                 .thenApply(result -> result == null || !isCurrentText(filePath, text) ? List.<SemanticToken>of()
                         : SemanticTokenDecoder.decode(result.get("data"), TOKEN_TYPES, TOKEN_MODIFIERS));
@@ -3633,7 +3663,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         if (!syncBeforeRequest(filePath, text)) {
             return List.of();
         }
-        JsonNode result = requestBackground("textDocument/semanticTokens/full",
+        JsonNode result = requests.requestBackground("textDocument/semanticTokens/full",
                 Map.of("textDocument", documentId(filePath)), REQUEST_TIMEOUT_MS);
         if (result == null || !isCurrentText(filePath, text)) {
             return List.of();
@@ -3654,7 +3684,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                         "tabSize", Math.max(1, tabSize),
                         "insertSpaces", insertSpaces));
 
-        JsonNode result = request("textDocument/formatting", params, REQUEST_TIMEOUT_MS * 2);
+        JsonNode result = requests.request("textDocument/formatting", params, REQUEST_TIMEOUT_MS * 2);
         List<TextEdit> edits = LspConversions.textEdits(result);
         return edits.isEmpty() ? null : TextEditApplier.apply(text, edits);
     }
@@ -3700,7 +3730,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 "diagnostics", List.of(),
                 "only", List.of("source.organizeImports")));
 
-        JsonNode result = request("textDocument/codeAction", params, REQUEST_TIMEOUT_MS);
+        JsonNode result = requests.request("textDocument/codeAction", params, REQUEST_TIMEOUT_MS);
         if (result == null || !result.isArray()) {
             return null;
         }
@@ -3777,62 +3807,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         return normalized;
     }
 
-    private JsonNode requestAt(String method, Path filePath, String text, int line, int col) {
-        return requestAt(method, filePath, text, line, col, REQUEST_TIMEOUT_MS);
-    }
-
-    private JsonNode requestAt(String method, Path filePath, String text, int line, int col,
-                               long timeoutMs) {
-        if (!syncBeforeRequest(filePath, text)) {
-            return null;
-        }
-        return request(method, positionParams(filePath, line, col), timeoutMs);
-    }
-
-    private JsonNode requestAtInteractive(String method, Path filePath, String text,
-                                          int line, int col) {
-        if (!syncBeforeRequest(filePath, text)) {
-            return null;
-        }
-        return requestInteractive(method, positionParams(filePath, line, col),
-                interactiveTimeoutMs());
-    }
-
-    private CompletableFuture<JsonNode> requestAtInteractiveAsync(String method, Path filePath, String text,
-                                                                  int line, int col) {
-        if (!syncBeforeRequest(filePath, text)) {
-            return CompletableFuture.completedFuture(null);
-        }
-        return requestAsync(method, positionParams(filePath, line, col), interactiveTimeoutMs(), true);
-    }
-
-    private CompletableFuture<JsonNode> requestAsync(String method, Object params, long timeoutMs,
-                                                     boolean interactive) {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || (interactive ? !isInteractive() : !isReady())) {
-            return CompletableFuture.completedFuture(null);
-        }
-        CompletableFuture<JsonNode> future = rpc.request(method, params);
-        String key = CANCELLED_ON_EDIT.contains(method) ? editScopedKey(method, params) : null;
-        if (key != null) {
-            inFlightRequests.put(key, future);
-            future.whenComplete((result, error) -> inFlightRequests.remove(key, future));
-        }
-        CompletableFuture.delayedExecutor(timeoutMs, TimeUnit.MILLISECONDS)
-                .execute(() -> future.cancel(false));
-        return future.handle((result, error) -> {
-            if (error != null && !future.isCancelled()) {
-                logRequestFailure(method, error instanceof Exception exception
-                        ? exception : new Exception(error));
-            }
-            return error == null ? result : null;
-        });
-    }
-
-    private long interactiveTimeoutMs() {
-        return isReady() && !isWarmingUp() ? INTERACTIVE_TIMEOUT_MS : INDEXING_INTERACTIVE_TIMEOUT_MS;
-    }
-
     private boolean syncBeforeRequest(Path filePath, String text) {
         return syncBeforeRequest(filePath, text, false);
     }
@@ -3858,110 +3832,6 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         return true;
     }
 
-    private JsonNode request(String method, Object params, long timeoutMs) {
-        return request(method, params, timeoutMs, false);
-    }
-
-    private JsonNode requestInteractive(String method, Object params, long timeoutMs) {
-        return request(method, params, timeoutMs, true);
-    }
-
-    private JsonNode requestBackground(String method, Object params, long timeoutMs) {
-        return isWarmingUp() ? null : request(method, params, timeoutMs, false);
-    }
-
-    private JsonNode request(String method, Object params, long timeoutMs, boolean interactive) {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || (interactive ? !isInteractive() : !isReady())) {
-            return null;
-        }
-        CompletableFuture<JsonNode> future = rpc.request(method, params);
-        String key = CANCELLED_ON_EDIT.contains(method) ? editScopedKey(method, params) : null;
-        if (key != null) {
-            inFlightRequests.put(key, future);
-            future.whenComplete((result, error) -> inFlightRequests.remove(key, future));
-        }
-        try {
-            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            future.cancel(false);
-            Thread.currentThread().interrupt();
-            return null;
-        } catch (Exception e) {
-            future.cancel(false);
-            logRequestFailure(method, e);
-            return null;
-        } finally {
-            if (key != null) {
-                inFlightRequests.remove(key, future);
-            }
-        }
-    }
-
-    private static final Set<String> CANCELLED_ON_EDIT = Set.of(
-            "textDocument/hover", "textDocument/signatureHelp", "textDocument/semanticTokens/full",
-            "textDocument/inlayHint", "textDocument/codeLens", "textDocument/documentHighlight",
-            "textDocument/foldingRange", "textDocument/selectionRange");
-
-    private final AtomicLong editScopedSequence = new AtomicLong();
-
-    private String editScopedKey(String method, Object params) {
-        if (!(params instanceof Map<?, ?> map) || !(map.get("textDocument") instanceof Map<?, ?> document)
-                || !(document.get("uri") instanceof String uri)) {
-            return null;
-        }
-        return method + "|" + uri + "|#" + editScopedSequence.incrementAndGet();
-    }
-
-    private JsonNode requestCoalesced(String method, Object params, long timeoutMs, String key) {
-        return requestCoalesced(method, params, timeoutMs, key, false);
-    }
-
-    private JsonNode requestCoalescedInteractive(String method, Object params, long timeoutMs,
-                                                 String key) {
-        return requestCoalesced(method, params, timeoutMs, key, true);
-    }
-
-    private JsonNode requestCoalescedBackground(String method, Object params, long timeoutMs,
-                                                String key) {
-        return isWarmingUp() ? null : requestCoalesced(method, params, timeoutMs, key, false);
-    }
-
-    private JsonNode requestCoalesced(String method, Object params, long timeoutMs, String key,
-                                      boolean interactive) {
-        LspJsonRpcClient rpc = client;
-        if (rpc == null || (interactive ? !isInteractive() : !isReady())) {
-            return null;
-        }
-        CompletableFuture<JsonNode> future = inFlightRequests.computeIfAbsent(key, ignored ->
-                rpc.request(method, params));
-        future.whenComplete((result, error) -> inFlightRequests.remove(key, future));
-        try {
-            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            inFlightRequests.remove(key, future);
-            future.cancel(false);
-            Thread.currentThread().interrupt();
-            return null;
-        } catch (Exception e) {
-            inFlightRequests.remove(key, future);
-            future.cancel(false);
-            logRequestFailure(method, e);
-            return null;
-        }
-    }
-
-    private void logRequestFailure(String method, Exception error) {
-        long now = System.currentTimeMillis();
-        AtomicLong last = lastFailureLog.computeIfAbsent(method, ignored -> new AtomicLong());
-        long previous = last.get();
-        if (now - previous >= 10_000 && last.compareAndSet(previous, now)) {
-            String reason = error instanceof TimeoutException || error.getCause() instanceof TimeoutException
-                    ? "tempo limite excedido" : rootMessage(error);
-            log.debug("Requisicao {} falhou: {}", method, reason);
-        }
-    }
-
     private void clearNavigationCache(String uri) {
         workspaceRevision.incrementAndGet();
         if (uri == null || uri.isBlank()) {
@@ -3971,51 +3841,8 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         navigationCache.keySet().removeIf(key -> key.contains("|" + uri + "|"));
     }
 
-    private void cancelInFlightForUri(String uri) {
-        if (uri == null || uri.isBlank()) {
-            return;
-        }
-        inFlightRequests.forEach((key, future) -> {
-            if (key.contains("|" + uri + "|") && inFlightRequests.remove(key, future)) {
-                future.cancel(false);
-            }
-        });
-    }
-
     private boolean isCurrentText(Path filePath, String text) {
         return filePath != null && (text == null ? "" : text)
                 .equals(documents.content(LspConversions.toUri(filePath)));
-    }
-
-    private static Map<String, Object> positionParams(Path filePath, int line, int col) {
-        Map<String, Object> params = new LinkedHashMap<>();
-        params.put("textDocument", documentId(filePath));
-        params.put("position", Map.of("line", Math.max(0, line), "character", Math.max(0, col)));
-        return params;
-    }
-
-    private static Map<String, Object> documentId(Path filePath) {
-        return Map.of("uri", LspConversions.toUri(filePath));
-    }
-
-    private static Map<String, Object> rangeParam(Range range) {
-        Range safe = range == null ? Range.point(0, 0) : range;
-        return Map.of(
-                "start", Map.of("line", safe.start().line(), "character", safe.start().col()),
-                "end", Map.of("line", safe.end().line(), "character", safe.end().col()));
-    }
-
-    static String rootMessage(Throwable error) {
-        Throwable cause = rootCause(error);
-        String message = cause.getMessage();
-        return message == null || message.isBlank() ? cause.getClass().getSimpleName() : message;
-    }
-
-    static Throwable rootCause(Throwable error) {
-        Throwable cause = error;
-        while (cause.getCause() != null && cause.getCause() != cause) {
-            cause = cause.getCause();
-        }
-        return cause;
     }
 }
