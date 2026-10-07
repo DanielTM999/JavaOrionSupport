@@ -70,6 +70,7 @@ import dtm.ide.adapter.UiThreads;
 import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.NavigationViews;
+import dtm.ide.adapter.ProjectTreeMenuSupport;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.ProjectStructureSupport;
 import dtm.ide.adapter.SpringSupport;
@@ -1102,6 +1103,51 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestSetCoverageButtonEnabled(boolean enabled) {
             JavaIdeAdapter.this.requestSetCoverageButtonEnabled(enabled);
         }
+    
+        @Override
+        public void runBuild(BuildSystem.BuildAction action, String title, JavaModule module) {
+            JavaIdeAdapter.this.runBuild(action, title, module);
+        }
+
+        @Override
+        public void openDependencyManager() {
+            JavaIdeAdapter.this.openDependencyManager();
+        }
+
+        @Override
+        public void clearCaches() {
+            JavaIdeAdapter.this.clearCaches();
+        }
+
+        @Override
+        public void requestProjectTreeViewRefresh() {
+            JavaIdeAdapter.this.requestProjectTreeViewRefresh();
+        }
+
+        @Override
+        public ModernInputDialog.ModernInputDialogBuilder createModernInputDialogBuilder() {
+            return JavaIdeAdapter.this.createModernInputDialogBuilder();
+        }
+
+        @Override
+        public String readCurrentText(Path file) {
+            return JavaIdeAdapter.this.readCurrentText(file);
+        }
+
+        @Override
+        public void onBuildFileChanged(Path file) {
+            JavaIdeAdapter.this.onBuildFileChanged(file);
+        }
+
+        @Override
+        public JavaFileChangeRouter fileChangeRouter() {
+            return fileChangeRouter;
+        }
+
+        @Override
+        public void requestProjectTreeRevealCreated(Path file) {
+            JavaIdeAdapter.this.requestProjectTreeRevealCreated(file);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -1121,6 +1167,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final ConditionalBreakpointSupport conditionalBreakpoints = new ConditionalBreakpointSupport(adapterHost);
     private final DebugSupport debugSupport = new DebugSupport(adapterHost);
     private final RunLauncher runLauncher = new RunLauncher(adapterHost);
+    private final ProjectTreeMenuSupport projectTreeMenu = new ProjectTreeMenuSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1165,16 +1212,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String STRUCTURE_TAB_ID = "javaProjectStructure";
 
 
-    private static final String IDE_MENU_ID_NEW = "tree.new";
-
-    private static final int IDE_NEW_MENU_INDEX = 4;
-
-    private static final String MENU_ID_NEW_JAVA = "java.tree.new";
-    private static final String MENU_ID_BUILD_MODULE = "java.tree.buildModule";
-    private static final String MENU_ID_SYNC = "java.tree.sync";
-    private static final String MENU_ID_ADD_DEPENDENCY = "java.tree.addDependency";
-    private static final String MENU_ID_RELOAD = "java.tree.reload";
-    private static final String MENU_ID_MARK_DIRECTORY = "java.tree.markDirectory";
 
     private volatile JavaLanguageServer jdtLs;
     private volatile ClassFileSupport classFileUris;
@@ -3818,392 +3855,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void contributeProjectTreeMenu(IdeMenuBuilder menu, List<Path> selectedPaths) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null || selectedPaths == null || selectedPaths.isEmpty()) {
-            return;
-        }
-        Path selected = selectedPaths.getFirst();
-        Path directory = Files.isDirectory(selected) ? selected : selected.getParent();
-        if (directory == null) {
-            return;
-        }
-
-        boolean singleDirectory = selectedPaths.size() == 1 && Files.isDirectory(selected);
-        contributeNewJavaFileMenu(menu, current, directory, singleDirectory);
-
-        int position = singleDirectory ? IDE_NEW_MENU_INDEX + 1 : Integer.MAX_VALUE;
-        if (singleDirectory) {
-            contributeMarkDirectoryMenu(menu, position++, directory);
-        }
-        JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
-        if (module != null && current.kind().hasBuildTool()) {
-            menu.at(position++)
-                    .withId(MENU_ID_BUILD_MODULE)
-                    .item(text("tree.buildModule", "Compilar modulo"),
-                            JavaIcons.buildTool(current, JavaIcons.SMALL),
-                            event -> runBuild(BuildSystem.BuildAction.COMPILE,
-                                    text("menu.compile", "Compilar"), module));
-            menu.at(position++)
-                    .withId(MENU_ID_SYNC)
-                    .item(text("tree.sync", "Sincronizar projeto"),
-                            JavaIcons.sync(JavaIcons.SMALL), event -> syncProject());
-            menu.at(position++)
-                    .withId(MENU_ID_ADD_DEPENDENCY)
-                    .item(text("tree.addDependency", "Adicionar dependencia..."),
-                            JavaIcons.dependency(JavaIcons.SMALL),
-                            event -> openDependencyManager());
-        }
-        menu.at(position)
-                .withId(MENU_ID_RELOAD)
-                .item(text("tree.reload", "Recarregar projeto"),
-                        JavaIcons.refresh(JavaIcons.SMALL), event -> clearCaches());
-    }
-
-    private void contributeMarkDirectoryMenu(IdeMenuBuilder menu, int position, Path directory) {
-        Path root = projectRoot;
-        if (root == null) {
-            return;
-        }
-        Path folder = JavaProjectConventions.normalize(directory);
-        Path normalizedRoot = JavaProjectConventions.normalize(root);
-        if (!folder.startsWith(normalizedRoot) || folder.equals(normalizedRoot)) {
-            return;
-        }
-        ProjectLayout.Role marked = ProjectLayout.of(root).roleOf(folder);
-        menu.at(position).withId(MENU_ID_MARK_DIRECTORY)
-                .submenu(text("tree.markDirectory", "Marcar diretorio como"),
-                        JavaIcons.folder(JavaIcons.SMALL), target -> {
-                            for (ProjectLayout.Role role : ProjectLayout.Role.values()) {
-                                target.item(markDirectoryLabel(role), markDirectoryIcon(role),
-                                        role != marked,
-                                        event -> markDirectoryAs(folder, role));
-                            }
-                            target.separator();
-                            target.item(text("tree.markDirectory.clear",
-                                            "Usar o padrao do projeto"),
-                                    JavaIcons.sync(JavaIcons.SMALL), marked != null,
-                                    event -> markDirectoryAs(folder, null));
-                        });
-    }
-
-    private String markDirectoryLabel(ProjectLayout.Role role) {
-        return switch (role) {
-            case SOURCE -> text("tree.markDirectory.source", "Codigo-fonte");
-            case TEST -> text("tree.markDirectory.test", "Codigo de teste");
-            case RESOURCE -> text("tree.markDirectory.resource", "Recursos");
-            case TEST_RESOURCE -> text("tree.markDirectory.testResource", "Recursos de teste");
-            case EXCLUDED -> text("tree.markDirectory.excluded", "Excluida");
-        };
-    }
-
-    private static Icon markDirectoryIcon(ProjectLayout.Role role) {
-        return switch (role) {
-            case SOURCE, RESOURCE -> JavaIcons.java(JavaIcons.SMALL);
-            case TEST, TEST_RESOURCE -> JavaIcons.test(JavaIcons.SMALL);
-            case EXCLUDED -> JavaIcons.stop(JavaIcons.SMALL);
-        };
-    }
-
-    private void markDirectoryAs(Path folder, ProjectLayout.Role role) {
-        Path root = projectRoot;
-        if (root == null || folder == null) {
-            return;
-        }
-        background.submit(() -> {
-            try {
-                ProjectLayout layout = ProjectLayout.of(root);
-                layout.setRole(folder, role);
-                layout.save();
-                syncProject();
-                JavaProjectStructurePanel panel = structurePanel;
-                if (panel != null) {
-                    panel.reload();
-                }
-                requestProjectTreeViewRefresh();
-                String label = role == null
-                        ? text("tree.markDirectory.clear", "Usar o padrao do projeto")
-                        : markDirectoryLabel(role);
-                setStatusBarText("Java: " + root.relativize(folder) + " - " + label);
-            } catch (Exception error) {
-                log.warn("Falha ao marcar o diretorio {}", folder, error);
-                setStatusBarText("Java: " + text("tree.markDirectory.failed",
-                        "Falha ao marcar o diretorio") + " - " + rootMessage(error));
-            }
-        });
-    }
-
-    private void contributeNewJavaFileMenu(IdeMenuBuilder menu, JavaProjectDescriptor current,
-                                           Path directory, boolean ideOffersNewMenu) {
-        if (!Files.isDirectory(directory)) {
-            return;
-        }
-        List<JavaFileTemplates.Kind> kinds = new ArrayList<>();
-        for (JavaFileTemplates.Kind kind : JavaFileTemplates.Kind.values()) {
-            if (!kind.isSpring() || current.spring()) {
-                kinds.add(kind);
-            }
-        }
-        if (ideOffersNewMenu) {
-            menu.into(IDE_MENU_ID_NEW, target -> {
-                target.separator();
-                addTemplateItems(target, kinds, directory);
-            });
-            return;
-        }
-        menu.withId(MENU_ID_NEW_JAVA).submenu(text("tree.new", "Novo Java"),
-                JavaIcons.java(JavaIcons.SMALL), target -> addTemplateItems(target, kinds, directory));
-    }
-
-    private void addTemplateItems(IdeMenuBuilder target, List<JavaFileTemplates.Kind> kinds,
-                                  Path directory) {
-        if (descriptor != null && descriptor.kind().hasBuildTool()) {
-            target.item(text("new.module", "Modulo..."), JavaIcons.module(JavaIcons.SMALL), event -> createJavaModule(directory));
-        }
-        for (JavaFileTemplates.Kind kind : kinds) {
-            target.item(kind.displayName(), iconFor(kind),
-                    event -> createJavaFile(kind, directory));
-        }
-    }
-
-    private void createJavaModule(Path directory) {
-        JavaProjectDescriptor project = descriptor;
-        if (project == null) return;
-        String name = createModernInputDialogBuilder().title("Novo modulo")
-                .message("Nome do modulo em " + directory + ":").show();
-        if (name == null || name.isBlank()) return;
-        background.submit(() -> {
-            try {
-                var plan = dtm.ide.wizard.JavaModuleScaffolder.prepare(project, directory, name.trim());
-                String openParent = readCurrentText(plan.parentBuild());
-                if (openParent != null && !Objects.equals(openParent.replace("\r\n", "\n"),
-                        plan.previousParent() == null ? null : plan.previousParent().replace("\r\n", "\n")))
-                    throw new IllegalStateException("Salve as alteracoes do build pai antes de criar o modulo.");
-                boolean accepted = !plan.convertsPackaging() || onUi(() -> JavaSourceActionDialogs.confirm(
-                        createModernComponentDialogBuilder(Boolean.class), "Converter projeto em agregador",
-                        "O POM pai sera convertido para packaging pom. Seus fontes deixarao de ser compilados neste modulo. Continuar?", "Converter e criar"));
-                if (!accepted) return;
-                dtm.ide.wizard.JavaModuleScaffolder.create(plan);
-                SwingUtilities.invokeLater(() -> {
-                    IdeEditorContext editor = editorContextFor(plan.parentBuild());
-                    if (editor != null) editor.setText(plan.updatedParent());
-                    requestProjectTreeViewRefresh();
-                    onBuildFileChanged(plan.parentBuild());
-                    openAt(plan.files().keySet().iterator().next(), 0, 0);
-                });
-            } catch (Exception error) {
-                log.warn("Falha ao criar modulo", error);
-                setStatusBarText("Java: " + error.getMessage());
-            }
-        });
-    }
-
-    private static Icon iconFor(JavaFileTemplates.Kind kind) {
-        if (kind.isSpring()) {
-            return JavaIcons.spring(JavaIcons.SMALL);
-        }
-        return kind == JavaFileTemplates.Kind.TEST
-                ? JavaIcons.test(JavaIcons.SMALL)
-                : JavaIcons.java(JavaIcons.SMALL);
-    }
-
-    private void createJavaFile(JavaFileTemplates.Kind kind, Path directory) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null) {
-            return;
-        }
-        if (kind == JavaFileTemplates.Kind.REPOSITORY) {
-            createRepository(directory, current);
-            return;
-        }
-        if (JavaFileTemplates.acceptsInterfaces(kind)) {
-            createTypeWithHeritage(kind, directory, current);
-            return;
-        }
-        ModernInputDialog.ModernInputDialogBuilder dialog = createModernInputDialogBuilder();
-        if (dialog == null) {
-            return;
-        }
-        String typed = dialog
-                .title(text("dialog.newType.title", "Novo") + " " + kind.displayName())
-                .message(text("dialog.newType.message", "Nome do tipo:"))
-                .show();
-        if (typed == null || typed.isBlank()) {
-            return;
-        }
-        JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
-        Path file = directory.resolve(JavaFileTemplates.fileNameOf(typed));
-        writeCreatedFile(file, JavaFileTemplates.render(kind,
-                JavaFileTemplates.packageOf(directory, module), typed));
-    }
-
-    private void createTypeWithHeritage(JavaFileTemplates.Kind kind, Path directory,
-                                        JavaProjectDescriptor current) {
-        JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
-        String packageName = JavaFileTemplates.packageOf(directory, module);
-        JavaTypeCreationPanel panel = new JavaTypeCreationPanel(
-                JavaFileTemplates.acceptsSuperclass(kind),
-                kind == JavaFileTemplates.Kind.INTERFACE
-                        ? text("dialog.newType.extends", "Estende")
-                        : text("dialog.newType.implements", "Implementa"),
-                this::searchTypeCandidates, background, choice -> {
-            Path file = directory.resolve(JavaFileTemplates.fileNameOf(choice.name()));
-            if (openIfExists(file)) {
-                return;
-            }
-            String skeleton = JavaFileTemplates.render(kind, packageName, choice.name(),
-                    choice.superclass(), choice.interfaces());
-            boolean hasSuperclass = JavaFileTemplates.acceptsSuperclass(kind)
-                    && !choice.superclass().isBlank();
-            if (!hasSuperclass && choice.interfaces().isEmpty()) {
-                writeCreatedFile(file, skeleton);
-                return;
-            }
-            setStatusBarText(text("status.newType.generating", "Java: gerando os metodos herdados..."));
-            background.submit(() -> {
-                String generated = withInheritedMembers(file, skeleton, hasSuperclass);
-                SwingUtilities.invokeLater(() -> {
-                    writeCreatedFile(file, generated == null ? skeleton : generated);
-                    if (generated == null) {
-                        setStatusBarText(text("status.newType.notGenerated",
-                                "Java: tipo criado sem os metodos herdados (JDT LS indisponivel)"));
-                    }
-                });
-            });
-        });
-        showPopup(PlatformPopupBuilder.builder()
-                .component(panel)
-                .title(text("dialog.newType.title", "Novo") + " " + kind.displayName())
-                .size(540, 250)
-                .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
-                .onLoad(component -> panel.focusName())
-                .build());
-    }
-
-    private List<JavaTypeCreationPanel.TypeCandidate> searchTypeCandidates(String query) {
-        String term = query == null ? "" : query.trim();
-        if (term.isEmpty()) {
-            return List.of();
-        }
-        String lower = term.toLowerCase(Locale.ROOT);
-        Map<String, JavaTypeCreationPanel.TypeCandidate> found = new LinkedHashMap<>();
-        spring.index().snapshot().types().stream()
-                .filter(type -> type.kind() == JavaType.Kind.CLASS
-                        || type.kind() == JavaType.Kind.INTERFACE)
-                .filter(type -> type.simpleName().toLowerCase(Locale.ROOT).contains(lower))
-                .sorted(Comparator.comparing((JavaType type) ->
-                                !type.simpleName().toLowerCase(Locale.ROOT).startsWith(lower))
-                        .thenComparing(JavaType::simpleName))
-                .forEach(type -> found.putIfAbsent(type.qualifiedName(),
-                        new JavaTypeCreationPanel.TypeCandidate(type.qualifiedName(),
-                                type.kind() == JavaType.Kind.INTERFACE)));
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null && lsp.isInteractive()) {
-            for (TypeSymbol symbol : lsp.workspaceTypes(term)) {
-                found.putIfAbsent(symbol.qualifiedName(), new JavaTypeCreationPanel.TypeCandidate(
-                        symbol.qualifiedName(), symbol.isInterface()));
-            }
-        }
-        return found.values().stream().limit(80).toList();
-    }
-
-    private String withInheritedMembers(Path file, String skeleton, boolean hasSuperclass) {
-        JavaLanguageServer lsp = interactiveServerFor(file);
-        SourceGenerationSupport generator = lsp == null ? null : lsp.extension(SourceGenerationSupport.class);
-        if (generator == null) {
-            return null;
-        }
-        try {
-            String source = skeleton;
-            if (hasSuperclass) {
-                int line = JavaFileTemplates.closingBraceLine(source);
-                SourceGenerationSupport.ConstructorsStatus constructors =
-                        generator.constructorsStatus(file, source, line, 0);
-                boolean needsConstructor = !constructors.constructors().isEmpty()
-                        && constructors.constructors().stream()
-                        .noneMatch(item -> item.label().endsWith("()"));
-                if (needsConstructor) {
-                    var edits = generator.generateConstructors(file, source, line, 0,
-                            constructors.constructors(), List.of());
-                    if (edits != null && !edits.isEmpty()) {
-                        source = lsp.applyTextEdits(source, edits);
-                    }
-                }
-            }
-            int line = JavaFileTemplates.closingBraceLine(source);
-            SourceGenerationSupport.OverrideStatus status = generator.overridableMethods(file, source, line, 0);
-            if (status.type().isBlank()) {
-                return null;
-            }
-            List<SourceGenerationSupport.SourceItem> abstracts = status.methods().stream()
-                    .filter(SourceGenerationSupport.SourceItem::selected).toList();
-            if (!abstracts.isEmpty()) {
-                var edits = generator.generateOverridableMethods(file, source, line, 0, abstracts);
-                if (edits != null && !edits.isEmpty()) {
-                    source = lsp.applyTextEdits(source, edits);
-                }
-            }
-            return source;
-        } catch (RuntimeException error) {
-            log.warn("Falha ao gerar os metodos herdados de {}", file, error);
-            return null;
-        } finally {
-            lsp.closeDocument(file);
-        }
-    }
-
-    private boolean openIfExists(Path file) {
-        if (!Files.exists(file)) {
-            return false;
-        }
-        setStatusBarText(text("status.fileExists", "Java: o arquivo ja existe") + " - "
-                + file.getFileName());
-        requestOpenFile(file);
-        return true;
-    }
-
-    private void writeCreatedFile(Path file, String source) {
-        if (openIfExists(file)) {
-            return;
-        }
-        try {
-            Files.createDirectories(file.getParent());
-            Files.writeString(file, source);
-            JavaFileChangeRouter router = fileChangeRouter;
-            if (router != null) {
-                router.acceptCreated(file);
-            }
-            requestProjectTreeRevealCreated(file);
-            requestOpenFile(file);
-        } catch (Exception error) {
-            log.warn("Falha ao criar {}", file, error);
-            setStatusBarText(text("status.createFailed", "Java: falha ao criar o arquivo") + " - "
-                    + rootMessage(error));
-        }
-    }
-
-    private void createRepository(Path directory, JavaProjectDescriptor current) {
-        JavaModule module = current.moduleOf(directory).orElse(current.rootModule());
-        java.util.function.Function<JpaEntity, JavaModule> moduleOf = entity -> entity.file() == null
-                ? null : current.moduleOf(entity.file()).orElse(null);
-        List<JpaEntity> entities = spring.index().snapshot().entities().stream()
-                .filter(JpaEntity::persistent)
-                .sorted(Comparator.comparing((JpaEntity entity) -> module != null
-                                && !Objects.equals(module, moduleOf.apply(entity)))
-                        .thenComparing(JpaEntity::type))
-                .toList();
-        RepositoryCreationPanel panel = new RepositoryCreationPanel(entities, entity -> {
-            JavaModule owner = moduleOf.apply(entity);
-            return owner == null || owner.equals(module) ? "" : owner.name();
-        }, choice -> writeCreatedFile(directory.resolve(JavaFileTemplates.fileNameOf(choice.name())),
-                JavaFileTemplates.renderRepository(JavaFileTemplates.packageOf(directory, module),
-                        choice.name(), choice.entity().type(), choice.idType())));
-        showPopup(PlatformPopupBuilder.builder()
-                .component(panel)
-                .title(text("dialog.repository.title", "Novo repository"))
-                .size(500, 320)
-                .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
-                .onLoad(component -> panel.focusName())
-                .build());
+        projectTreeMenu.contributeProjectTreeMenu(menu, selectedPaths);
     }
 
     @Override
