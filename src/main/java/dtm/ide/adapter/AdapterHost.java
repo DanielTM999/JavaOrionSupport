@@ -10,6 +10,7 @@ import dtm.ide.api.extension.output.OutputPanelOptions;
 import dtm.ide.api.extension.runconfig.RunConfigurationData;
 import dtm.ide.api.extension.runconfig.RunExecutionContext;
 import dtm.ide.api.extension.runconfig.RunProcessHandle;
+import dtm.ide.api.extension.screen.ToolIconType;
 import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
@@ -34,11 +35,13 @@ import dtm.ide.test.JavaTestRunner;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaTodoPanel;
+import dtm.stools.component.panels.dock.DockRegion;
 import dtm.stools.component.panels.editor.code.CodeEditor;
 import dtm.stools.component.panels.editor.code.api.Location;
 import dtm.stools.component.popup.ModernComponentDialog;
 import dtm.stools.component.popup.ModernDialog;
 
+import java.awt.Dimension;
 import java.awt.Point;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -47,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -162,4 +166,16 @@ public interface AdapterHost extends AdapterContext {
     IdeEditorContext getEditor(Path file, boolean focus);
     <T> ModernComponentDialog.ModernComponentDialogBuilder<T> createModernComponentDialogBuilder(Class<T> type);
     JavaDebugSession debugSession();
+    Object monitor();
+    AtomicBoolean debugActiveFlag();
+    NavigationViews navigationViews();
+    void requestSetHotReloadButtonVisible(boolean visible);
+    void requestSetHotReloadButtonEnabled(boolean enabled);
+    JavaLanguageServer ensureLanguageServer();
+    String registerToolPanel(DockRegion region, String title, ToolIconType icon, JComponent component,
+                             Dimension size);
+    void closeDebugRelay();
+    boolean supportsHotReloadForSelection();
+    void requestRepaintCodeEditor(Path file);
+    void requestRepaintCodeEditorBreakpointLine(Path file);
 }

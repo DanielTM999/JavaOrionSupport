@@ -58,6 +58,7 @@ import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildToolsSupport;
 import dtm.ide.adapter.CodeLensSupport;
 import dtm.ide.adapter.CompletionEngine;
+import dtm.ide.adapter.DebugSupport;
 import dtm.ide.adapter.ConditionalBreakpointSupport;
 import dtm.ide.adapter.DiagnosticsEngine;
 import dtm.ide.adapter.RenameSupport;
@@ -405,7 +406,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
     private static final String BUILD_PROGRESS_ID = "javaBuild";
     private static final String RUN_BUILD_PROGRESS_ID = "javaRunBuild";
-    private static final long LSP_DEBUG_POLL_MS = 250;
     private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
     private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
     private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
@@ -420,7 +420,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long SYNC_WORK_START_GRACE_MS = 3_000;
     private static final long SYNC_WORK_MAX_MS = 120_000;
     private static final String DEPENDENCIES_TAB_ID = "javaDependencies";
-    private static final Color DEBUG_LINE_COLOR = new Color(227, 100, 100, 80);
     private final class HostBridge implements AdapterHost {
         @Override
         public boolean debugActive() {
@@ -460,9 +459,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public String registerTodoPanel(JavaTodoPanel panel, Icon icon) {
             return icon == null
-                    ? registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"),
+                    ? JavaIdeAdapter.this.registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"),
                             ToolIconType.INFO, panel)
-                    : registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"), icon, panel);
+                    : JavaIdeAdapter.this.registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"), icon, panel);
         }
 
         @Override
@@ -602,7 +601,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public String registerBottomPanel(String title, Icon icon, JComponent panel) {
-            return registerToolPanel(DockRegion.BOTTOM, title, icon, panel);
+            return JavaIdeAdapter.this.registerToolPanel(DockRegion.BOTTOM, title, icon, panel);
         }
 
         @Override
@@ -754,7 +753,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public void warmUpDebugAdapter() {
-            JavaIdeAdapter.this.warmUpDebugAdapter();
+            debugSupport.warmUpDebugAdapter();
         }
 
         @Override
@@ -976,7 +975,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public boolean isDebugPaused() {
-            return JavaIdeAdapter.this.isDebugPaused();
+            return debugSupport.isDebugPaused();
         }
     
         @Override
@@ -997,7 +996,63 @@ public class JavaIdeAdapter extends IdeAdapter {
     
         @Override
         public JavaDebugSession debugSession() {
-            return debugSession;
+            return debugSupport.session();
+        }
+    
+        @Override
+        public Object monitor() {
+            return JavaIdeAdapter.this;
+        }
+
+        @Override
+        public AtomicBoolean debugActiveFlag() {
+            return debugActive;
+        }
+
+        @Override
+        public NavigationViews navigationViews() {
+            return navigationViews;
+        }
+
+        @Override
+        public void requestSetHotReloadButtonVisible(boolean visible) {
+            JavaIdeAdapter.this.requestSetHotReloadButtonVisible(visible);
+        }
+
+        @Override
+        public void requestSetHotReloadButtonEnabled(boolean enabled) {
+            JavaIdeAdapter.this.requestSetHotReloadButtonEnabled(enabled);
+        }
+
+        @Override
+        public JavaLanguageServer ensureLanguageServer() {
+            return JavaIdeAdapter.this.ensureLanguageServer();
+        }
+
+        @Override
+        public String registerToolPanel(DockRegion region, String title, ToolIconType icon, JComponent component,
+                                        Dimension size) {
+            return JavaIdeAdapter.this.registerToolPanel(region, title, icon, component, size);
+        }
+
+        @Override
+        public void closeDebugRelay() {
+            JavaIdeAdapter.this.closeDebugRelay();
+        }
+
+        @Override
+        public boolean supportsHotReloadForSelection() {
+            return JavaIdeAdapter.this.supportsHotReloadForSelection();
+        }
+
+        @Override
+        public void requestRepaintCodeEditor(Path file) {
+            JavaIdeAdapter.this.requestRepaintCodeEditor(file);
+        }
+
+        @Override
+        public void requestRepaintCodeEditorBreakpointLine(Path file) {
+            JavaIdeAdapter.this.requestRepaintCodeEditorBreakpointLine(file);
         }
     }
 
@@ -1016,6 +1071,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final NavigationViews navigationViews = new NavigationViews(adapterHost);
     private final SourceActionSupport sourceActions = new SourceActionSupport(adapterHost);
     private final ConditionalBreakpointSupport conditionalBreakpoints = new ConditionalBreakpointSupport(adapterHost);
+    private final DebugSupport debugSupport = new DebugSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1029,9 +1085,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicLong lifecycle = new AtomicLong();
     private final AtomicLong navigationTicket = new AtomicLong();
     private final AtomicLong navigationRequestTicket = new AtomicLong();
-    private final AtomicLong hotReloadTicket = new AtomicLong();
-    private final AtomicLong debugHoverTicket = new AtomicLong();
-    private final AtomicLong debugLineTicket = new AtomicLong();
     private final AtomicInteger lspProgress = new AtomicInteger();
     private final AtomicBoolean buildRunning = new AtomicBoolean();
     private final AtomicBoolean debugActive = new AtomicBoolean();
@@ -1039,7 +1092,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             new ConcurrentHashMap<>();
     private final Map<RunConfigurationKey, AtomicBoolean> pendingLaunches =
             new ConcurrentHashMap<>();
-    private final Set<Path> debugSteppedFiles = ConcurrentHashMap.newKeySet();
     private final PluginTaskExecutor background =
             new PluginTaskExecutor("java-orion-support");
     private final AutoCompleteIdleTrigger autoCompleteIdle = new AutoCompleteIdleTrigger(
@@ -1055,7 +1107,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicLong runButtonsTicket = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object fileWatcherLock = new Object();
-    private final Object debugSessionLock = new Object();
     private volatile Path fileWatcherRoot;
     private volatile MainClassMemo mainClassMemo;
     private volatile Path projectRoot;
@@ -1096,23 +1147,8 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicReference<IncrementalJavaBuilder> startupBuilder = new AtomicReference<>();
     private final AtomicReference<JavaTestRunner> activeTestRunner = new AtomicReference<>();
     private final AtomicReference<Runnable> pendingTestDebug = new AtomicReference<>();
-    private volatile JavaDebugSession debugSession;
-    private volatile JavaDebugPanel debugPanel;
-    private volatile String debugPanelId;
-    private volatile JavaHotReloadService hotReloadService;
-    private volatile IdeEditorContext debugLineContext;
-    private volatile int debugLine = -1;
-    private final Map<String, String> debugLibrarySources = new ConcurrentHashMap<>();
-    private volatile CodeEditor debugLibraryEditor;
-    private volatile String debugLibraryUri;
-    private volatile int debugLibraryLine = -1;
-    private final EdtStallWatchdog debugEdtWatchdog = new EdtStallWatchdog("depuracao Java");
-    private final AtomicLong debugStartGeneration = new AtomicLong();
-    private volatile JavaModule debugModule;
-    private volatile Runnable debuggeeTerminator;
     private volatile JdwpRelay debugRelay;
     private volatile RunFormChoicesLoader runFormChoicesLoader;
-    private volatile RunProcessHandle debugProcessHandle;
     private volatile JavaTestExplorerPanel testPanel;
     private volatile String testPanelId;
     private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
@@ -1125,7 +1161,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final MavenPluginGoals pluginGoals = new MavenPluginGoals(this::pluginRepository);
     private volatile Path pluginRepositoryRoot;
     private volatile Path pluginRepositoryPath;
-    private final AtomicBoolean naturalDebugEnd = new AtomicBoolean();
     private final TodoPanelHost todoSupport = new TodoPanelHost(adapterHost);
     private final AtomicLong treeIconRefreshTicket = new AtomicLong();
     private final AtomicBoolean treeIconRefreshAll = new AtomicBoolean();
@@ -1147,7 +1182,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicBoolean languageServerWorkVisible = new AtomicBoolean();
     private volatile RunConfigurationData selectedRunConfig;
     private volatile List<RunConfigurationData> staticRunConfigurations = List.of();
-    private volatile JavaDebugValuePopup debugValuePopup;
 
     @Override
     public boolean supports(Path projectPath) {
@@ -1220,7 +1254,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         runBuildProgress.set(null);
         cancelStartupBuild();
         hideProgress(STARTUP_BUILD_PROGRESS_ID);
-        closeDebugSession();
+        debugSupport.closeDebugSession();
         activeJavaEditor = null;
         selectedRunConfig = null;
         mainClassMemo = null;
@@ -1269,12 +1303,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         background.close();
         closeSwingDesigner();
         dtm.ide.run.OwnedRunProcesses.shutdownAll();
-        debugStartGeneration.incrementAndGet();
+        debugSupport.startGeneration().incrementAndGet();
         closeDebugRelay();
-        JavaDebugSession session = debugSession;
-        debugSession = null;
+        JavaDebugSession session = debugSupport.session();
+        debugSupport.clearSession();
         debugActive.set(false);
-        debugEdtWatchdog.stop();
+        debugSupport.edtWatchdog().stop();
         if (session != null) {
             try {
                 session.close();
@@ -1282,7 +1316,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 log.warn("Falha ao fechar a sessao de debug no unload", error);
             }
         }
-        runDebuggeeTerminator(takeDebuggeeTerminator());
+        debugSupport.runDebuggeeTerminator(debugSupport.takeDebuggeeTerminator());
         ProblemsActionHandle action = clearBuildAction;
         clearBuildAction = null;
         if (action != null) {
@@ -1315,7 +1349,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
         }
         conditionalBreakpoints.sessions().clear();
-        JavaDebugValuePopup popup = debugValuePopup;
+        JavaDebugValuePopup popup = debugSupport.currentValuePopup();
         if (popup != null) {
             SwingUtilities.invokeLater(popup::hide);
         }
@@ -1327,7 +1361,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private void unregisterToolPanels() {
         for (String panelId : java.util.Arrays.asList(
-                debugPanelId, testPanelId, todoSupport.panelId(), buildToolsPanelId, spring.panelId())) {
+                debugSupport.panelId(), testPanelId, todoSupport.panelId(), buildToolsPanelId, spring.panelId())) {
             if (panelId == null) {
                 continue;
             }
@@ -1337,7 +1371,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 log.debug("Falha ao remover painel {} no unload: {}", panelId, error.getMessage());
             }
         }
-        debugPanelId = null;
+        debugSupport.clearPanelId();
         testPanelId = null;
         todoSupport.clearPanelId();
         buildToolsPanelId = null;
@@ -2154,7 +2188,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public CompletableFuture<HoverInfo> getHoverAsync(IdeHoverContext context) {
-        if (context == null || isDebugPaused() || SpringConfigSupport.isConfigFile(context.filePath())) {
+        if (context == null || debugSupport.isDebugPaused() || SpringConfigSupport.isConfigFile(context.filePath())) {
             return CompletableFuture.completedFuture(getHover(context));
         }
         JavaLanguageServer lsp = interactiveServerFor(context.filePath());
@@ -2171,7 +2205,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (context == null) {
             return null;
         }
-        if (isDebugPaused()) {
+        if (debugSupport.isDebugPaused()) {
             return null;
         }
         if (SpringConfigSupport.isConfigFile(context.filePath())) {
@@ -2682,52 +2716,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onHover(IdeHoverContext context) {
-        if (!isDebugPaused()) {
-            debugHoverTicket.incrementAndGet();
-            hideDebugValuePopup();
-            return;
-        }
-        String expression = context == null || context.text() == null
-                || !JavaProjectConventions.isJava(context.filePath())
-                ? null : safeDebugExpression(context.text(), context.offset());
-        JavaDebugValuePopup popup = debugValuePopup();
-        if (expression != null && popup.isShowing(expression)) {
-            return;
-        }
-        long ticket = debugHoverTicket.incrementAndGet();
-        if (expression == null) {
-            popup.requestHide();
-            return;
-        }
-        Point location = pointerLocation();
-        background.submit(() -> {
-            try {
-                JavaDebugSession session = debugSession;
-                JavaDebugSnapshot.Variable value = session == null ? null
-                        : session.evaluate(expression, 0);
-                if (ticket == debugHoverTicket.get() && isDebugPaused() && value != null) {
-                    popup.show(value, location, expression);
-                }
-            } catch (Exception error) {
-                log.debug("Valor sob o cursor indisponivel para '{}': {}", expression,
-                        rootMessage(error));
-                if (ticket == debugHoverTicket.get()) {
-                    popup.requestHide();
-                }
-            }
-        });
-    }
-
-    private synchronized JavaDebugValuePopup debugValuePopup() {
-        if (debugValuePopup == null) {
-            debugValuePopup = new JavaDebugValuePopup(background);
-        }
-        return debugValuePopup;
-    }
-
-    private void hideDebugValuePopup() {
-        JavaDebugValuePopup popup = debugValuePopup;
-        if (popup != null) popup.hide();
+        debugSupport.onHover(context);
     }
 
     @Override
@@ -3484,7 +3473,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         activeJavaEditor = editorContext != null && JavaProjectConventions.isJava(editorContext.filePath())
                 ? editorContext : null;
         if (debugActive.get()) {
-            setDebugEditorAssistEnabled(false);
+            debugSupport.setDebugEditorAssistEnabled(false);
         }
         refreshRunButtonsForCurrentFile();
     }
@@ -3515,22 +3504,22 @@ public class JavaIdeAdapter extends IdeAdapter {
         context.registerShortcut("java.implementMethods", "control I",
                 () -> sourceActions.showOverrideMethods(context, true));
         context.registerShortcut("java.evaluateExpression", "alt F8",
-                () -> showEvaluateDialog(context, 0));
+                () -> debugSupport.showEvaluateDialog(context, 0));
         context.registerShortcut("java.pasteImports", "control V", EditorShortcutScope.EDITOR, () -> {
             SwingUtilities.invokeLater(() -> sourceActions.onPasted(context));
             return false;
         });
         bindDebugShortcut(context, "F5", "java.debug.continue",
-                () -> withPausedDebugSession(JavaDebugSession::continueExecution));
+                () -> debugSupport.withPausedDebugSession(JavaDebugSession::continueExecution));
         bindDebugShortcut(context, "F6", "java.debug.pause",
-                () -> withDebugSession(JavaDebugSession::pause));
+                () -> debugSupport.withDebugSession(JavaDebugSession::pause));
         bindDebugShortcut(context, "F10", "java.debug.stepOver",
-                () -> withPausedDebugSession(JavaDebugSession::next));
+                () -> debugSupport.withPausedDebugSession(JavaDebugSession::next));
         bindDebugShortcut(context, "F11", "java.debug.stepInto",
-                () -> withPausedDebugSession(JavaDebugSession::stepIn));
+                () -> debugSupport.withPausedDebugSession(JavaDebugSession::stepIn));
         bindDebugShortcut(context, "shift F11", "java.debug.stepOut",
-                () -> withPausedDebugSession(JavaDebugSession::stepOut));
-        bindDebugShortcut(context, "shift F5", "java.debug.stop", this::closeDebugSession);
+                () -> debugSupport.withPausedDebugSession(JavaDebugSession::stepOut));
+        bindDebugShortcut(context, "shift F5", "java.debug.stop", debugSupport::closeDebugSession);
         bindDebugShortcut(context, "control F5", "java.debug.hotReload", this::runHotReload);
     }
 
@@ -3644,11 +3633,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (current != null && current.spring() && JavaProjectConventions.isJava(filePath)) {
             refreshSpringIndexFor(filePath, content);
         }
-        if (JavaProjectConventions.isJava(filePath) && debugSession != null
+        if (JavaProjectConventions.isJava(filePath) && debugSupport.session() != null
                 && settings().getHotReloadMode() == HotReloadMode.AUTOMATIC) {
-            long ticket = hotReloadTicket.incrementAndGet();
+            long ticket = debugSupport.hotReloadTicket().incrementAndGet();
             background.schedule(() -> {
-                if (ticket == hotReloadTicket.get() && debugSession != null) {
+                if (ticket == debugSupport.hotReloadTicket().get() && debugSupport.session() != null) {
                     runHotReload();
                 }
             }, 500, TimeUnit.MILLISECONDS);
@@ -4207,8 +4196,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         if (!JavaProjectConventions.isJava(editorContext.filePath())) return;
         boolean enabled = isNavigationAvailable(editorContext.filePath());
-        boolean debugPaused = isDebugPaused();
-        String debugExpression = selectedDebugExpression(editorContext);
+        boolean debugPaused = debugSupport.isDebugPaused();
+        String debugExpression = DebugSupport.selectedDebugExpression(editorContext);
         menu.separator()
                 .submenu(text("menu.navigate", "Navigate"), JavaIcons.search(JavaIcons.SMALL),
                         navigate -> navigate
@@ -4227,10 +4216,10 @@ public class JavaIdeAdapter extends IdeAdapter {
                         event -> sourceActions.showOverrideMethods(editorContext, true))
                 .separator()
                 .item(text("debug.evaluate", "Evaluate Expression..."), debugPaused,
-                        event -> showEvaluateDialog(editorContext, 0))
+                        event -> debugSupport.showEvaluateDialog(editorContext, 0))
                 .item(text("debug.addWatch", "Add Watch"), debugPaused
                                 && debugExpression != null,
-                        event -> addDebugWatch(debugExpression));
+                        event -> debugSupport.addDebugWatch(debugExpression));
     }
 
     @Override
@@ -4490,7 +4479,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .add(MenuNode.item("javaEvaluateExpression",
                                 text("debug.evaluate", "Evaluate Expression..."))
                         .shortcut("alt F8")
-                        .onClick(event -> showEvaluateDialog(activeJavaEditor, 0)))
+                        .onClick(event -> debugSupport.showEvaluateDialog(activeJavaEditor, 0)))
                 .add(MenuNode.separator());
 
         menu.into("window")
@@ -4723,14 +4712,14 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (debugContext.getBreakpoints() == null || debugContext.getBreakpoints().isEmpty()) {
             debugContext.setBreakpoints(requestWorkspaceBreakpoints());
         }
-        warmUpDebugAdapter();
+        debugSupport.warmUpDebugAdapter();
         int jdwpPort = DebugPorts.allocate();
         JavaModule targetModule = resolveDebugModule(resolved);
         RunProcessHandle handle = launchWithBuildProgress(resolved,
                 cancelled -> ensureRunSupport().launch(resolved, debugContext, jdwpPort, cancelled));
         if (handle.isAlive()) {
             trackRunningProcess(configuration, handle);
-            startDebugSession(jdwpPort, debugContext, handle::terminate, targetModule, handle);
+            debugSupport.startDebugSession(jdwpPort, debugContext, handle::terminate, targetModule, handle);
             requestSetRunButtonRunning(true);
         }
         return handle;
@@ -4752,7 +4741,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         JavaModule targetModule = resolveDebugModule(configuration);
 
         if (!settings.listen()) {
-            startDebugSession(settings.attachTarget(), debugContext, null, targetModule, null);
+            debugSupport.startDebugSession(settings.attachTarget(), debugContext, null, targetModule, null);
             return ProcessLauncher.message(text("remote.attaching", "Conectando a")
                     + " " + settings.host() + ":" + settings.port());
         }
@@ -4769,7 +4758,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         background.submit(() -> {
             try {
                 relay.awaitTarget(settings.timeoutMillis());
-                startDebugSession(settings.relayTarget(relay.adapterPort()), debugContext,
+                debugSupport.startDebugSession(settings.relayTarget(relay.adapterPort()), debugContext,
                         null, targetModule, null);
             } catch (SocketTimeoutException timeout) {
                 closeDebugRelay();
@@ -4786,7 +4775,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private RunProcessHandle launchBuildToolDebug(RunConfigurationData configuration,
                                                   RunExecutionContext context) {
-        warmUpDebugAdapter();
+        debugSupport.warmUpDebugAdapter();
         JavaModule targetModule = resolveDebugModule(configuration);
         AtomicReference<RunProcessHandle> launched = new AtomicReference<>();
         BuildToolDebugListener listener;
@@ -4836,8 +4825,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                                                           Runnable onAttach) throws IOException {
         return BuildToolDebugListener.open((target, detached) -> {
                     onAttach.run();
-                    startDebugSession(target, debugContextOf(null),
-                            () -> detached.accept(!naturalDebugEnd.getAndSet(false)),
+                    debugSupport.startDebugSession(target, debugContextOf(null),
+                            () -> detached.accept(!debugSupport.naturalDebugEnd().getAndSet(false)),
                             targetModule, null);
                 },
                 cancelProcess, background);
@@ -5039,7 +5028,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     static String debugProjectName(JavaModule module) {
-        return module == null || module.isAggregator() ? null : module.artifactId();
+        return DebugSupport.debugProjectName(module);
+    }
+
+    static String safeDebugExpression(String source, int offset) {
+        return DebugSupport.safeDebugExpression(source, offset);
     }
 
     private static JavaModule moduleContaining(JavaProjectDescriptor descriptor, Path file,
@@ -5053,556 +5046,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .orElse(null);
     }
 
-    private void startDebugSession(int jdwpPort, RunExecutionContext context,
-                                   Runnable terminateDebuggee, JavaModule targetModule) {
-        startDebugSession(JavaAttachTarget.local(jdwpPort), context, terminateDebuggee,
-                targetModule, null);
-    }
-
-    private void startDebugSession(int jdwpPort, RunExecutionContext context,
-                                   Runnable terminateDebuggee, JavaModule targetModule,
-                                   RunProcessHandle processHandle) {
-        startDebugSession(JavaAttachTarget.local(jdwpPort), context, terminateDebuggee,
-                targetModule, processHandle);
-    }
-
-    private boolean awaitLanguageServerForDebug(JavaLanguageServer lsp, long generation)
-            throws InterruptedException {
-        boolean announced = false;
-        while (!lsp.isWorkspaceSettled()) {
-            if (generation != debugStartGeneration.get()) {
-                return false;
-            }
-            if (lsp.getState() == LanguageServerState.ERROR) {
-                throw new IllegalStateException(text("debug.lspFailed",
-                        "O IntelliSense Java falhou; reinicie-o para depurar."));
-            }
-            if (!announced) {
-                announced = true;
-                publishDebugSnapshot(JavaDebugSnapshot.starting(text("debug.waitingLsp",
-                        "Aguardando o IntelliSense Java terminar de carregar o projeto...")));
-            }
-            Thread.sleep(LSP_DEBUG_POLL_MS);
-        }
-        return generation == debugStartGeneration.get();
-    }
-
-    private void warmUpDebugAdapter() {
-        JavaLanguageServer lsp = jdtLs;
-        DebugAdapterSupport debugAdapter = lsp == null ? null : lsp.extension(DebugAdapterSupport.class);
-        if (debugAdapter != null) {
-            background.submit(debugAdapter::prepareDebugAdapter);
-        }
-    }
-
-    private void startDebugSession(JavaAttachTarget attachTarget, RunExecutionContext context,
-                                   Runnable terminateDebuggee, JavaModule targetModule,
-                                   RunProcessHandle processHandle) {
-        closeDebugSession();
-        debugActive.set(true);
-        requestSetRunButtonRunning(true);
-        debugEdtWatchdog.start();
-        setDebuggeeTerminator(terminateDebuggee);
-        debugProcessHandle = processHandle;
-        debugSteppedFiles.clear();
-        setDebugEditorAssistEnabled(false);
-        debugModule = targetModule;
-        JavaDebugPanel panel = ensureDebugPanel();
-        panel.update(JavaDebugSnapshot.starting("Preparando depurador Java..."));
-        if (debugPanelId != null) {
-            requestOpenToolPanel(debugPanelId);
-        }
-        requestSetHotReloadButtonVisible(true);
-        requestSetHotReloadButtonEnabled(false);
-        long generation = debugStartGeneration.get();
-        background.submit(() -> {
-            try {
-                JavaLanguageServer lsp = ensureLanguageServer();
-                if (!awaitLanguageServerForDebug(lsp, generation)) {
-                    return;
-                }
-                DebugAdapterSupport debugAdapter = lsp.extension(DebugAdapterSupport.class);
-                if (debugAdapter == null || !debugAdapter.isDebugAdapterAvailable()) {
-                    throw new IllegalStateException("O servidor de debug Java nao esta disponivel. Reinicie o IntelliSense Java.");
-                }
-                int adapterPort = debugAdapter.startDebugSession();
-                if (adapterPort <= 0) {
-                    throw new IllegalStateException("O JDT LS nao abriu uma sessao de debug.");
-                }
-                JavaDebugSession session = new JavaDebugSession(adapterPort, attachTarget,
-                        projectRoot, context.getBreakpoints(), this::publishDebugSnapshot,
-                        background)
-                        .projectName(debugProjectName(targetModule))
-                        .breakOnCaughtExceptions(settings().isBreakOnCaughtExceptions());
-                boolean installed;
-                synchronized (debugSessionLock) {
-                    installed = generation == debugStartGeneration.get();
-                    if (installed) {
-                        debugSession = session;
-                    }
-                }
-                if (!installed) {
-                    log.info("Sessao de debug descartada: o debug foi encerrado durante a inicializacao");
-                    closeQuietly(session);
-                    return;
-                }
-                session.start();
-            } catch (Exception error) {
-                log.warn("Falha ao iniciar a sessao de debug Java", error);
-                terminateDebuggee();
-                publishDebugSnapshot(new JavaDebugSnapshot(JavaDebugSnapshot.State.ERROR,
-                        rootMessage(error), 0, List.of(), List.of(), List.of()));
-            }
-        });
-    }
-
-    private JavaDebugPanel ensureDebugPanel() {
-        JavaDebugPanel existing = debugPanel;
-        if (existing != null) {
-            return existing;
-        }
-        JavaDebugPanel created = new JavaDebugPanel(new DebugPanelHost(), background);
-        debugValuePopup().bindChildrenProvider(reference -> {
-            JavaDebugSession session = debugSession;
-            return session == null ? List.of() : session.variables(reference);
-        });
-        debugPanel = created;
-        debugPanelId = registerToolPanel(DockRegion.BOTTOM, "Debug", ToolIconType.DEBUG, created,
-                new Dimension(920, 350));
-        return created;
-    }
-
-    private void publishDebugSnapshot(JavaDebugSnapshot snapshot) {
-        JavaDebugPanel panel = debugPanel;
-        if (panel != null) {
-            panel.update(snapshot);
-        }
-        boolean active = snapshot.state() != JavaDebugSnapshot.State.TERMINATED
-                && snapshot.state() != JavaDebugSnapshot.State.ERROR;
-        if (!active) {
-            debugActive.set(false);
-            debugEdtWatchdog.stop();
-            debugSession = null;
-            debugProcessHandle = null;
-            closeDebugRelay();
-            requestSetRunButtonRunning(hasRunningProcess());
-            setDebugEditorAssistEnabled(true);
-        }
-        if (snapshot.state() != JavaDebugSnapshot.State.PAUSED) {
-            clearDebugPosition();
-            debugHoverTicket.incrementAndGet();
-            hideDebugValuePopup();
-        }
-        if (!active) {
-            repaintDebugBreakpointLines();
-            forgetDebugLibrarySources();
-        }
-        boolean hotReloadable = active && supportsHotReloadForSelection();
-        requestSetHotReloadButtonVisible(hotReloadable);
-        requestSetHotReloadButtonEnabled(hotReloadable);
-        if (!snapshot.message().isBlank()) {
-            setStatusBarText("Java Debug: " + snapshot.message().trim());
-        }
-        if (!active) {
-            naturalDebugEnd.set(snapshot.state() == JavaDebugSnapshot.State.TERMINATED);
-            terminateDebuggee();
-            naturalDebugEnd.set(false);
-        }
-    }
-
-    private final class DebugPanelHost implements JavaDebugPanel.Host {
-        @Override
-        public void resume() {
-            withDebugSession(JavaDebugSession::continueExecution);
-        }
-
-        @Override
-        public void pause() {
-            withDebugSession(JavaDebugSession::pause);
-        }
-
-        @Override
-        public void next() {
-            withDebugSession(JavaDebugSession::next);
-        }
-
-        @Override
-        public void stepIn() {
-            withDebugSession(JavaDebugSession::stepIn);
-        }
-
-        @Override
-        public void stepOut() {
-            withDebugSession(JavaDebugSession::stepOut);
-        }
-
-        @Override
-        public void stop() {
-            closeDebugSession();
-        }
-
-        @Override
-        public void hotReload() {
-            runHotReload();
-        }
-
-        @Override
-        public void openFile(Path file, int line) {
-            highlightDebugLine(file, line);
-        }
-
-        @Override
-        public void openLibrarySource(String uri, int line) {
-            highlightDebugLibraryLine(uri, line);
-        }
-
-        @Override
-        public JavaDebugSnapshot.Variable evaluate(String expression, int frameId) throws Exception {
-            JavaDebugSession session = debugSession;
-            return session == null ? null : session.evaluate(expression, frameId);
-        }
-
-        @Override
-        public List<JavaDebugSnapshot.Variable> variables(int reference) throws Exception {
-            JavaDebugSession session = debugSession;
-            return session == null ? List.of() : session.variables(reference);
-        }
-
-        @Override
-        public List<JavaDebugSnapshot.Variable> variablesForFrame(int frameId) throws Exception {
-            JavaDebugSession session = debugSession;
-            return session == null ? List.of() : session.variablesForFrame(frameId);
-        }
-
-        @Override
-        public List<JavaDebugSnapshot.Scope> scopesForFrame(int frameId) throws Exception {
-            JavaDebugSession session = debugSession;
-            return session == null ? List.of() : session.scopesForFrame(frameId);
-        }
-
-        @Override
-        public void showEvaluate(int frameId) {
-            showEvaluateDialog(activeJavaEditor, frameId);
-        }
-
-        @Override
-        public void selectThread(int threadId) {
-            withDebugSession(session -> session.selectThread(threadId));
-        }
-    }
-
-    private void withDebugSession(java.util.function.Consumer<JavaDebugSession> action) {
-        JavaDebugSession session = debugSession;
-        if (session != null) {
-            background.submit(() -> action.accept(session));
-        }
-    }
-
-    private void withPausedDebugSession(java.util.function.Consumer<JavaDebugSession> action) {
-        if (isDebugPaused()) {
-            withDebugSession(action);
-        }
-    }
-
-    private void closeDebugSession() {
-        JavaDebugSession session;
-        synchronized (debugSessionLock) {
-            debugStartGeneration.incrementAndGet();
-            session = debugSession;
-            debugSession = null;
-        }
-        closeDebugRelay();
-        debugActive.set(false);
-        debugEdtWatchdog.stop();
-        debugModule = null;
-        debugProcessHandle = null;
-        debugHoverTicket.incrementAndGet();
-        hideDebugValuePopup();
-        if (session != null) {
-            background.submit(session::close);
-        }
-        Runnable terminator = takeDebuggeeTerminator();
-        if (terminator != null) {
-            background.submit(() -> runDebuggeeTerminator(terminator));
-        }
-        requestSetRunButtonRunning(hasRunningProcess());
-        requestSetHotReloadButtonEnabled(false);
-        requestSetHotReloadButtonVisible(false);
-        setDebugEditorAssistEnabled(true);
-        clearDebugPosition();
-        repaintDebugBreakpointLines();
-    }
-
-    private void terminateDebuggee() {
-        runDebuggeeTerminator(takeDebuggeeTerminator());
-    }
-
-    private static void closeQuietly(JavaDebugSession session) {
-        try {
-            session.close();
-        } catch (RuntimeException error) {
-            log.debug("Falha ao fechar sessao de debug descartada: {}", error.getMessage());
-        }
-    }
-
-    private synchronized void setDebuggeeTerminator(Runnable terminator) {
-        debuggeeTerminator = terminator;
-    }
-
-    private synchronized Runnable takeDebuggeeTerminator() {
-        Runnable terminator = debuggeeTerminator;
-        debuggeeTerminator = null;
-        return terminator;
-    }
-
-    private void runDebuggeeTerminator(Runnable terminator) {
-        if (terminator == null) {
-            return;
-        }
-        try {
-            terminator.run();
-        } catch (RuntimeException error) {
-            log.debug("Falha ao finalizar processo Java: {}", error.getMessage());
-        }
-    }
-
-    private void setDebugEditorAssistEnabled(boolean enabled) {
-        SwingUtilities.invokeLater(() -> {
-            IdeEditorContext editor = activeJavaEditor;
-            if (editor == null) {
-                return;
-            }
-            editor.setAutoCompleteOnTyping(enabled);
-            if (!enabled) {
-                editor.clearGhostText();
-                editor.hideAutoCompletePopup();
-            }
-            requestRepaintCodeEditor(editor.filePath());
-        });
-    }
-
-
-    private boolean isDebugPaused() {
-        JavaDebugSession session = debugSession;
-        return session != null && session.snapshot().state() == JavaDebugSnapshot.State.PAUSED;
-    }
-
-    private void showEvaluateDialog(IdeEditorContext editor, int frameId) {
-        if (!isDebugPaused()) {
-            setStatusBarText(text("debug.evaluate.paused", "Pause o programa para avaliar expressoes."));
-            return;
-        }
-        JavaDebugSession session = debugSession;
-        if (session == null) {
-            return;
-        }
-        String initial = selectedDebugExpression(editor);
-        JavaEvaluateDialog content = new JavaEvaluateDialog(initial,
-                expression -> session.evaluate(expression, frameId), session::variables,
-                this::addDebugWatch, background);
-        editor.openEditorDialog(text("debug.evaluate.title", "Evaluate Expression"),
-                content, false, null);
-        content.open();
-    }
-
-    private void addDebugWatch(String expression) {
-        if (expression == null || expression.isBlank()) {
-            return;
-        }
-        ensureDebugPanel().addWatch(expression.trim());
-        if (debugPanelId != null) {
-            requestOpenToolPanel(debugPanelId);
-        }
-    }
-
-    private static String selectedDebugExpression(IdeEditorContext editor) {
-        if (editor == null) {
-            return null;
-        }
-        String selected = editor.getSelectedTextOrEmpty();
-        if (selected != null && !selected.isBlank()) {
-            String candidate = selected.trim();
-            return candidate.matches("[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*")
-                    ? candidate : null;
-        }
-        return safeDebugExpression(editor.getText(), editor.getCaretOffset());
-    }
-
-    static String safeDebugExpression(String source, int offset) {
-        if (source == null || source.isEmpty()) {
-            return null;
-        }
-        int at = Math.max(0, Math.min(offset, source.length() - 1));
-        if (!Character.isJavaIdentifierPart(source.charAt(at)) && at > 0
-                && Character.isJavaIdentifierPart(source.charAt(at - 1))) {
-            at--;
-        }
-        if (!Character.isJavaIdentifierPart(source.charAt(at))) {
-            return null;
-        }
-        int start = at;
-        int end = at + 1;
-        while (start > 0 && debugExpressionCharacter(source.charAt(start - 1))) {
-            start--;
-        }
-        while (end < source.length() && debugExpressionCharacter(source.charAt(end))) {
-            end++;
-        }
-        String value = source.substring(start, end).replaceAll("^\\.+|\\.+$", "");
-        int following = end;
-        while (following < source.length() && Character.isWhitespace(source.charAt(following))) {
-            following++;
-        }
-        if (following < source.length() && source.charAt(following) == '(') {
-            return null;
-        }
-        return value.matches("[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*") ? value : null;
-    }
-
-    private static Point pointerLocation() {
-        try {
-            return MouseInfo.getPointerInfo() == null ? null : MouseInfo.getPointerInfo().getLocation();
-        } catch (RuntimeException exception) {
-            return null;
-        }
-    }
-
-    private static boolean debugExpressionCharacter(char value) {
-        return Character.isJavaIdentifierPart(value) || value == '.';
-    }
-
-    private void clearDebugPosition() {
-        debugLineTicket.incrementAndGet();
-        if (SwingUtilities.isEventDispatchThread()) {
-            clearDebugPositionNow();
-        } else {
-            SwingUtilities.invokeLater(this::clearDebugPositionNow);
-        }
-    }
-
-    private void highlightDebugLine(Path file, int line) {
-        if (file == null) {
-            return;
-        }
-        debugSteppedFiles.add(JavaProjectConventions.normalize(file));
-        long ticket = debugLineTicket.incrementAndGet();
-        int editorLine = Math.max(0, line - 1);
-        SwingUtilities.invokeLater(() -> {
-            clearDebugPositionNow();
-            requestOpenFile(file);
-            applyDebugLine(file, editorLine, ticket, 0);
-        });
-    }
-
-    private void applyDebugLine(Path file, int line, long ticket, int attempt) {
-        if (ticket != debugLineTicket.get()) {
-            return;
-        }
-        IdeEditorContext editor = getEditor(file, true);
-        if (editor == null) {
-            if (attempt < 10) {
-                background.schedule(() -> SwingUtilities.invokeLater(
-                        () -> applyDebugLine(file, line, ticket, attempt + 1)),
-                        60, TimeUnit.MILLISECONDS);
-            }
-            return;
-        }
-        clearDebugPositionNow();
-        editor.setCaretPosition(line, 0);
-        editor.setPriorityLineColor(line, DEBUG_LINE_COLOR);
-        debugLineContext = editor;
-        debugLine = line;
-        requestRepaintCodeEditor(file);
-    }
-
-    private void clearDebugPositionNow() {
-        IdeEditorContext editor = debugLineContext;
-        int line = debugLine;
-        debugLineContext = null;
-        debugLine = -1;
-        if (editor != null && line >= 0) {
-            editor.removeLineColor(line);
-            if (editor.filePath() != null) {
-                requestRepaintCodeEditor(editor.filePath());
-            }
-        }
-        CodeEditor library = debugLibraryEditor;
-        int libraryLine = debugLibraryLine;
-        debugLibraryLine = -1;
-        if (library != null && libraryLine >= 0) {
-            library.removeLineColor(libraryLine);
-            library.repaint();
-        }
-    }
-
-    private void highlightDebugLibraryLine(String uri, int line) {
-        JavaLanguageServer lsp = jdtLs;
-        ClassFileSupport classFiles = lsp == null ? null : lsp.extension(ClassFileSupport.class);
-        if (uri == null || classFiles == null) {
-            return;
-        }
-        long ticket = debugLineTicket.incrementAndGet();
-        int editorLine = Math.max(0, line - 1);
-        String cached = debugLibrarySources.get(uri);
-        if (cached != null) {
-            SwingUtilities.invokeLater(() -> showDebugLibraryLine(uri, cached, editorLine, ticket));
-            return;
-        }
-        SwingUtilities.invokeLater(() -> showProgress(NAVIGATION_PROGRESS_ID,
-                text("progress.decompiling", "Java: abrindo fonte da dependencia...")));
-        background.submit(() -> {
-            String source = classFiles.classFileContents(uri);
-            if (source != null && !source.isBlank()) {
-                debugLibrarySources.put(uri, source);
-            }
-            SwingUtilities.invokeLater(() -> {
-                hideProgress(NAVIGATION_PROGRESS_ID);
-                if (source == null || source.isBlank()) {
-                    setStatusBarText(text("status.decompileFailed",
-                            "Java: nao foi possivel obter a fonte da dependencia"));
-                    return;
-                }
-                showDebugLibraryLine(uri, source, editorLine, ticket);
-            });
-        });
-    }
-
-    private void showDebugLibraryLine(String uri, String source, int line, long ticket) {
-        if (ticket != debugLineTicket.get() || !isDebugPaused()) {
-            return;
-        }
-        clearDebugPositionNow();
-        CodeEditor editor = debugLibraryEditor;
-        int[] target = clampPosition(source, line, 0);
-        if (editor == null || !uri.equals(debugLibraryUri) || !editor.isShowing()) {
-            editor = navigationViews.openClassFileEditor(uri, source, target[0], 0);
-            if (editor == null) {
-                return;
-            }
-            debugLibraryEditor = editor;
-            debugLibraryUri = uri;
-        }
-        editor.setCaretPosition(target[0], 0);
-        editor.setPriorityLineColor(target[0], DEBUG_LINE_COLOR);
-        editor.repaint();
-        debugLibraryLine = target[0];
-    }
-
-    private void forgetDebugLibrarySources() {
-        debugLibrarySources.clear();
-        SwingUtilities.invokeLater(() -> {
-            clearDebugPositionNow();
-            debugLibraryEditor = null;
-            debugLibraryUri = null;
-        });
-    }
-
-    private void repaintDebugBreakpointLines() {
-        Set<Path> files = Set.copyOf(debugSteppedFiles);
-        debugSteppedFiles.removeAll(files);
-        files.forEach(this::requestRepaintCodeEditorBreakpointLine);
-    }
-
     @Override
     public void stop(RunConfigurationData configuration) {
         RunProcessHandle process = runningProcess(configuration);
@@ -5611,12 +5054,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (pendingTest != null) {
             pendingTest.run();
         }
-        if (process != null && process == debugProcessHandle
-                && (debugSession != null || debugActive.get())) {
-            closeDebugSession();
+        if (process != null && process == debugSupport.processHandle()
+                && (debugSupport.session() != null || debugActive.get())) {
+            debugSupport.closeDebugSession();
         } else {
-            if (process == null && (debugSession != null || debugActive.get())) {
-                closeDebugSession();
+            if (process == null && (debugSupport.session() != null || debugActive.get())) {
+                debugSupport.closeDebugSession();
             } else if (process != null) {
                 process.terminate();
             }
@@ -5632,37 +5075,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void runHotReload() {
-        if (!supportsHotReloadForSelection()) {
-            setStatusBarText("Java: hot reload nao esta disponivel para este tipo de execucao.");
-            return;
-        }
-        if (settings().getHotReloadMode() == HotReloadMode.NEVER) {
-            setStatusBarText("Java: hot reload esta desativado nas preferencias.");
-            return;
-        }
-        requestSetHotReloadButtonEnabled(false);
-        background.submit(() -> {
-            OutputPanelHandle output = requestOutputPanel("Run", OutputPanelOptions.interactive(null));
-            JavaHotReloadService.Result result = hotReloadService().reload(
-                    line -> writeOutput(output, line));
-            String message = switch (result) {
-                case APPLIED -> "Hot reload aplicado.";
-                case NO_SESSION -> "Nenhuma sessao de debug ativa.";
-                case BUILD_FAILED -> "Hot reload cancelado: o build falhou.";
-                case STRUCTURAL_CHANGE -> "A JVM nao aceita esta alteracao estrutural; reinicie a sessao.";
-                case FAILED -> "Nao foi possivel aplicar o hot reload.";
-            };
-            setStatusBarText("Java: " + message);
-            requestSetHotReloadButtonEnabled(debugSession != null);
-        });
-    }
-
-    private synchronized JavaHotReloadService hotReloadService() {
-        if (hotReloadService == null) {
-            hotReloadService = new JavaHotReloadService(() -> descriptor,
-                    this::ensureBuildSystem, () -> debugSession, () -> debugModule);
-        }
-        return hotReloadService;
+        debugSupport.runHotReload();
     }
 
     @Override
@@ -5671,7 +5084,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (event == null || event.getBreakpointIde() == null) {
             return;
         }
-        JavaDebugSession session = debugSession;
+        JavaDebugSession session = debugSupport.session();
         if (session == null) {
             return;
         }
