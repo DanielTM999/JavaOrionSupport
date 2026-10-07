@@ -359,6 +359,10 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static dtm.ide.adapter.AdapterText.text;
+import static dtm.ide.adapter.CompletionSupport.completionTriggerCharacter;
+import static dtm.ide.adapter.CompletionSupport.filterCompletionSuggestions;
+import static dtm.ide.adapter.CompletionSupport.markUnusedMethods;
+import static dtm.ide.adapter.CompletionSupport.mergeCompletionSuggestions;
 
 @Slf4j
 @Singleton
@@ -1790,109 +1794,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                 context.text(), context.prefixOffset(), context.caretOffset());
         return markUnusedMethods(ranked, names -> lexicalIndex.unusedMethods(names,
                 context.filePath(), context.text()));
-    }
-
-    static List<AutoCompleteItem> markUnusedMethods(List<AutoCompleteItem> items,
-                                                    Function<Set<String>, Set<String>> unusedLookup) {
-        if (items == null || items.isEmpty()) {
-            return items;
-        }
-        Set<String> methods = new LinkedHashSet<>();
-        for (AutoCompleteItem item : items) {
-            if (isMethodCompletion(item)) {
-                methods.add(CompletionRanking.name(item));
-            }
-        }
-        if (methods.isEmpty()) {
-            return items;
-        }
-        try {
-            Set<String> unused = unusedLookup.apply(methods);
-            if (unused == null || unused.isEmpty()) {
-                return items;
-            }
-            List<AutoCompleteItem> marked = new ArrayList<>(items.size());
-            for (AutoCompleteItem item : items) {
-                marked.add(isMethodCompletion(item) && unused.contains(CompletionRanking.name(item))
-                        ? item.withUnused(true)
-                        : item);
-            }
-            return List.copyOf(marked);
-        } catch (LinkageError | RuntimeException e) {
-            log.debug("Marcacao de metodos sem uso indisponivel: {}", e.toString());
-            return items;
-        }
-    }
-
-    private static boolean isMethodCompletion(AutoCompleteItem item) {
-        return item != null && (item.kind() == AutoCompleteItem.Kind.METHOD
-                || item.kind() == AutoCompleteItem.Kind.FUNCTION);
-    }
-
-    static Character completionTriggerCharacter(String line, int col, Set<Character> triggers) {
-        if (line == null || col <= 0 || col > line.length() || triggers == null) {
-            return null;
-        }
-        char previous = line.charAt(col - 1);
-        return triggers.contains(previous) ? previous : null;
-    }
-
-    static List<AutoCompleteItem> filterCompletionSuggestions(List<AutoCompleteItem> source,
-                                                               String prefix) {
-        if (source == null || source.isEmpty()) return List.of();
-        String needle = prefix == null ? "" : prefix.toLowerCase(Locale.ROOT);
-        return source.stream()
-                .filter(Objects::nonNull)
-                .filter(item -> item.label() != null
-                        && (needle.isEmpty()
-                        || item.label().toLowerCase(Locale.ROOT).startsWith(needle)))
-                .toList();
-    }
-
-    static List<AutoCompleteItem> mergeCompletionSuggestions(List<AutoCompleteItem> contextual,
-                                                              List<AutoCompleteItem> snippets) {
-        List<AutoCompleteItem> merged = new ArrayList<>();
-        Set<String> signatures = new HashSet<>();
-        Set<String> labels = new HashSet<>();
-        appendBySignature(contextual, merged, signatures, labels);
-        appendByLabel(snippets, merged, labels);
-        return List.copyOf(merged);
-    }
-
-    private static void appendBySignature(List<AutoCompleteItem> source,
-                                          List<AutoCompleteItem> target,
-                                          Set<String> signatures, Set<String> labels) {
-        if (source == null) {
-            return;
-        }
-        for (AutoCompleteItem item : source) {
-            if (item == null || item.label() == null
-                    || !signatures.add(completionSignature(item))) {
-                continue;
-            }
-            labels.add(item.label().toLowerCase(Locale.ROOT));
-            target.add(item);
-        }
-    }
-
-    private static void appendByLabel(List<AutoCompleteItem> source,
-                                      List<AutoCompleteItem> target, Set<String> labels) {
-        if (source == null) {
-            return;
-        }
-        for (AutoCompleteItem item : source) {
-            if (item != null && item.label() != null
-                    && labels.add(item.label().toLowerCase(Locale.ROOT))) {
-                target.add(item);
-            }
-        }
-    }
-
-    static String completionSignature(AutoCompleteItem item) {
-        return item.label().toLowerCase(Locale.ROOT)
-                + "|" + (item.insertText() == null ? "" : item.insertText())
-                + "|" + (item.detail() == null ? "" : item.detail())
-                + "|" + item.kind();
     }
 
     @Override
