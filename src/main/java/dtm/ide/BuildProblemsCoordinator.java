@@ -33,7 +33,7 @@ public final class BuildProblemsCoordinator {
         return buildDiagnostics.getOrDefault(file, List.of());
     }
 
-    void publishLive(Path file, List<BuildDiagnostic> problems) {
+    public void publishLive(Path file, List<BuildDiagnostic> problems) {
         if (problems == null || problems.isEmpty()) {
             liveProblems.remove(file);
         } else {
@@ -74,7 +74,7 @@ public final class BuildProblemsCoordinator {
         return affected;
     }
 
-    synchronized boolean supersedeCompilerProblems(Path file) {
+    public synchronized boolean supersedeCompilerProblems(Path file) {
         return removeMatching(problem -> file.equals(problem.file()) && isCompilerProblem(problem));
     }
 

@@ -62,6 +62,7 @@ import dtm.ide.adapter.NavigationSupport;
 import dtm.ide.adapter.NavigationViews;
 import dtm.ide.adapter.ProjectTreeMenuSupport;
 import dtm.ide.adapter.JdkManagerSupport;
+import dtm.ide.adapter.LanguageServerManager;
 import dtm.ide.adapter.ProjectStructureSupport;
 import dtm.ide.adapter.SpringSupport;
 import dtm.ide.adapter.SwingDesignerHost;
@@ -270,8 +271,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
     private static final String JDK_TAB_ID = "javaJdkManager";
 
-    private static final String LSP_PROGRESS_ID = "javaLanguageServer";
-    private static final String LSP_WORK_PROGRESS_ID = "javaLanguageServerWork";
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
     private static final String SYNC_PROGRESS_ID = "javaProjectSync";
     private static final long SYNC_WORK_START_GRACE_MS = 3_000;
@@ -1031,6 +1030,64 @@ public class JavaIdeAdapter extends IdeAdapter {
         public IdeEditorContext liveEditorFor(Path file) {
             return JavaIdeAdapter.this.liveEditorFor(file);
         }
+    
+        @Override
+        public void classFileUris(ClassFileSupport support) {
+            classFileUris = support;
+        }
+
+        @Override
+        public void languageServer(JavaLanguageServer server) {
+            jdtLs = server;
+        }
+
+        @Override
+        public void observeSyncWork(boolean active) {
+            SyncWork sync = syncWork.get();
+            if (sync != null) {
+                sync.observe(active);
+            }
+        }
+
+        @Override
+        public DownloadObserver resolveDownloadObserver() {
+            return JavaIdeAdapter.this.resolveDownloadObserver();
+        }
+
+        @Override
+        public ConditionalBreakpointSupport conditionalBreakpoints() {
+            return conditionalBreakpoints;
+        }
+
+        @Override
+        public CompletionEngine completionEngine() {
+            return completionEngine;
+        }
+
+        @Override
+        public void finishDiagnosticReanalysis(long ticket, Path root, boolean successful) {
+            JavaIdeAdapter.this.finishDiagnosticReanalysis(ticket, root, successful);
+        }
+
+        @Override
+        public void refreshProblemsPanel() {
+            JavaIdeAdapter.this.refreshProblemsPanel();
+        }
+
+        @Override
+        public void createNotification(NotificationContext context) {
+            JavaIdeAdapter.this.createNotification(context);
+        }
+
+        @Override
+        public void requestRefreshInlayHints(Path file) {
+            JavaIdeAdapter.this.requestRefreshInlayHints(file);
+        }
+
+        @Override
+        public void requestRefreshSemanticTokens(Path file) {
+            JavaIdeAdapter.this.requestRefreshSemanticTokens(file);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -1053,6 +1110,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final ProjectTreeMenuSupport projectTreeMenu = new ProjectTreeMenuSupport(adapterHost);
     private final SwingDesignerHost swingDesignerHost = new SwingDesignerHost(adapterHost);
     private final NavigationSupport navigationSupport = new NavigationSupport(adapterHost);
+    private final LanguageServerManager languageServers = new LanguageServerManager(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1066,7 +1124,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicLong lifecycle = new AtomicLong();
     private final AtomicLong navigationTicket = new AtomicLong();
     private final AtomicLong navigationRequestTicket = new AtomicLong();
-    private final AtomicInteger lspProgress = new AtomicInteger();
     private final AtomicBoolean buildRunning = new AtomicBoolean();
     private final AtomicBoolean debugActive = new AtomicBoolean();
     private final PluginTaskExecutor background =
@@ -1090,7 +1147,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile IdeProjectContext projectContext;
     private volatile JdkService jdkService;
     private volatile JdkInstallation projectJdk;
-    private volatile JdtBuildMode appliedBuildMode;
     private volatile JdkManagerPanel jdkManagerPanel;
     private static final String STRUCTURE_TAB_ID = "javaProjectStructure";
 
@@ -1099,8 +1155,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JavaLanguageServer jdtLs;
     private volatile ClassFileSupport classFileUris;
     private volatile boolean unloaded;
-    private volatile LombokAgentResolver lombokResolver;
-    private final LombokSupport lombokSupport = new LombokSupport(this::onLombokStatusChanged);
     private volatile BuildSystem buildSystem;
     private volatile DependencyService dependencyService;
     private volatile DependencyManagerCoordinator dependencyCoordinator;
@@ -1137,8 +1191,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
     private final Map<Path, String> lastEditorContents = new ConcurrentHashMap<>();
     private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
-    private final AtomicBoolean languageServerReadyHandled = new AtomicBoolean();
-    private final AtomicBoolean languageServerWorkVisible = new AtomicBoolean();
     private volatile List<RunConfigurationData> staticRunConfigurations = List.of();
 
     @Override
@@ -1238,8 +1290,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         javaEditors.clear();
         diskBaseline.clear();
         lastEditorContents.clear();
-        lspProgress.set(0);
-        hideProgress(LSP_PROGRESS_ID);
+        languageServers.progress().set(0);
+        hideProgress(LanguageServerManager.LSP_PROGRESS_ID);
         syncGeneration.incrementAndGet();
         syncRunning.set(false);
         automaticSyncTicket.incrementAndGet();
@@ -1420,9 +1472,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (settings().getLanguageServerMode().startsServer()) {
             String loading = text("status.startingLsp",
                     "Java: IntelliSense local pronto; iniciando analise semantica...");
-            lspProgress.set(1);
-            showProgress(LSP_PROGRESS_ID, loading);
-            updateProgress(LSP_PROGRESS_ID, loading, 1);
+            languageServers.progress().set(1);
+            showProgress(LanguageServerManager.LSP_PROGRESS_ID, loading);
+            updateProgress(LanguageServerManager.LSP_PROGRESS_ID, loading, 1);
         }
         background.submit(() -> {
             try {
@@ -1434,7 +1486,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 if (described == null) {
                     SwingUtilities.invokeLater(() -> {
                         if (current(ticket, root)) {
-                            hideProgress(LSP_PROGRESS_ID);
+                            hideProgress(LanguageServerManager.LSP_PROGRESS_ID);
                             runLauncher.refreshRunButtonsForCurrentFile();
                         }
                     });
@@ -1532,7 +1584,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
             projectJdk = resolution.installation();
             if (!resolution.resolved()) {
-                hideProgress(LSP_PROGRESS_ID);
+                hideProgress(LanguageServerManager.LSP_PROGRESS_ID);
                 setStatusBarText(text("status.noJdk",
                         "Java: nenhuma JDK encontrada - instale uma pelo JDK Manager"));
                 finishDiagnosticReanalysis(ticket, root, false);
@@ -1665,320 +1717,31 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void startLanguageServer(long ticket, Path root, JdkInstallation jdk) {
-        if (!settings().getLanguageServerMode().startsServer()) {
-            setStatusBarText(text("status.lspDisabled",
-                    "Java: IntelliSense desligado nas preferencias"));
-            return;
-        }
-        JavaLanguageServer lsp = ensureLanguageServer();
-        if (lsp.isInteractive() && root.equals(lsp.getProjectRoot())) {
-            return;
-        }
-        JavaProjectDescriptor current = descriptor;
-        JdtBuildMode buildMode = settings().getJdtBuildMode();
-        lsp.setBuildMode(buildMode);
-        appliedBuildMode = buildMode;
-        if (buildMode.isAutobuild() && JdtOutputIsolation.ensure(current)) {
-            setStatusBarText(text("status.jdtOutputIsolated",
-                    "Java: saida do autobuild isolada em") + " "
-                    + JdtOutputIsolation.BUILD_DIRECTORY);
-        }
-        lsp.setSpringSupport(current != null && current.spring() && settings().isSpringSupport());
-        applyLombokAgent(lsp, current);
-        String loading = text("status.startingLsp", "Java: carregando IntelliSense...");
-        lspProgress.set(5);
-        showProgress(LSP_PROGRESS_ID, loading);
-        updateProgress(LSP_PROGRESS_ID, loading, 5);
-        lsp.start(root, jdk, progressListener()).whenComplete((unused, error) -> {
-            hideProgress(LSP_PROGRESS_ID);
-            if (!current(ticket, root)) {
-                if (!root.equals(projectRoot)) {
-                    lsp.stopAsyncIfBoundTo(root);
-                }
-                finishDiagnosticReanalysis(ticket, root, false);
-                return;
-            }
-            if (error != null) {
-                log.warn("IntelliSense Java indisponivel", error);
-                setStatusBarText(text("status.lspUnavailable", "Java: IntelliSense indisponivel")
-                        + " - " + rootMessage(error));
-                JavaProjectDescriptor activeDescriptor = descriptor;
-                if (activeDescriptor != null && activeDescriptor.spring()
-                        && settings().isSpringSupport()) {
-                    spring.loadMetadata(ticket, root);
-                }
-            }
-            finishDiagnosticReanalysis(ticket, root, error == null && lsp.isReady());
-        });
+        languageServers.startLanguageServer(ticket, root, jdk);
     }
 
-    private synchronized JavaLanguageServer ensureLanguageServer() {
-        if (unloaded) {
-            throw new IllegalStateException("plugin Java descarregado");
-        }
-        JavaLanguageServer existing = jdtLs;
-        if (existing != null) {
-            return existing;
-        }
-        JdkService jdks = ensureJdkService();
-        SdkDownloader downloader = new SdkDownloader(resolveDownloadObserver());
-        JavaLanguageServer created = LanguageServers.defaultProvider().create(jdks, downloader,
-                this::onLspDiagnosticsPublished);
-        created.setMaxHeap(settings().getLanguageServerMemory());
-        created.setInlayHintsMode(settings().getInlayHints());
-        created.setStatusListener(this::publishLanguageServerStatus);
-        created.setWorkListener(this::publishLanguageServerWork);
-        created.setCodeLensRefreshListener(path -> {
-            if (path == null || !conditionalBreakpoints.sessions().containsKey(path.toAbsolutePath().normalize())) {
-                requestRefreshCodeLenses(path);
-            }
-        });
-        created.setWarmUpCompleteListener(this::refreshJavaEditorsAfterIndexing);
-        created.setLateCompletionListener(completionEngine::onLateCompletion);
-        created.setDocumentUpgradeListener(this::onLanguageServerDocumentUpgrade);
-        languageServerReadyHandled.set(false);
-        classFileUris = created.extension(ClassFileSupport.class);
-        jdtLs = created;
-        return created;
-    }
-
-    private void onLspDiagnosticsPublished(Path path) {
-        if (path == null) {
-            return;
-        }
-        Path normalized = path.toAbsolutePath().normalize();
-        ConditionEditorSession conditionSession = conditionalBreakpoints.sessions().get(normalized);
-        if (conditionSession != null) {
-            conditionSession.diagnosticsPublished();
-            return;
-        }
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null && lsp.isReady()) {
-            problems.supersedeCompilerProblems(normalized);
-        }
-        requestRefreshDiagnostics(path);
-        sourceActions.resolvePastedImports(path);
-        List<BuildDiagnostic> problems = lsp == null ? List.of() : lsp.diagnostics(normalized)
-                .stream()
-                .map(diagnostic -> new BuildDiagnostic(normalized,
-                        diagnostic.startLine() + 1, diagnostic.startCol() + 1,
-                        diagnostic.severity(), diagnostic.message(), diagnostic.source()))
-                .toList();
-        this.problems.publishLive(normalized, problems);
-        refreshProblemsPanel();
+    private JavaLanguageServer ensureLanguageServer() {
+        return languageServers.ensureLanguageServer();
     }
 
     private boolean applyLombokAgent(JavaLanguageServer lsp, JavaProjectDescriptor current) {
-        JavaAgentSupport agents = lsp == null ? null : lsp.extension(JavaAgentSupport.class);
-        if (agents == null) {
-            return false;
-        }
-        if (!settings().isLombokSupport()) {
-            lombokSupport.update(LombokSupportStatus.DISABLED, "");
-            return agents.setLombokAgentJar(null);
-        }
-        try {
-            LombokAgentResolver.Agent agent = ensureLombokResolver()
-                    .resolveAgent(current, resolvedClasspath(lsp, current));
-            if (!agent.declared()) {
-                lombokSupport.update(LombokSupportStatus.NOT_USED, "");
-                return agents.setLombokAgentJar(null);
-            }
-            if (!agent.isUsable()) {
-                lombokSupport.update(LombokSupportStatus.ERROR, agent.failure());
-                return agents.setLombokAgentJar(null);
-            }
-            lombokSupport.update(LombokSupportStatus.STARTING,
-                    agent.version() == null ? LombokAgentResolver.TESTED_VERSION : agent.version());
-            return agents.setLombokAgentJar(agent.jar());
-        } catch (Exception e) {
-            lombokSupport.update(LombokSupportStatus.ERROR, rootMessage(e));
-            log.warn("Falha ao resolver o agente do Lombok: {}", rootMessage(e));
-            return false;
-        }
+        return languageServers.applyLombokAgent(lsp, current);
     }
 
     public LombokSupportStatus getLombokSupportStatus() {
-        return lombokSupport.status();
+        return languageServers.getLombokSupportStatus();
     }
 
     public void setLombokSupportListener(LombokSupport.Listener listener) {
-        lombokSupport.setListener(listener == null ? this::onLombokStatusChanged : listener);
-    }
-
-    private List<Path> resolvedClasspath(JavaLanguageServer lsp, JavaProjectDescriptor current) {
-        if (lsp == null || current == null || !lsp.isInteractive()) {
-            return List.of();
-        }
-        ProjectModelSupport model = lsp.extension(ProjectModelSupport.class);
-        if (model == null) {
-            return List.of();
-        }
-        return model.runtimeClasspath(current.root())
-                .map(classpath -> {
-                    if (ClasspathValidation.hasMissingJar(classpath)) {
-                        requestJdtLsProjectConfigurationRefresh(lsp);
-                        return List.<Path>of();
-                    }
-                    return Arrays.stream(classpath.split(Pattern.quote(File.pathSeparator)))
-                            .filter(entry -> !entry.isBlank())
-                            .map(Path::of)
-                            .toList();
-                })
-                .orElse(List.of());
+        languageServers.setLombokSupportListener(listener);
     }
 
     private void requestJdtLsProjectConfigurationRefresh() {
-        requestJdtLsProjectConfigurationRefresh(jdtLs);
+        languageServers.requestJdtLsProjectConfigurationRefresh();
     }
 
     private void requestJdtLsProjectConfigurationRefresh(JavaLanguageServer lsp) {
-        ProjectModelSupport model = lsp == null ? null : lsp.extension(ProjectModelSupport.class);
-        if (model != null && lsp.isInteractive()) {
-            model.projectConfigurationUpdate();
-        }
-    }
-
-    private void onLombokStatusChanged(LombokSupportStatus status, String detail) {
-        log.debug("Lombok: estado {} ({})", status, detail);
-        switch (status) {
-            case ACTIVE -> setStatusBarText(text("status.lombokActive", "Java: Lombok ativo")
-                    + (detail == null || detail.isBlank() ? "" : " - " + detail));
-            case ERROR -> notifyLombokFailure(detail);
-            default -> {
-            }
-        }
-    }
-
-    private void notifyLombokFailure(String detail) {
-        String message = text("notification.lombokMessage",
-                "Lombok foi detectado no projeto, mas o agente nao pode ser carregado. "
-                        + "Getters, setters e builders podem aparecer como erro.");
-        setStatusBarText(text("status.lombokError", "Java: Lombok detectado sem agente ativo"));
-        createNotification(NotificationContext.builder()
-                .title(text("notification.lombokTitle", "Lombok indisponivel"))
-                .message(detail == null || detail.isBlank() ? message : message + " (" + detail + ")")
-                .icon(JavaIcons.java(JavaIcons.SMALL))
-                .build());
-    }
-
-    private void refreshLombokStatusAfterServerState(LanguageServerState state) {
-        LombokSupportStatus current = lombokSupport.status();
-        if (current != LombokSupportStatus.STARTING && current != LombokSupportStatus.ACTIVE) {
-            return;
-        }
-        if (state == LanguageServerState.READY) {
-            lombokSupport.update(LombokSupportStatus.ACTIVE, lombokSupport.detail());
-            return;
-        }
-        if (state == LanguageServerState.ERROR) {
-            lombokSupport.update(LombokSupportStatus.ERROR, lombokSupport.detail());
-        }
-    }
-
-    private synchronized LombokAgentResolver ensureLombokResolver() {
-        LombokAgentResolver existing = lombokResolver;
-        if (existing != null) {
-            return existing;
-        }
-        LombokAgentResolver created = new LombokAgentResolver(ensureJdkService().sdkRoot());
-        lombokResolver = created;
-        return created;
-    }
-
-    private void onLanguageServerDocumentUpgrade(Path path) {
-        if (path == null) {
-            return;
-        }
-        requestRefreshInlayHints(path);
-        requestRefreshSemanticTokens(path);
-        requestRefreshCodeLenses(path);
-    }
-
-    private void publishLanguageServerStatus(String message, int percent) {
-        JavaLanguageServer lsp = jdtLs;
-        LanguageServerState state = lsp == null ? LanguageServerState.NOT_STARTED : lsp.getState();
-        refreshLombokStatusAfterServerState(state);
-        if (state == LanguageServerState.STARTING || state == LanguageServerState.INDEXING) {
-            int effectivePercent = percent >= 0 ? Math.max(1, Math.min(99, percent)) : -1;
-            lspProgress.set(Math.max(0, effectivePercent));
-            String label = message == null || message.isBlank() || message.strip().equals("Java:")
-                    ? text("status.indexing",
-                            "Java: indexando - navegacao e autocomplete aproximados disponiveis")
-                    : message;
-            updateProgress(LSP_PROGRESS_ID, label, effectivePercent, true,
-                    this::cancelLanguageServerIndexing);
-            return;
-        }
-        if (state == LanguageServerState.READY) {
-            lspProgress.set(100);
-            updateProgress(LSP_PROGRESS_ID, message, 100);
-            hideProgress(LSP_PROGRESS_ID);
-            if (languageServerReadyHandled.compareAndSet(false, true)) {
-                Path root = projectRoot;
-                JavaProjectDescriptor current = descriptor;
-                if (root != null && current != null && current.spring()
-                        && settings().isSpringSupport()) {
-                    spring.loadMetadata(lifecycle.get(), root);
-                }
-            }
-            return;
-        }
-        hideProgress(LSP_PROGRESS_ID);
-        publishLanguageServerWork(null, -1, false);
-        if (state == LanguageServerState.ERROR) {
-            setStatusBarText(message);
-        }
-    }
-
-    private void publishLanguageServerWork(String message, int percent, boolean active) {
-        SyncWork sync = syncWork.get();
-        if (sync != null) {
-            sync.observe(active);
-        }
-        if (!active) {
-            if (languageServerWorkVisible.compareAndSet(true, false)) {
-                hideProgress(LSP_WORK_PROGRESS_ID);
-            }
-            return;
-        }
-        String label = message == null || message.isBlank()
-                ? text("status.lspWorking", "Java: atualizando o projeto...")
-                : message;
-        if (languageServerWorkVisible.compareAndSet(false, true)) {
-            showProgress(LSP_WORK_PROGRESS_ID, label);
-        }
-        updateProgress(LSP_WORK_PROGRESS_ID, label, percent);
-    }
-
-    private void refreshJavaEditorsAfterIndexing() {
-        if (javaEditors.isEmpty()) {
-            return;
-        }
-        SwingUtilities.invokeLater(() -> {
-            List<Path> openFiles = List.copyOf(javaEditors.keySet());
-            background.submit(() -> {
-                openFiles.forEach(path -> {
-                    requestRefreshDiagnostics(path);
-                    requestRefreshCodeLenses(path);
-                    requestRefreshInlayHints(path);
-                    requestRefreshSemanticTokens(path);
-                });
-            });
-        });
-    }
-
-    private void cancelLanguageServerIndexing() {
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp == null) {
-            return;
-        }
-        background.submit(() -> {
-            lsp.stop();
-            hideProgress(LSP_PROGRESS_ID);
-            setStatusBarText(text("status.indexingCanceled",
-                    "Java: indexacao cancelada - IntelliSense aproximado"));
-        });
+        languageServers.requestJdtLsProjectConfigurationRefresh(lsp);
     }
 
     private boolean current(long ticket, Path root) {
@@ -3836,7 +3599,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
 
             problems.clearLive();
-            languageServerReadyHandled.set(false);
+            languageServers.readyHandled().set(false);
             SwingUtilities.invokeLater(() -> {
                 if (current(ticket, root)) {
                     javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
@@ -4346,17 +4109,17 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private boolean applyBuildModeChange(JdtBuildMode mode, Path root) {
-        if (mode == appliedBuildMode) {
+        if (mode == languageServers.appliedBuildMode()) {
             return false;
         }
-        appliedBuildMode = mode;
+        languageServers.appliedBuildMode(mode);
         JavaLanguageServer lsp = jdtLs;
         if (root == null || lsp == null) {
             return false;
         }
         background.submit(() -> {
             lsp.stop();
-            hideProgress(LSP_PROGRESS_ID);
+            hideProgress(LanguageServerManager.LSP_PROGRESS_ID);
             resolveProjectJdk(lifecycle.incrementAndGet(), root);
         });
         return true;

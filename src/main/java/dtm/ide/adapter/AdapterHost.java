@@ -2,6 +2,7 @@ package dtm.ide.adapter;
 
 import dtm.ide.BuildProblemsCoordinator;
 import dtm.ide.JavaEditorRegistry;
+import dtm.ide.api.extension.NotificationContext;
 import dtm.ide.api.extension.PlatformPopupBuilder;
 import dtm.ide.api.extension.Resource;
 import dtm.ide.api.extension.editor.EmbeddedCodeEditorSettings;
@@ -38,6 +39,7 @@ import dtm.ide.test.JavaTestRunner;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaTodoPanel;
+import dtm.request_actions.http.download.core.DownloadObserver;
 import dtm.stools.component.panels.dock.DockRegion;
 import dtm.stools.component.panels.editor.code.CodeEditor;
 import dtm.stools.component.panels.editor.code.api.Location;
@@ -206,4 +208,15 @@ public interface AdapterHost extends AdapterContext {
     PomProperties pomProperties();
     boolean isIndexing(Path file);
     IdeEditorContext liveEditorFor(Path file);
+    void classFileUris(ClassFileSupport support);
+    void languageServer(JavaLanguageServer server);
+    void observeSyncWork(boolean active);
+    DownloadObserver resolveDownloadObserver();
+    ConditionalBreakpointSupport conditionalBreakpoints();
+    CompletionEngine completionEngine();
+    void finishDiagnosticReanalysis(long ticket, Path root, boolean successful);
+    void refreshProblemsPanel();
+    void createNotification(NotificationContext context);
+    void requestRefreshInlayHints(Path file);
+    void requestRefreshSemanticTokens(Path file);
 }
