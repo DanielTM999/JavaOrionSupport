@@ -1,6 +1,5 @@
 package dtm.ide.adapter;
 
-import dtm.ide.BuildProblemsCoordinator;
 import dtm.ide.JavaIdeAdapter;
 import dtm.ide.api.project.editor.IdeCodeActionContext;
 import dtm.ide.api.project.editor.IdeDiagnosticsContext;
