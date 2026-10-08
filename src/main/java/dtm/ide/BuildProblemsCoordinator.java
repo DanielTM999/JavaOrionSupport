@@ -41,25 +41,25 @@ public final class BuildProblemsCoordinator {
         }
     }
 
-    List<BuildDiagnostic> buildProblems() {
+    public List<BuildDiagnostic> buildProblems() {
         return buildProblems;
     }
 
-    List<BuildDiagnostic> liveProblems() {
+    public List<BuildDiagnostic> liveProblems() {
         return liveProblems.values().stream().flatMap(List::stream).toList();
     }
 
-    Set<Path> paths() {
+    public Set<Path> paths() {
         Set<Path> paths = new LinkedHashSet<>(buildDiagnostics.keySet());
         paths.addAll(liveProblems.keySet());
         return paths;
     }
 
-    Set<Path> replaceBuild(List<BuildDiagnostic> problems) {
+    public Set<Path> replaceBuild(List<BuildDiagnostic> problems) {
         return replace(Channel.BUILD, problems);
     }
 
-    synchronized Set<Path> replace(Channel channel, List<BuildDiagnostic> problems) {
+    public synchronized Set<Path> replace(Channel channel, List<BuildDiagnostic> problems) {
         Set<Path> affected = new LinkedHashSet<>(buildDiagnostics.keySet());
         channels.put(channel, problems == null ? List.of() : List.copyOf(problems));
         reindex();
@@ -67,7 +67,7 @@ public final class BuildProblemsCoordinator {
         return affected;
     }
 
-    synchronized Set<Path> clearBuild() {
+    public synchronized Set<Path> clearBuild() {
         Set<Path> affected = new LinkedHashSet<>(buildDiagnostics.keySet());
         channels.clear();
         reindex();
@@ -78,11 +78,11 @@ public final class BuildProblemsCoordinator {
         return removeMatching(problem -> file.equals(problem.file()) && isCompilerProblem(problem));
     }
 
-    synchronized boolean supersedeAll(Path file) {
+    public synchronized boolean supersedeAll(Path file) {
         return removeMatching(problem -> file.equals(problem.file()));
     }
 
-    synchronized boolean move(Path file, String before, String after) {
+    public synchronized boolean move(Path file, String before, String after) {
         boolean changed = false;
         for (Map.Entry<Channel, List<BuildDiagnostic>> entry : channels.entrySet()) {
             List<BuildDiagnostic> shifted = moved(entry.getValue(), file, before, after);
@@ -124,7 +124,7 @@ public final class BuildProblemsCoordinator {
                 && COMPILER_SOURCES.contains(problem.source());
     }
 
-    synchronized Set<Path> clearAll() {
+    public synchronized Set<Path> clearAll() {
         Set<Path> affected = paths();
         channels.clear();
         liveProblems.clear();
@@ -132,11 +132,11 @@ public final class BuildProblemsCoordinator {
         return affected;
     }
 
-    void clearLive() {
+    public void clearLive() {
         liveProblems.clear();
     }
 
-    synchronized void removeBelow(Path deleted) {
+    public synchronized void removeBelow(Path deleted) {
         liveProblems.keySet().removeIf(candidate -> candidate.startsWith(deleted));
         removeMatching(problem -> problem.file() != null && problem.file().startsWith(deleted));
     }

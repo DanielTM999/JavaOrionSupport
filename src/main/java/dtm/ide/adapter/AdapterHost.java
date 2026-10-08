@@ -13,6 +13,8 @@ import dtm.ide.api.extension.runconfig.RunConfigurationData;
 import dtm.ide.api.extension.runconfig.RunExecutionContext;
 import dtm.ide.api.extension.runconfig.RunProcessHandle;
 import dtm.ide.api.extension.screen.ToolIconType;
+import dtm.ide.api.project.diagnostics.IdeProblem;
+import dtm.ide.api.project.diagnostics.ProblemsActionHandle;
 import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
@@ -219,4 +221,8 @@ public interface AdapterHost extends AdapterContext {
     void createNotification(NotificationContext context);
     void requestRefreshInlayHints(Path file);
     void requestRefreshSemanticTokens(Path file);
+    LanguageServerManager languageServerManager();
+    void requestOpenProblemsPanel();
+    void publishProblems(String owner, Collection<IdeProblem> problems);
+    ProblemsActionHandle registerProblemsAction(String owner, String label, String tooltip, Icon icon, Runnable action);
 }

@@ -60,6 +60,7 @@ import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.NavigationSupport;
 import dtm.ide.adapter.NavigationViews;
+import dtm.ide.adapter.ProblemsSupport;
 import dtm.ide.adapter.ProjectTreeMenuSupport;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.LanguageServerManager;
@@ -259,10 +260,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
-    private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
-    private static final String BUILD_PROBLEMS_OWNER = "java.build";
-    private static final String LSP_PROBLEMS_OWNER = "java.lsp";
-    private volatile ProblemsActionHandle clearBuildAction;
     private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
     private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
     private static final String BUILD_PROGRESS_ID = "javaBuild";
@@ -1088,6 +1085,27 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestRefreshSemanticTokens(Path file) {
             JavaIdeAdapter.this.requestRefreshSemanticTokens(file);
         }
+    
+        @Override
+        public LanguageServerManager languageServerManager() {
+            return languageServers;
+        }
+
+        @Override
+        public void requestOpenProblemsPanel() {
+            JavaIdeAdapter.this.requestOpenProblemsPanel();
+        }
+
+        @Override
+        public void publishProblems(String owner, Collection<IdeProblem> problems) {
+            JavaIdeAdapter.this.publishProblems(owner, problems);
+        }
+
+        @Override
+        public ProblemsActionHandle registerProblemsAction(String owner, String label, String tooltip, Icon icon,
+                                                           Runnable action) {
+            return JavaIdeAdapter.this.registerProblemsAction(owner, label, tooltip, icon, action);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -1111,12 +1129,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final SwingDesignerHost swingDesignerHost = new SwingDesignerHost(adapterHost);
     private final NavigationSupport navigationSupport = new NavigationSupport(adapterHost);
     private final LanguageServerManager languageServers = new LanguageServerManager(adapterHost);
+    private final ProblemsSupport problemsSupport = new ProblemsSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
             new JavaFastCompletionProvider(lexicalIndex);
-    private final AtomicLong problemsRefreshTicket = new AtomicLong();
-    private final AtomicBoolean diagnosticReanalysisRunning = new AtomicBoolean();
     private final PomProperties pomProperties = new PomProperties(this::pomLocalRepository);
     private final BuildFileCompletionProvider buildFileCompletion =
             new BuildFileCompletionProvider(new EditorDependencyCatalog(), pomProperties);
@@ -1283,7 +1300,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         buildToolsSyncPending.set(false);
         spring.resetConfiguration();
         problems.clearAll();
-        diagnosticReanalysisRunning.set(false);
+        problemsSupport.reanalysisRunning().set(false);
         refreshProblemsPanel();
         coverageSupport.clear();
         coverageSupport.detachAllGutters();
@@ -1327,8 +1344,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             }
         }
         debugSupport.runDebuggeeTerminator(debugSupport.takeDebuggeeTerminator());
-        ProblemsActionHandle action = clearBuildAction;
-        clearBuildAction = null;
+        ProblemsActionHandle action = problemsSupport.takeClearBuildAction();
         if (action != null) {
             action.unregister();
         }
@@ -3479,155 +3495,23 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void openProblemsPanel() {
-        refreshProblemsPanel();
-        requestOpenProblemsPanel();
+        problemsSupport.openProblemsPanel();
     }
 
     private void refreshProblemsPanel() {
-        long ticket = problemsRefreshTicket.incrementAndGet();
-        background.schedule(() -> {
-            if (ticket != problemsRefreshTicket.get()) {
-                return;
-            }
-            List<IdeProblem> build = toIdeProblems(problems.buildProblems());
-            List<IdeProblem> live = toIdeProblems(problems.liveProblems());
-            SwingUtilities.invokeLater(() -> {
-                if (ticket != problemsRefreshTicket.get()) {
-                    return;
-                }
-                publishProblems(BUILD_PROBLEMS_OWNER, build);
-                publishProblems(LSP_PROBLEMS_OWNER, live);
-                ProblemsActionHandle action = ensureClearBuildAction();
-                if (action != null) {
-                    action.setEnabled(!build.isEmpty());
-                }
-            });
-        }, PROBLEMS_REFRESH_DELAY_MS, TimeUnit.MILLISECONDS);
-    }
-
-    private ProblemsActionHandle ensureClearBuildAction() {
-        ProblemsActionHandle handle = clearBuildAction;
-        if (handle != null) {
-            return handle;
-        }
-        handle = registerProblemsAction(
-                BUILD_PROBLEMS_OWNER,
-                text("action.clearBuild", "Limpar build"),
-                text("action.clearBuild.tip", "Limpar os problemas do ultimo build"),
-                JavaIcons.error(JavaIcons.SMALL),
-                this::clearBuildProblems);
-        clearBuildAction = handle;
-        return handle;
-    }
-
-    private static List<IdeProblem> toIdeProblems(List<BuildDiagnostic> problems) {
-        if (problems == null || problems.isEmpty()) {
-            return List.of();
-        }
-        List<IdeProblem> converted = new ArrayList<>(problems.size());
-        for (BuildDiagnostic problem : problems) {
-            if (problem != null) {
-                converted.add(problem.toIdeProblem());
-            }
-        }
-        return converted;
-    }
-
-    private void clearBuildProblems() {
-        Set<Path> affected = problems.clearBuild();
-        affected.forEach(this::requestRefreshDiagnostics);
-        refreshProblemsPanel();
+        problemsSupport.refreshProblemsPanel();
     }
 
     private void syncWithDisk() {
-        Path root = projectRoot;
-        JavaLanguageServer lsp = jdtLs;
-        if (root == null || lsp == null) {
-            setStatusBarText(text("status.noProject", "Java: nenhum projeto aberto"));
-            return;
-        }
-        setStatusBarText(text("status.syncingWithDisk",
-                "Java: relendo as mudancas feitas fora do editor..."));
-        background.submit(() -> {
-            JavaFileChangeRouter router = fileChangeRouter;
-            if (router != null) {
-                router.acceptDirectory(root);
-            }
-            lsp.resynchronizeWithDisk();
-            javaEditors.keySet().forEach(path -> {
-                requestRefreshDiagnostics(path);
-                requestRefreshCodeLenses(path);
-                requestRefreshInlayHints(path);
-                requestRefreshSemanticTokens(path);
-            });
-        });
+        problemsSupport.syncWithDisk();
     }
 
     private void reanalyzeDiagnostics() {
-        Path root = projectRoot;
-        if (root == null) {
-            setStatusBarText(text("status.noProject", "Java: nenhum projeto aberto"));
-            return;
-        }
-        if (!diagnosticReanalysisRunning.compareAndSet(false, true)) {
-            setStatusBarText(text("status.diagnosticsReanalysisRunning",
-                    "Java: a reanalise de diagnosticos ja esta em andamento"));
-            return;
-        }
-
-        long ticket = lifecycle.incrementAndGet();
-        Set<Path> affected = new LinkedHashSet<>(javaEditors.keySet());
-        affected.addAll(problems.paths());
-
-        problems.clearAll();
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            lsp.clearDiagnostics();
-        }
-        affected.forEach(this::requestRefreshDiagnostics);
-        refreshProblemsPanel();
-        setStatusBarText(text("status.reanalyzingDiagnostics",
-                "Java: limpando diagnosticos e reiniciando a analise..."));
-
-        background.submit(() -> {
-            if (lsp != null) {
-                lsp.stop();
-            }
-            if (!current(ticket, root)) {
-                diagnosticReanalysisRunning.set(false);
-                return;
-            }
-
-            problems.clearLive();
-            languageServers.readyHandled().set(false);
-            SwingUtilities.invokeLater(() -> {
-                if (current(ticket, root)) {
-                    javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
-                    refreshProblemsPanel();
-                }
-            });
-            spring.setup(ticket, root);
-
-            if (settings().getLanguageServerMode().startsServer()) {
-                resolveProjectJdk(ticket, root);
-            } else {
-                finishDiagnosticReanalysis(ticket, root, true);
-            }
-        });
+        problemsSupport.reanalyzeDiagnostics();
     }
 
     private void finishDiagnosticReanalysis(long ticket, Path root, boolean successful) {
-        if (!current(ticket, root)) {
-            diagnosticReanalysisRunning.set(false);
-            return;
-        }
-        diagnosticReanalysisRunning.set(false);
-        if (successful) {
-            javaEditors.keySet().forEach(this::requestRefreshDiagnostics);
-            refreshProblemsPanel();
-            setStatusBarText(text("status.diagnosticsReanalyzed",
-                    "Java: diagnosticos atualizados"));
-        }
+        problemsSupport.finishDiagnosticReanalysis(ticket, root, successful);
     }
 
     private void ensureBuildToolsPanel() {
