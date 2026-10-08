@@ -24,6 +24,7 @@ import dtm.ide.coverage.CoverageProvisioner;
 import dtm.ide.debug.BuildToolDebugListener;
 import dtm.ide.debug.JavaDebugSession;
 import dtm.ide.deps.PomProperties;
+import dtm.ide.editor.AutoCompleteIdleTrigger;
 import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.editor.JavaFastCompletionProvider;
 import dtm.ide.index.JavaLexicalIndex;
@@ -231,4 +232,10 @@ public interface AdapterHost extends AdapterContext {
     Map<Path, String> diskBaseline();
     void requestJavaTreeIconRefresh(Path file);
     FileWatchSupport fileWatch();
+    AutoCompleteIdleTrigger autoCompleteIdle();
+    void activeJavaEditor(IdeEditorContext editor);
+    Map<Path, String> lastEditorContents();
+    RunLauncher runLauncher();
+    SwingDesignerHost swingDesignerHost();
+    NavigationSupport navigationSupport();
 }

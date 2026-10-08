@@ -51,6 +51,7 @@ import dtm.ide.adapter.CompletionEngine;
 import dtm.ide.adapter.DebugSupport;
 import dtm.ide.adapter.ConditionalBreakpointSupport;
 import dtm.ide.adapter.DiagnosticsEngine;
+import dtm.ide.adapter.EditorEventsSupport;
 import dtm.ide.adapter.FileWatchSupport;
 import dtm.ide.adapter.RenameSupport;
 import dtm.ide.adapter.RunLauncher;
@@ -84,7 +85,6 @@ import dtm.ide.api.project.editor.IdeSignatureHelpContext;
 import dtm.ide.api.project.editor.IdeWordCaretContext;
 import dtm.ide.api.project.editor.IdeWordClickContext;
 import dtm.ide.api.project.editor.SemanticToken;
-import dtm.ide.api.project.editor.EditorShortcutScope;
 import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointDialogView;
@@ -116,8 +116,6 @@ import dtm.ide.deps.DependencyVersionChoice;
 import dtm.ide.deps.PomProperties;
 import dtm.ide.deps.MavenLocalRepositoryResolver;
 import dtm.ide.editor.AutoCompleteIdleTrigger;
-import dtm.stools.configs.UiTokens;
-import dtm.stools.component.panels.editor.code.ghost.GhostTextActivationMode;
 import dtm.stools.component.panels.editor.code.ghost.GhostTextSuggestion;
 import dtm.ide.editor.JavaSnippetCompletionProvider;
 import dtm.ide.editor.BuildFileCompletionProvider;
@@ -155,14 +153,10 @@ import dtm.ide.sdk.SdkDownloader;
 import dtm.ide.settings.JavaPluginSettings;
 import dtm.ide.settings.JdtBuildMode;
 import dtm.ide.settings.JavaSettingsPage;
-import dtm.ide.settings.HotReloadMode;
-import dtm.ide.test.JUnitTestDiscovery;
-import dtm.ide.test.JavaTest;
 import dtm.ide.test.JavaTestRunner;
 import dtm.ide.test.JUnitPlatformLauncher;
 import dtm.ide.ui.DependencyManagerPanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
-import dtm.ide.ui.JavaTestGutterLayer;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaProjectStructurePanel;
 import dtm.ide.ui.JavaTodoPanel;
@@ -186,7 +180,6 @@ import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.api.TextEdit;
 import dtm.stools.component.panels.editor.code.CodeEditor;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
-import dtm.stools.component.menu.popup.ActionMenu;
 import dtm.stools.component.panels.editor.code.codelens.CodeLens;
 import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
 import dtm.stools.component.panels.editor.code.hover.HoverDocumentationProvider;
@@ -202,7 +195,6 @@ import lombok.extern.slf4j.Slf4j;
 import javax.swing.*;
 import java.awt.Dimension;
 import java.awt.Point;
-import java.awt.event.MouseEvent;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -234,11 +226,8 @@ import static dtm.ide.adapter.AdapterText.text;
 @PluginReference(id = "java-ide-adapter")
 public class JavaIdeAdapter extends IdeAdapter {
 
-
-
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
-    private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
@@ -1098,6 +1087,36 @@ public class JavaIdeAdapter extends IdeAdapter {
         public FileWatchSupport fileWatch() {
             return fileWatch;
         }
+
+        @Override
+        public AutoCompleteIdleTrigger autoCompleteIdle() {
+            return autoCompleteIdle;
+        }
+
+        @Override
+        public void activeJavaEditor(IdeEditorContext editor) {
+            activeJavaEditor = editor;
+        }
+
+        @Override
+        public Map<Path, String> lastEditorContents() {
+            return lastEditorContents;
+        }
+
+        @Override
+        public RunLauncher runLauncher() {
+            return runLauncher;
+        }
+
+        @Override
+        public SwingDesignerHost swingDesignerHost() {
+            return swingDesignerHost;
+        }
+
+        @Override
+        public NavigationSupport navigationSupport() {
+            return navigationSupport;
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -1126,6 +1145,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final ProjectSyncSupport projectSync = new ProjectSyncSupport(adapterHost);
     private final FileWatchSupport fileWatch = new FileWatchSupport(adapterHost);
     private final PathRenameSupport pathRenames = new PathRenameSupport(adapterHost);
+    private final EditorEventsSupport editorEvents = new EditorEventsSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1150,7 +1170,6 @@ public class JavaIdeAdapter extends IdeAdapter {
             completionEngine::fireIdleCompletion
     );
 
-
     private final Object lifecycleLock = new Object();
     private volatile Path projectRoot;
     private volatile JavaProjectDescriptor descriptor;
@@ -1160,8 +1179,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JdkInstallation projectJdk;
     private volatile JdkManagerPanel jdkManagerPanel;
     private static final String STRUCTURE_TAB_ID = "javaProjectStructure";
-
-
 
     private volatile JavaLanguageServer jdtLs;
     private volatile ClassFileSupport classFileUris;
@@ -1694,11 +1711,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         editorContext.setFoldingEnabled(true);
         editorContext.setAutoCompleteOnTyping(!debugActive.get());
-        configureGhostText(editorContext);
+        editorEvents.configureGhostText(editorContext);
         coverageSupport.installGutter(editorContext);
-        installTestGutter(editorContext);
-        installCodeActionCommandHandler(editorContext);
-        installJavaShortcuts(editorContext);
+        editorEvents.installTestGutter(editorContext);
+        editorEvents.installCodeActionCommandHandler(editorContext);
+        editorEvents.installJavaShortcuts(editorContext);
         if (JavaProjectConventions.isMavenPom(editorContext.filePath())
                 && settings().isBuildFileCompletion()) {
             dependencyManagerHost().warmLocalCatalog();
@@ -2246,265 +2263,44 @@ public class JavaIdeAdapter extends IdeAdapter {
         diagnosticsEngine.onWordCaretChange(context);
     }
 
-    private void installTestGutter(IdeEditorContext context) {
-        if (context == null) {
-            return;
-        }
-        Path file = JavaProjectConventions.normalize(context.filePath());
-        if (file == null || !JavaProjectConventions.isJava(file)) {
-            return;
-        }
-        JavaTestGutterLayer layer = context.getGutterLayer(JavaTestGutterLayer.class);
-        if (layer == null) {
-            layer = new JavaTestGutterLayer(this::showTestGutterMenu);
-            if (!context.addGutterLayer(layer)) {
-                return;
-            }
-        }
-        layer.setColor(UiTokens.success());
-        layer.setTests(JUnitTestDiscovery.discoverInSource(file, context.getText()));
-        context.repaintGutter();
-    }
-
-    private void showTestGutterMenu(MouseEvent event, JavaTest test) {
-        ActionMenu menu = ActionMenu.of(new JMenu());
-        menu.item(text("lens.runAction", "Executar"), JavaIcons.test(JavaIcons.SMALL),
-                        action -> codeLensSupport.runTestFromLens(test, false))
-                .item(text("lens.debugAction", "Depurar"), JavaIcons.debug(JavaIcons.SMALL),
-                        action -> codeLensSupport.runTestFromLens(test, true));
-        if (coverageSupport.supportedForProject()) {
-            menu.item(text("action.runCoverage", "Rodar com cobertura"),
-                    JavaIcons.test(JavaIcons.SMALL), action -> runTestWithCoverage(test));
-        }
-        menu.getMenu().getPopupMenu().show(event.getComponent(), event.getX(), event.getY());
-    }
-
-
-    private void runTestWithCoverage(JavaTest test) {
-        SwingUtilities.invokeLater(() -> {
-            ensureTestPanel();
-            if (testPanelId != null) {
-                requestOpenToolPanel(testPanelId);
-            }
-            if (testPanel != null) {
-                testPanel.runTestsWithCoverage(List.of(test));
-            }
-        });
-    }
-
-    private void configureGhostText(IdeEditorContext context) {
-        if (context == null) {
-            return;
-        }
-        context.setGhostTextEnabled(true);
-        context.setGhostTextActivationMode(GhostTextActivationMode.CARET_IDLE);
-        context.setGhostTextCaretIdleDelay(GHOST_TEXT_IDLE_DELAY_MS);
-    }
-
-
-
-
     @Override
     public void onEditorOpen(IdeEditorContext editorContext) {
-        configureGhostText(editorContext);
-        coverageSupport.installGutter(editorContext);
-        installTestGutter(editorContext);
-        installCodeActionCommandHandler(editorContext);
-        installJavaShortcuts(editorContext);
-        JavaLanguageServer lsp = jdtLs;
-        if (editorContext == null || !JavaProjectConventions.isJava(editorContext.filePath())) {
-            return;
-        }
-        Path openedPath = JavaProjectConventions.normalize(editorContext.filePath());
-        javaEditors.put(openedPath, editorContext);
-        String openedText = Objects.toString(editorContext.getText(), "");
-        lastEditorContents.put(openedPath, openedText);
-        diskBaseline.put(openedPath, diskBaselineFor(openedPath, openedText));
-        if (activeJavaEditor == null) {
-            activeJavaEditor = editorContext;
-        }
-        if (lsp != null) {
-            lsp.openDocument(editorContext.filePath(), openedText);
-        }
-        background.submit(() -> JavaLocalScope.preload(openedText));
-        SwingUtilities.invokeLater(editorContext::refreshCodeLenses);
+        editorEvents.onEditorOpen(editorContext);
     }
 
     @Override
     public void onEditorSelected(IdeEditorContext editorContext) {
-        autoCompleteIdle.cancel();
-        activeJavaEditor = editorContext != null && JavaProjectConventions.isJava(editorContext.filePath())
-                ? editorContext : null;
-        if (debugActive.get()) {
-            debugSupport.setDebugEditorAssistEnabled(false);
-        }
-        runLauncher.refreshRunButtonsForCurrentFile();
-    }
-
-    private void installCodeActionCommandHandler(IdeEditorContext context) {
-        if (context == null) {
-            return;
-        }
-        if (!context.setCommandHandler(sourceActions::handleCodeActionCommand)) {
-            log.debug("Nao foi possivel registrar as correcoes Java em {}", context.filePath());
-        }
-    }
-
-    private void installJavaShortcuts(IdeEditorContext context) {
-        if (context == null) {
-            return;
-        }
-        context.registerShortcut("java.goToDefinition", "control B",
-                () -> onGoToDeclaration(context));
-        context.registerShortcut("java.goToImplementation", "control alt B",
-                () -> onGoToImplementation(context));
-        context.registerShortcut("java.findUsages", "alt F7",
-                () -> onFindUsages(context));
-        context.registerShortcut("java.generate", "alt INSERT",
-                () -> sourceActions.showGenerateActions(context));
-        context.registerShortcut("java.overrideMethods", "control INSERT",
-                () -> sourceActions.showOverrideMethods(context, false));
-        context.registerShortcut("java.implementMethods", "control I",
-                () -> sourceActions.showOverrideMethods(context, true));
-        context.registerShortcut("java.evaluateExpression", "alt F8",
-                () -> debugSupport.showEvaluateDialog(context, 0));
-        context.registerShortcut("java.pasteImports", "control V", EditorShortcutScope.EDITOR, () -> {
-            SwingUtilities.invokeLater(() -> sourceActions.onPasted(context));
-            return false;
-        });
-        bindDebugShortcut(context, "F5", "java.debug.continue",
-                () -> debugSupport.withPausedDebugSession(JavaDebugSession::continueExecution));
-        bindDebugShortcut(context, "F6", "java.debug.pause",
-                () -> debugSupport.withDebugSession(JavaDebugSession::pause));
-        bindDebugShortcut(context, "F10", "java.debug.stepOver",
-                () -> debugSupport.withPausedDebugSession(JavaDebugSession::next));
-        bindDebugShortcut(context, "F11", "java.debug.stepInto",
-                () -> debugSupport.withPausedDebugSession(JavaDebugSession::stepIn));
-        bindDebugShortcut(context, "shift F11", "java.debug.stepOut",
-                () -> debugSupport.withPausedDebugSession(JavaDebugSession::stepOut));
-        bindDebugShortcut(context, "shift F5", "java.debug.stop", debugSupport::closeDebugSession);
-        bindDebugShortcut(context, "control F5", "java.debug.hotReload", this::runHotReload);
-    }
-
-
-    private void bindDebugShortcut(IdeEditorContext context, String stroke,
-                                   String actionId, Runnable action) {
-        context.registerShortcut(actionId, stroke, EditorShortcutScope.WINDOW, () -> {
-            if (!debugActive.get()) {
-                return false;
-            }
-            action.run();
-            return true;
-        });
+        editorEvents.onEditorSelected(editorContext);
     }
 
     @Override
     public void onCodeEditorInsertText(IdeEditorContext editorContext, int offset, String inserted) {
-        if (editorContext == null) {
-            autoCompleteIdle.cancel();
-            return;
-        }
-        autoCompleteIdle.typed(JavaProjectConventions.normalize(editorContext.filePath()),
-                offset, inserted);
+        editorEvents.onCodeEditorInsertText(editorContext, offset, inserted);
     }
 
     @Override
     public void onCodeEditorDeleteText(IdeEditorContext editorContext, int offset, String removed) {
-        autoCompleteIdle.cancel();
+        editorEvents.onCodeEditorDeleteText(editorContext, offset, removed);
     }
 
     @Override
     public void onCodeEditorTextChanged(IdeEditorContext editorContext) {
-        JavaLanguageServer lsp = jdtLs;
-        if (editorContext != null && JavaProjectConventions.isJava(editorContext.filePath())) {
-            Path edited = editorContext.filePath().toAbsolutePath().normalize();
-            String currentText = Objects.toString(editorContext.getText(), "");
-            String previousText = lastEditorContents.put(edited, currentText);
-            JavaProjectTreeIcons.updateOpenSource(edited, currentText);
-            requestJavaTreeIconRefresh(edited);
-            if (lsp != null) {
-                lsp.changeDocument(editorContext.filePath(), currentText);
-            }
-            if (problems.move(edited, previousText, currentText)) refreshProblemsPanel();
-            runLauncher.scheduleRunButtonsRefresh();
-        }
+        editorEvents.onCodeEditorTextChanged(editorContext);
     }
 
     @Override
     public void onEditorClose(Path filePath) {
-        JavaProjectTreeIcons.closeSource(filePath);
-        requestJavaTreeIconRefresh(filePath);
-        autoCompleteIdle.cancel();
-        IdeEditorContext active = activeJavaEditor;
-        if (active != null && Objects.equals(JavaProjectConventions.normalize(active.filePath()),
-                JavaProjectConventions.normalize(filePath))) {
-            activeJavaEditor = null;
-            runLauncher.refreshRunButtonsForCurrentFile();
-        }
-        JavaLanguageServer lsp = jdtLs;
-        if (JavaProjectConventions.isJava(filePath)) {
-            coverageSupport.detachGutter(filePath);
-            javaEditors.remove(JavaProjectConventions.normalize(filePath));
-            diskBaseline.remove(JavaProjectConventions.normalize(filePath));
-            lastEditorContents.remove(JavaProjectConventions.normalize(filePath));
-            if (lsp != null) {
-                lsp.closeDocument(filePath);
-            }
-        }
+        editorEvents.onEditorClose(filePath);
     }
 
     @Override
     public String onBeforeFileSave(Path filePath, String content) {
-        JavaPluginSettings preferences = settings();
-        if (!preferences.isFormatOnSave() && !preferences.isOrganizeImportsOnSave()) {
-            return content;
-        }
-        JavaLanguageServer lsp = runningServerFor(filePath);
-        if (lsp == null) {
-            return content;
-        }
-        IdeEditorContext editor = getEditor(filePath);
-        String prepared = lsp.prepareSave(filePath, content, preferences.isOrganizeImportsOnSave(),
-                preferences.isFormatOnSave(), editor == null ? 4 : editor.getTabSize(),
-                editor == null || editor.isUseSpacesForTab());
-        String latest = editor == null ? content : onUi(editor::getText);
-        return latest != null && !Objects.equals(content, latest) ? latest : prepared;
+        return editorEvents.onBeforeFileSave(filePath, content);
     }
 
     @Override
     public void onAfterFileSave(Path filePath, String content) {
-        JavaLanguageServer lsp = jdtLs;
-        if (JavaProjectConventions.isJava(filePath)) {
-            diskBaseline.put(JavaProjectConventions.normalize(filePath), content);
-            JavaProjectTreeIcons.invalidate(filePath);
-            requestJavaTreeIconRefresh(filePath);
-        }
-        if (lsp != null && JavaProjectConventions.isJava(filePath)) {
-            lsp.saveDocument(filePath, content);
-        }
-        SwingDesignerSupport designer = swingDesignerHost.currentSwingDesigner();
-        if (designer != null && JavaProjectConventions.isJava(filePath)) {
-            designer.onJavaFileSaved(filePath);
-        }
-        if (JavaProjectConventions.isMavenPom(filePath)
-                || JavaProjectConventions.isGradleBuildFile(filePath)) {
-            onBuildFileChanged(filePath);
-        }
-        refreshTodosFor(filePath, content);
-        lexicalIndex.refreshFile(filePath, content);
-        JavaProjectDescriptor current = descriptor;
-        if (current != null && current.spring() && JavaProjectConventions.isJava(filePath)) {
-            fileWatch.refreshSpringIndexFor(filePath, content);
-        }
-        if (JavaProjectConventions.isJava(filePath) && debugSupport.session() != null
-                && settings().getHotReloadMode() == HotReloadMode.AUTOMATIC) {
-            long ticket = debugSupport.hotReloadTicket().incrementAndGet();
-            background.schedule(() -> {
-                if (ticket == debugSupport.hotReloadTicket().get() && debugSupport.session() != null) {
-                    runHotReload();
-                }
-            }, 500, TimeUnit.MILLISECONDS);
-        }
+        editorEvents.onAfterFileSave(filePath, content);
     }
 
     private JavaLanguageServer interactiveServerFor(Path filePath) {
