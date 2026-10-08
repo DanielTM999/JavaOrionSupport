@@ -1,5 +1,6 @@
 package dtm.ide.adapter;
 
+import dtm.ide.api.extension.Resource;
 import dtm.ide.api.extension.output.OutputPanelHandle;
 import dtm.ide.api.extension.output.OutputPanelOptions;
 import dtm.ide.api.project.editor.IdeEditorContext;
@@ -37,6 +38,13 @@ public final class SwingDesignerHost implements SwingDesignerEnvironment {
 
     public SwingDesignerHost(AdapterHost host) {
         this.host = host;
+    }
+
+    @Override
+    public Path cacheDirectory() {
+        Resource resource = host.resource();
+        Path root = resource == null ? null : resource.getResourcePath();
+        return root == null ? SwingDesignerEnvironment.super.cacheDirectory() : root.resolve("swing-designer");
     }
 
     public SwingDesignerSupport currentSwingDesigner() {

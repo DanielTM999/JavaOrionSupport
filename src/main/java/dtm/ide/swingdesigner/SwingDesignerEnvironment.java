@@ -52,6 +52,6 @@ public interface SwingDesignerEnvironment {
     }
 
     default Path cacheDirectory() {
-        return Path.of(System.getProperty("user.home"), ".orion", "swing-designer");
+        return Path.of(System.getProperty("java.io.tmpdir"), "orion-swing-designer");
     }
 }
