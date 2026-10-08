@@ -230,4 +230,5 @@ public interface AdapterHost extends AdapterContext {
     TodoPanelHost todoSupport();
     Map<Path, String> diskBaseline();
     void requestJavaTreeIconRefresh(Path file);
+    FileWatchSupport fileWatch();
 }

@@ -61,6 +61,8 @@ import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.NavigationSupport;
 import dtm.ide.adapter.NavigationViews;
+import dtm.ide.adapter.PathRenameSupport;
+import dtm.ide.adapter.PathTransferHost;
 import dtm.ide.adapter.ProblemsSupport;
 import dtm.ide.adapter.ProjectSyncSupport;
 import dtm.ide.adapter.ProjectTreeMenuSupport;
@@ -144,8 +146,6 @@ import dtm.ide.project.JavaFileChangeRouter;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.project.JavaProjectSources;
-import dtm.ide.refactor.JavaPathTransferPlan;
-import dtm.ide.refactor.MavenModuleRename;
 import dtm.ide.refactor.JavaPathTransferRefactoring;
 import dtm.ide.sdk.BuildToolProvisioner;
 import dtm.ide.sdk.DownloadProgressListener;
@@ -163,9 +163,6 @@ import dtm.ide.test.JUnitPlatformLauncher;
 import dtm.ide.ui.DependencyManagerPanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaTestGutterLayer;
-import dtm.ide.ui.JavaCopyDialogPanel;
-import dtm.ide.ui.JavaModuleRenameDialogPanel;
-import dtm.ide.ui.JavaMoveDialogPanel;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaProjectStructurePanel;
 import dtm.ide.ui.JavaTodoPanel;
@@ -205,8 +202,6 @@ import lombok.extern.slf4j.Slf4j;
 import javax.swing.*;
 import java.awt.Dimension;
 import java.awt.Point;
-import java.awt.SecondaryLoop;
-import java.awt.Toolkit;
 import java.awt.event.MouseEvent;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -231,8 +226,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static dtm.ide.adapter.AdapterText.text;
 
@@ -645,7 +638,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public boolean isSpringNavigationEnabled() {
             return JavaIdeAdapter.this.isSpringNavigationEnabled();
         }
-    
+
         @Override
         public BuildProblemsCoordinator problems() {
             return problems;
@@ -665,7 +658,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestShowCodeActions(Path file) {
             JavaIdeAdapter.this.requestShowCodeActions(file);
         }
-    
+
         @Override
         public JavaLanguageServer runningServerFor(Path file) {
             return JavaIdeAdapter.this.runningServerFor(file);
@@ -680,7 +673,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void updateProgress(String id, String message, int percent, boolean cancellable, Runnable onCancel) {
             JavaIdeAdapter.this.updateProgress(id, message, percent, cancellable, onCancel);
         }
-    
+
         @Override
         public <T> ModernComponentDialog.ModernComponentDialogBuilder<T> createModernComponentDialogBuilder() {
             return JavaIdeAdapter.this.createModernComponentDialogBuilder();
@@ -706,7 +699,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public IdeEditorContext getEditor(Path file) {
             return JavaIdeAdapter.this.getEditor(file);
         }
-    
+
         @Override
         public CoverageSupport coverage() {
             return coverageSupport;
@@ -761,7 +754,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public List<Location> uniqueLocations(List<Location> locations) {
             return JavaIdeAdapter.uniqueLocations(locations);
         }
-    
+
         @Override
         public CodeLensSupport codeLens() {
             return codeLensSupport;
@@ -807,7 +800,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public boolean isDebugPaused() {
             return debugSupport.isDebugPaused();
         }
-    
+
         @Override
         public DiagnosticsEngine diagnostics() {
             return diagnosticsEngine;
@@ -823,12 +816,12 @@ public class JavaIdeAdapter extends IdeAdapter {
                 Class<T> type) {
             return JavaIdeAdapter.this.createModernComponentDialogBuilder(type);
         }
-    
+
         @Override
         public JavaDebugSession debugSession() {
             return debugSupport.session();
         }
-    
+
         @Override
         public Object monitor() {
             return JavaIdeAdapter.this;
@@ -884,7 +877,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestRepaintCodeEditorBreakpointLine(Path file) {
             JavaIdeAdapter.this.requestRepaintCodeEditorBreakpointLine(file);
         }
-    
+
         @Override
         public DebugSupport debug() {
             return debugSupport;
@@ -934,7 +927,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestSetCoverageButtonEnabled(boolean enabled) {
             JavaIdeAdapter.this.requestSetCoverageButtonEnabled(enabled);
         }
-    
+
         @Override
         public void runBuild(BuildSystem.BuildAction action, String title, JavaModule module) {
             buildSupport.runBuild(action, title, module);
@@ -979,12 +972,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestProjectTreeRevealCreated(Path file) {
             JavaIdeAdapter.this.requestProjectTreeRevealCreated(file);
         }
-    
+
         @Override
         public SourceActionSupport sourceActions() {
             return sourceActions;
         }
-    
+
         @Override
         public AtomicLong navigationRequestTicket() {
             return navigationRequestTicket;
@@ -1004,7 +997,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public IdeEditorContext liveEditorFor(Path file) {
             return JavaIdeAdapter.this.liveEditorFor(file);
         }
-    
+
         @Override
         public void classFileUris(ClassFileSupport support) {
             classFileUris = support;
@@ -1059,7 +1052,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         public void requestRefreshSemanticTokens(Path file) {
             JavaIdeAdapter.this.requestRefreshSemanticTokens(file);
         }
-    
+
         @Override
         public LanguageServerManager languageServerManager() {
             return languageServers;
@@ -1080,7 +1073,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                                                            Runnable action) {
             return JavaIdeAdapter.this.registerProblemsAction(owner, label, tooltip, icon, action);
         }
-    
+
         @Override
         public IdeProjectFileWatcher projectFileWatcher() {
             return getProjectFileWatcher();
@@ -1099,6 +1092,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         @Override
         public void requestJavaTreeIconRefresh(Path file) {
             JavaIdeAdapter.this.requestJavaTreeIconRefresh(file);
+        }
+
+        @Override
+        public FileWatchSupport fileWatch() {
+            return fileWatch;
         }
     }
 
@@ -1127,6 +1125,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final BuildSupport buildSupport = new BuildSupport(adapterHost);
     private final ProjectSyncSupport projectSync = new ProjectSyncSupport(adapterHost);
     private final FileWatchSupport fileWatch = new FileWatchSupport(adapterHost);
+    private final PathRenameSupport pathRenames = new PathRenameSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1151,11 +1150,11 @@ public class JavaIdeAdapter extends IdeAdapter {
             completionEngine::fireIdleCompletion
     );
 
-    
+
     private final Object lifecycleLock = new Object();
     private volatile Path projectRoot;
     private volatile JavaProjectDescriptor descriptor;
-    private final JavaPathTransferRefactoring pathTransfers = new JavaPathTransferRefactoring(new PathTransferHost());
+    private final JavaPathTransferRefactoring pathTransfers = new JavaPathTransferRefactoring(new PathTransferHost(adapterHost));
     private volatile IdeProjectContext projectContext;
     private volatile JdkService jdkService;
     private volatile JdkInstallation projectJdk;
@@ -1175,7 +1174,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicReference<Runnable> pendingTestDebug = new AtomicReference<>();
     private volatile JavaTestExplorerPanel testPanel;
     private volatile String testPanelId;
-    private final Set<Path> pendingModuleDirectoryRenames = ConcurrentHashMap.newKeySet();
     private final MavenPluginGoals pluginGoals = new MavenPluginGoals(this::pluginRepository);
     private volatile Path pluginRepositoryRoot;
     private volatile Path pluginRepositoryPath;
@@ -1843,141 +1841,17 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public PathRenameDecision beforePathRename(Path path) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null) {
-            return PathRenameDecision.useDefault();
-        }
-        Optional<MavenModuleRename.Target> target = MavenModuleRename.of(current, path, this::readCurrentText);
-        if (target.isEmpty()) {
-            return PathRenameDecision.useDefault();
-        }
-        JavaModuleRenameDialogPanel.Result result = askModuleRename(target.get());
-        if (result == null) {
-            return PathRenameDecision.cancel();
-        }
-        IdeWorkspaceEdit edit = MavenModuleRename.plan(target.get(), result.scope(), result.name(),
-                this::readCurrentText);
-        if (edit.isEmpty()) {
-            return PathRenameDecision.cancel();
-        }
-        boolean movesDirectory = edit.operations().stream()
-                .anyMatch(operation -> operation instanceof IdeWorkspaceEdit.RenameFile);
-        if (movesDirectory) {
-            pendingModuleDirectoryRenames.add(target.get().directory());
-        }
-        SwingUtilities.invokeLater(this::syncProject);
-        String label = text("moduleRename.label", "Rename module \"{module}\" to \"{name}\"")
-                .replace("{module}", target.get().artifactId())
-                .replace("{name}", result.name());
-        return PathRenameDecision.apply(label, edit);
-    }
-
-    private JavaModuleRenameDialogPanel.Result askModuleRename(MavenModuleRename.Target target) {
-        CompletableFuture<JavaModuleRenameDialogPanel.Result> answer = new CompletableFuture<>();
-        Runnable open = () -> {
-            JavaModuleRenameDialogPanel panel = new JavaModuleRenameDialogPanel(target, answer::complete);
-            showPopup(PlatformPopupBuilder.builder()
-                    .component(panel)
-                    .title(text("moduleRename.title", "Rename"))
-                    .size(500, 320)
-                    .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
-                    .onLoad(component -> panel.focusInput())
-                    .onClose(component -> panel.closed())
-                    .build());
-        };
-        if (!SwingUtilities.isEventDispatchThread()) {
-            SwingUtilities.invokeLater(open);
-            try {
-                return answer.get(30, TimeUnit.MINUTES);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return null;
-            } catch (Exception e) {
-                return null;
-            }
-        }
-        SecondaryLoop loop = Toolkit.getDefaultToolkit().getSystemEventQueue().createSecondaryLoop();
-        answer.whenComplete((result, error) -> loop.exit());
-        open.run();
-        if (!answer.isDone()) {
-            loop.enter();
-        }
-        return answer.getNow(null);
+        return pathRenames.beforePathRename(path);
     }
 
     @Override
     public void onPathRenamed(Path oldPath, Path newPath) {
-        Path movedFrom = JavaProjectConventions.normalize(oldPath);
-        Path movedTo = JavaProjectConventions.normalize(newPath);
-        if (movedFrom != null && movedTo != null && !pendingModuleDirectoryRenames.remove(movedFrom)
-                && isModuleRoot(movedFrom)) {
-            onBuildFileChanged(movedTo.resolve(JavaProjectConventions.POM_FILE));
-        }
-        Set<Path> editorsBeforeMove = movedFrom == null ? Set.of() : javaEditors.keySet().stream()
-                .filter(path -> path.startsWith(movedFrom))
-                .map(path -> movedTo == null ? path : movedTo.resolve(movedFrom.relativize(path)))
-                .collect(Collectors.toUnmodifiableSet());
-        if (oldPath != null) {
-            onPathDeleted(oldPath);
-        }
-        if (newPath == null) {
-            return;
-        }
-        JavaFileChangeRouter router = fileWatch.fileChangeRouter();
-        if (router == null) {
-            return;
-        }
-        if (!Files.isDirectory(newPath)) {
-            announceMovedFile(router, newPath, editorsBeforeMove);
-            return;
-        }
-        background.submit(() -> {
-            try (Stream<Path> files = Files.walk(newPath)) {
-                files.filter(Files::isRegularFile)
-                        .forEach(file -> announceMovedFile(router, file, editorsBeforeMove));
-            } catch (IOException | java.io.UncheckedIOException e) {
-                log.debug("Falha ao anunciar arquivos da pasta renomeada {}: {}", newPath, e.getMessage());
-            }
-        });
-    }
-
-    private void announceMovedFile(JavaFileChangeRouter router, Path file, Set<Path> editorManagedTargets) {
-        Path normalized = JavaProjectConventions.normalize(file);
-        if (!editorManagedTargets.contains(normalized) && !javaEditors.containsKey(normalized)) {
-            router.acceptCreated(file);
-            return;
-        }
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            lsp.pathCreated(normalized);
-        }
+        pathRenames.onPathRenamed(oldPath, newPath);
     }
 
     @Override
     public void onPathDeleted(Path path) {
-        if (path == null) {
-            return;
-        }
-        Path deleted = path.toAbsolutePath().normalize();
-        if (JavaProjectConventions.isJava(deleted)) {
-            fileWatch.forgetJavaFile(deleted);
-        }
-        if (JavaProjectConventions.isMavenPom(deleted)
-                || JavaProjectConventions.isGradleBuildFile(deleted)) {
-            onBuildFileChanged(deleted);
-        }
-        problems.removeBelow(deleted);
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            lsp.pathDeleted(deleted);
-        }
-        refreshProblemsPanel();
-    }
-
-    private boolean isModuleRoot(Path directory) {
-        JavaProjectDescriptor current = descriptor;
-        return current != null && current.modules().stream()
-                .anyMatch(module -> module.root().equals(directory));
+        pathRenames.onPathDeleted(path);
     }
 
     private String readCurrentText(Path file) {
@@ -2004,92 +1878,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     @Override
     public IdeWorkspaceEdit afterPathTransfer(PathTransferRequest request) {
         return pathTransfers.after(request);
-    }
-
-    private final class PathTransferHost implements JavaPathTransferRefactoring.Host {
-
-        private static final long DIALOG_TIMEOUT_MINUTES = 30;
-
-        @Override
-        public JavaProjectDescriptor descriptor() {
-            return descriptor;
-        }
-
-        @Override
-        public JavaLanguageServer readyServer() {
-            JavaLanguageServer lsp = jdtLs;
-            return lsp != null && lsp.isReady() ? lsp : null;
-        }
-
-        @Override
-        public JavaMoveDialogPanel.Choice askMove(JavaPathTransferPlan plan) {
-            CompletableFuture<JavaMoveDialogPanel.Choice> answer = new CompletableFuture<>();
-            Runnable open = () -> {
-                JavaMoveDialogPanel panel = new JavaMoveDialogPanel(plan, answer::complete);
-                showPopup(PlatformPopupBuilder.builder()
-                        .component(panel)
-                        .title(text("move.title", "Move"))
-                        .size(520, 240 + Math.min(6, plan.files().size() + plan.folders().size()) * 26)
-                        .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
-                        .onLoad(component -> panel.focusConfirm())
-                        .onClose(component -> panel.closed())
-                        .build());
-            };
-            if (SwingUtilities.isEventDispatchThread()) open.run();
-            else {
-                SwingUtilities.invokeLater(open);
-                return await(answer, JavaMoveDialogPanel.Choice.CANCEL);
-            }
-            return answer.getNow(JavaMoveDialogPanel.Choice.CANCEL);
-        }
-
-        @Override
-        public JavaCopyDialogPanel.Result askCopy(JavaPathTransferPlan plan, Map<Path, String> defaultNames) {
-            if (SwingUtilities.isEventDispatchThread()) {
-                return new JavaCopyDialogPanel.Result(false, Map.of());
-            }
-            CompletableFuture<JavaCopyDialogPanel.Result> answer = new CompletableFuture<>();
-            SwingUtilities.invokeLater(() -> {
-                JavaCopyDialogPanel panel = new JavaCopyDialogPanel(plan, defaultNames, answer::complete);
-                showPopup(PlatformPopupBuilder.builder()
-                        .component(panel)
-                        .title(text("copy.title", "Copy"))
-                        .size(520, 250 + Math.min(6, plan.files().size() + plan.folders().size()) * 22)
-                        .modalityType(java.awt.Dialog.ModalityType.APPLICATION_MODAL)
-                        .onLoad(component -> panel.focusInput())
-                        .onClose(component -> panel.closed())
-                        .build());
-            });
-            return await(answer, null);
-        }
-
-        @Override
-        public String readText(Path file) {
-            return readCurrentText(file);
-        }
-
-        @Override
-        public void warn(String message) {
-            if (message == null || message.isBlank()) {
-                return;
-            }
-            createNotification(NotificationContext.builder()
-                    .title(text("transfer.title", "Move/copy of Java files"))
-                    .message(message)
-                    .icon(JavaIcons.java(JavaIcons.SMALL))
-                    .build());
-        }
-
-        private <T> T await(CompletableFuture<T> answer, T fallback) {
-            try {
-                return answer.get(DIALOG_TIMEOUT_MINUTES, TimeUnit.MINUTES);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return fallback;
-            } catch (Exception e) {
-                return fallback;
-            }
-        }
     }
 
     @Override
