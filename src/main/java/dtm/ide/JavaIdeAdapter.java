@@ -44,6 +44,7 @@ import dtm.ide.adapter.CompletionEngine;
 import dtm.ide.adapter.DebugSupport;
 import dtm.ide.adapter.ConditionalBreakpointSupport;
 import dtm.ide.adapter.DiagnosticsEngine;
+import dtm.ide.adapter.EditorAssistSupport;
 import dtm.ide.adapter.EditorEventsSupport;
 import dtm.ide.adapter.FileWatchSupport;
 import dtm.ide.adapter.RenameSupport;
@@ -159,8 +160,6 @@ import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
 import dtm.ide.api.project.editor.IdeSelectionRangeContext;
 import dtm.ide.api.project.editor.SelectionRangeContext;
-import dtm.ide.editor.TextOffsets;
-import dtm.stools.component.panels.editor.code.api.Position;
 import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.api.TextEdit;
 import dtm.stools.component.panels.editor.code.CodeEditor;
@@ -209,7 +208,6 @@ import static dtm.ide.adapter.AdapterText.text;
 public class JavaIdeAdapter extends IdeAdapter {
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
-    private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
 
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
     final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -240,6 +238,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final PathRenameSupport pathRenames = new PathRenameSupport(adapterHost);
     private final EditorEventsSupport editorEvents = new EditorEventsSupport(adapterHost);
     private final MenuContributions menus = new MenuContributions(adapterHost);
+    private final EditorAssistSupport editorAssist = new EditorAssistSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     final JavaFastCompletionProvider fastCompletion =
@@ -875,74 +874,22 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<Range> getSelectionRanges(IdeSelectionRangeContext context) {
-        if (context == null) {
-            return null;
-        }
-        try {
-            List<Range> chain = selectionChain(context.filePath(), context.text(), context.offset())
-                    .get(SELECTION_RANGE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-            return chain.isEmpty() ? null : chain;
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            return null;
-        } catch (Exception failure) {
-            log.debug("Extend selection indisponivel: {}", failure.getMessage());
-            return null;
-        }
+        return editorAssist.getSelectionRanges(context);
     }
 
     @Override
     public CompletableFuture<List<int[]>> getSelectionRanges(SelectionRangeContext context) {
-        if (context == null) {
-            return CompletableFuture.completedFuture(List.of());
-        }
-        return selectionChain(context.filePath(), context.text(), context.offset())
-                .thenApply(chain -> TextOffsets.offsets(context.text(), chain));
-    }
-
-    private CompletableFuture<List<Range>> selectionChain(Path filePath, String text, int offset) {
-        JavaLanguageServer lsp = interactiveServerFor(filePath);
-        if (lsp == null || !JavaProjectConventions.isJava(filePath)) {
-            return CompletableFuture.completedFuture(List.of());
-        }
-        Position position = TextOffsets.position(text, offset);
-        return lsp.selectionRangesAsync(filePath, text, position.line(), position.col());
+        return editorAssist.getSelectionRanges(context);
     }
 
     @Override
     public CompletableFuture<HoverInfo> getHoverAsync(IdeHoverContext context) {
-        if (context == null || debugSupport.isDebugPaused() || SpringConfigSupport.isConfigFile(context.filePath())) {
-            return CompletableFuture.completedFuture(getHover(context));
-        }
-        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        HoverInfo diagnostic = lsp.diagnosticHover(context.filePath(), context.line(), context.col());
-        return diagnostic != null ? CompletableFuture.completedFuture(diagnostic)
-                : lsp.hoverAsync(context.filePath(), context.text(), context.line(), context.col());
+        return editorAssist.getHoverAsync(context);
     }
 
     @Override
     public HoverInfo getHover(IdeHoverContext context) {
-        if (context == null) {
-            return null;
-        }
-        if (debugSupport.isDebugPaused()) {
-            return null;
-        }
-        if (SpringConfigSupport.isConfigFile(context.filePath())) {
-            return SpringConfigSupport.hover(spring.metadata(), context.filePath(),
-                    context.text(), context.line());
-        }
-        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) {
-            return null;
-        }
-        HoverInfo diagnostic = lsp.diagnosticHover(
-                context.filePath(), context.line(), context.col());
-        return diagnostic != null ? diagnostic
-                : lsp.hover(context.filePath(), context.text(), context.line(), context.col());
+        return editorAssist.getHover(context);
     }
 
     static String diskBaselineFor(Path file, String editorText) {
@@ -1118,16 +1065,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public CompletableFuture<List<InlayHint>> getInlayHintsAsync(IdeInlayHintContext context) {
-        JavaLanguageServer lsp = runningServerFor(context == null ? null : context.filePath());
-        return lsp == null ? CompletableFuture.completedFuture(null)
-                : lsp.inlayHintsAsync(context.filePath(), context.text(), context.firstLine(), context.lastLine());
+        return editorAssist.getInlayHintsAsync(context);
     }
 
     @Override
     public List<InlayHint> getInlayHints(IdeInlayHintContext context) {
-        JavaLanguageServer lsp = runningServerFor(context == null ? null : context.filePath());
-        return lsp == null ? null : lsp.inlayHints(context.filePath(), context.text(),
-                context.firstLine(), context.lastLine());
+        return editorAssist.getInlayHints(context);
     }
 
     @Override
@@ -1137,47 +1080,17 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public CompletableFuture<List<SemanticToken>> getSemanticTokensAsync(IdeSemanticTokensContext context) {
-        JavaLanguageServer lsp = jdtLs;
-        if (context == null || lsp == null || !lsp.isReady()
-                || !JavaProjectConventions.isJava(context.filePath())
-                || !settings().getLanguageServerMode().startsServer()) {
-            return CompletableFuture.completedFuture(getSemanticTokens(context));
-        }
-        return lsp.semanticTokensAsync(context.filePath(), context.text());
+        return editorAssist.getSemanticTokensAsync(context);
     }
 
     @Override
     public List<SemanticToken> getSemanticTokens(IdeSemanticTokensContext context) {
-        Path filePath = context == null ? null : context.filePath();
-        if (!JavaProjectConventions.isJava(filePath)
-                || !settings().getLanguageServerMode().startsServer()) {
-            return null;
-        }
-        JavaLanguageServer lsp = jdtLs;
-        LanguageServerState state = lsp == null
-                ? LanguageServerState.NOT_STARTED : lsp.getState();
-        if (state == LanguageServerState.ERROR || state == LanguageServerState.STOPPED) {
-            return null;
-        }
-        if (lsp == null || !lsp.isReady()) {
-            return List.of();
-        }
-        return lsp.semanticTokens(filePath, context.text());
+        return editorAssist.getSemanticTokens(context);
     }
 
     @Override
     public String formatCode(FormatCodeContext context) {
-        Path file = context == null ? null : context.file();
-        JavaLanguageServer lsp = runningServerFor(file);
-        if (lsp == null) {
-            if (isIndexing(file)) {
-                setStatusBarText(text("status.formatDuringIndexing",
-                        "Java: formatacao disponivel apos a indexacao"));
-            }
-            return null;
-        }
-        return lsp.format(context.file(), context.fullText(),
-                context.tabSize(), context.useSpacesForTab());
+        return editorAssist.formatCode(context);
     }
 
     @Override
