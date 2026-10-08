@@ -50,6 +50,7 @@ import dtm.ide.adapter.FileWatchSupport;
 import dtm.ide.adapter.RenameSupport;
 import dtm.ide.adapter.RunLauncher;
 import dtm.ide.adapter.SafeDeleteSupport;
+import dtm.ide.adapter.SettingsChangeSupport;
 import dtm.ide.adapter.SourceActionSupport;
 import dtm.ide.adapter.UiThreads;
 import dtm.ide.adapter.CoverageSupport;
@@ -140,7 +141,6 @@ import dtm.ide.sdk.JdkInstallation;
 import dtm.ide.sdk.JdkService;
 import dtm.ide.sdk.SdkDownloader;
 import dtm.ide.settings.JavaPluginSettings;
-import dtm.ide.settings.JdtBuildMode;
 import dtm.ide.settings.JavaSettingsPage;
 import dtm.ide.test.JavaTestRunner;
 import dtm.ide.test.JUnitPlatformLauncher;
@@ -215,6 +215,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
     final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
     private final AdapterHost adapterHost = new JavaIdeAdapterHost(this);
+    private final SettingsChangeSupport settingsChanges = new SettingsChangeSupport(adapterHost);
     final SpringSupport spring = new SpringSupport(adapterHost);
     final CoverageSupport coverageSupport = new CoverageSupport(adapterHost);
     final CompletionEngine completionEngine = new CompletionEngine(adapterHost);
@@ -1757,7 +1758,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<PluginSettingsPage> getSettingsPages() {
-        return List.of(new JavaSettingsPage(ensureSettings(), this::applySettings,
+        return List.of(new JavaSettingsPage(ensureSettings(), settingsChanges::applySettings,
                 suppressions(), projectRoot));
     }
 
@@ -1774,32 +1775,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         JavaPluginSettings created = new JavaPluginSettings(directory);
         settings = created;
-        applySettings();
+        settingsChanges.applySettings();
         return created;
     }
 
-    private void applySettings() {
-        JavaPluginSettings current = settings;
-        if (current == null) {
-            return;
-        }
-        spring.baseUrl(current.getSpringBaseUrl());
-        applyDependencySearchSettings(current);
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            lsp.setInlayHintsMode(current.getInlayHints());
-        }
-        Path root = projectRoot;
-        if (root != null) {
-            requestRefreshCodeLenses(root);
-        }
-        SwingUtilities.invokeLater(coverageSupport::refreshGutters);
-        if (!applyBuildModeChange(current.getJdtBuildMode(), root)) {
-            applyLombokSettingChange(root);
-        }
-    }
-
-    private void applyDependencySearchSettings(JavaPluginSettings current) {
+    void applyDependencySearchSettings(JavaPluginSettings current) {
         mavenCentral.setRequestTimeout(
                 Duration.ofSeconds(current.getDependencySearchTimeoutSeconds()));
         DependencyManagerCoordinator coordinator = dependencyCoordinator;
@@ -1808,52 +1788,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private boolean applyBuildModeChange(JdtBuildMode mode, Path root) {
-        if (mode == languageServers.appliedBuildMode()) {
-            return false;
-        }
-        languageServers.appliedBuildMode(mode);
-        JavaLanguageServer lsp = jdtLs;
-        if (root == null || lsp == null) {
-            return false;
-        }
-        background.submit(() -> {
-            lsp.stop();
-            hideProgress(LanguageServerManager.LSP_PROGRESS_ID);
-            resolveProjectJdk(lifecycle.incrementAndGet(), root);
-        });
-        return true;
-    }
-
-    private void applyLombokSettingChange(Path root) {
-        JavaLanguageServer lsp = jdtLs;
-        if (root == null || lsp == null) {
-            return;
-        }
-        background.submit(() -> restartWhenLombokAgentChanged(lsp, descriptor));
-    }
-
     void restartLanguageServer() {
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            lsp.resetCrashHistory();
-        }
-        setStatusBarText(text("status.restartingLsp", "Java: reiniciando o IntelliSense..."));
-        clearCaches();
-    }
-
-    private void restartWhenLombokAgentChanged(JavaLanguageServer lsp, JavaProjectDescriptor current) {
-        if (current == null || lsp == null) {
-            return;
-        }
-        applyLombokAgent(lsp, current);
-        if (!LanguageServerManager.needsLombokAgentRestart(lsp)) {
-            return;
-        }
-        log.info("Agente do Lombok mudou; reiniciando o IntelliSense Java");
-        setStatusBarText(text("status.lombokRestart",
-                "Java: Lombok mudou - reiniciando o IntelliSense"));
-        clearCaches();
+        settingsChanges.restartLanguageServer();
     }
 
     JavaPluginSettings settings() {

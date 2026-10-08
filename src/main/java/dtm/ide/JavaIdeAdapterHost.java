@@ -1011,4 +1011,14 @@ final class JavaIdeAdapterHost implements AdapterHost {
     public void openTestExplorer() {
         adapter.openTestExplorer();
     }
+
+    @Override
+    public JavaPluginSettings currentSettings() {
+        return adapter.settings;
+    }
+
+    @Override
+    public void applyDependencySearchSettings(JavaPluginSettings current) {
+        adapter.applyDependencySearchSettings(current);
+    }
 }

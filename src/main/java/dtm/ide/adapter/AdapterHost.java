@@ -244,4 +244,6 @@ public interface AdapterHost extends AdapterContext {
     void openProjectStructure();
     void openJdkManager();
     void openTestExplorer();
+    JavaPluginSettings currentSettings();
+    void applyDependencySearchSettings(JavaPluginSettings current);
 }
