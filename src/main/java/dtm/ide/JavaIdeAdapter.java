@@ -69,6 +69,7 @@ import dtm.ide.adapter.SourceActionSupport;
 import dtm.ide.adapter.UiThreads;
 import dtm.ide.adapter.CoverageSupport;
 import dtm.ide.adapter.GhostTextSupport;
+import dtm.ide.adapter.NavigationSupport;
 import dtm.ide.adapter.NavigationViews;
 import dtm.ide.adapter.ProjectTreeMenuSupport;
 import dtm.ide.adapter.JdkManagerSupport;
@@ -399,8 +400,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
-    private static final int NAVIGATION_RETRIES = 2;
-    private static final long NAVIGATION_RETRY_DELAY_MS = 80;
     private static final long PROBLEMS_REFRESH_DELAY_MS = 200;
     private static final String BUILD_PROBLEMS_OWNER = "java.build";
     private static final String LSP_PROBLEMS_OWNER = "java.lsp";
@@ -1154,6 +1153,26 @@ public class JavaIdeAdapter extends IdeAdapter {
         public SourceActionSupport sourceActions() {
             return sourceActions;
         }
+    
+        @Override
+        public AtomicLong navigationRequestTicket() {
+            return navigationRequestTicket;
+        }
+
+        @Override
+        public PomProperties pomProperties() {
+            return pomProperties;
+        }
+
+        @Override
+        public boolean isIndexing(Path file) {
+            return JavaIdeAdapter.this.isIndexing(file);
+        }
+
+        @Override
+        public IdeEditorContext liveEditorFor(Path file) {
+            return JavaIdeAdapter.this.liveEditorFor(file);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -1175,6 +1194,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final RunLauncher runLauncher = new RunLauncher(adapterHost);
     private final ProjectTreeMenuSupport projectTreeMenu = new ProjectTreeMenuSupport(adapterHost);
     private final SwingDesignerHost swingDesignerHost = new SwingDesignerHost(adapterHost);
+    private final NavigationSupport navigationSupport = new NavigationSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -2860,171 +2880,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     @Override
-    public CompletableFuture<SignatureHelp> provideSignatureHelpAsync(IdeSignatureHelpContext context) {
-        if (debugActive.get()) {
-            return CompletableFuture.completedFuture(null);
-        }
-        JavaLanguageServer lsp = interactiveServerFor(context == null ? null : context.filePath());
-        return lsp == null ? CompletableFuture.completedFuture(null)
-                : lsp.signatureHelpAsync(context.filePath(), context.text(),
-                context.caretLine(), context.caretCol());
-    }
-
-    @Override
-    public SignatureHelp provideSignatureHelp(IdeSignatureHelpContext context) {
-        if (debugActive.get()) {
-            return null;
-        }
-        JavaLanguageServer lsp = interactiveServerFor(context == null ? null : context.filePath());
-        return lsp == null ? null : lsp.signatureHelp(context.filePath(), context.text(),
-                context.caretLine(), context.caretCol());
-    }
-
-    @Override
-    public Set<Character> getSignatureTriggerCharacters() {
-        return Set.of('(', ',');
-    }
-
-    @Override
-    public Set<Character> getSignatureRetriggerCharacters() {
-        return Set.of(',');
-    }
-
-    @Override
-    public GlobalSearchResult search(GlobalSearchQuery query, GlobalSearchResult defaultResult) {
-        JavaProjectDescriptor current = descriptor;
-        if (query == null || current == null || !current.spring()
-                || !settings().isSpringSupport()) {
-            return defaultResult;
-        }
-        List<GlobalSearchMatch> matches =
-                SpringSearchContributor.search(spring.index().snapshot(), query.term());
-        if (matches.isEmpty()) {
-            return defaultResult;
-        }
-        GlobalSearchResult spring = GlobalSearchResult.of(matches);
-        return defaultResult == null ? spring : spring.merge(defaultResult);
-    }
-
-    @Override
-    public List<Location> findDefinitions(IdeDefinitionContext context) {
-        if (context == null) {
-            return null;
-        }
-        if (JavaProjectConventions.isMavenPom(context.filePath())) {
-            return pomTarget(context.filePath(), context.text(), context.offset())
-                    .map(target -> List.of(target.location())).orElseGet(List::of);
-        }
-        List<Location> configTargets = configKeyUsages(context);
-        if (configTargets != null) {
-            return configTargets;
-        }
-        return resolveDefinitions(context.filePath(), context.text(),
-                context.line(), context.col());
-    }
-
-    @Override
-    public List<Location> findReferences(IdeDefinitionContext context) {
-        if (context == null) {
-            return null;
-        }
-        List<Location> configTargets = configKeyUsages(context);
-        if (configTargets != null) {
-            return configTargets;
-        }
-        return resolveReferences(context.filePath(), context.text(),
-                context.line(), context.col());
-    }
-
-    private List<Location> configKeyUsages(IdeDefinitionContext context) {
-        Path filePath = context.filePath();
-        if (!SpringConfigSupport.isConfigFile(filePath) || !isSpringConfigNavigationEnabled()) {
-            return null;
-        }
-        SpringConfigDocument.Format format =
-                SpringConfigDocument.Format.of(filePath.getFileName().toString());
-        String key = SpringConfigDocument.keyAt(context.text(), context.line(), format);
-        if (key == null || key.isBlank()) {
-            return List.of();
-        }
-        List<SpringNavigation.Anchor> anchors = new ArrayList<>();
-        for (SpringPropertyUsage usage : spring.index().snapshot().usagesOfProperty(key)) {
-            anchors.add(new SpringNavigation.Anchor(usage.file(), usage.line(), usage.key()));
-        }
-        return springLocations(new SpringNavigation.Target(
-                SpringNavigation.Kind.CONFIG_KEY, key, anchors));
-    }
-
-    private boolean isSpringConfigNavigationEnabled() {
-        JavaProjectDescriptor current = descriptor;
-        return current != null && current.spring() && settings().isSpringSupport()
-                && settings().isSpringConfigNavigation();
-    }
-
-    private List<Location> configKeyDefinitions(String key) {
-        if (key == null || key.isBlank() || !isSpringConfigNavigationEnabled()) {
-            return List.of();
-        }
-        List<SpringNavigation.Anchor> anchors = new ArrayList<>();
-        for (SpringConfigIndex.Entry entry : spring.configIndex().definitionsOf(key)) {
-            anchors.add(new SpringNavigation.Anchor(entry.file(), entry.line(), entry.key()));
-        }
-        return springLocations(new SpringNavigation.Target(
-                SpringNavigation.Kind.CONFIG_KEY, key, anchors));
-    }
-
-    @Override
-    public List<DocumentSymbol> getDocumentSymbols(IdeDocumentSymbolContext context) {
-        Path filePath = context == null ? null : context.filePath();
-        if (!JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        JavaLanguageServer lsp = interactiveServerFor(filePath);
-        List<DocumentSymbol> precise = lsp == null ? List.of()
-                : lsp.isReady()
-                        ? lsp.documentSymbols(filePath, context.text())
-                        : lsp.documentSymbolsInteractive(filePath, context.text());
-        if (precise != null && !precise.isEmpty()) {
-            return precise;
-        }
-        List<DocumentSymbol> outline = lexicalIndex.outline(context.text());
-        return outline.isEmpty() ? precise : outline;
-    }
-
-    @Override
-    public List<DocumentHighlight> getDocumentHighlights(IdeDocumentHighlightContext context) {
-        Path filePath = context == null ? null : context.filePath();
-        if (!JavaProjectConventions.isJava(filePath)) {
-            return null;
-        }
-        JavaLanguageServer lsp = interactiveServerFor(filePath);
-        List<DocumentHighlight> precise = lsp == null ? List.of()
-                : lsp.isReady()
-                        ? lsp.documentHighlights(filePath, context.text(),
-                                context.line(), context.col())
-                        : lsp.documentHighlightsInteractive(filePath, context.text(),
-                                context.line(), context.col());
-        if (precise != null && !precise.isEmpty()) {
-            return precise;
-        }
-        if (lsp != null && lsp.isReady()) {
-            return precise;
-        }
-        List<DocumentHighlight> approximate = bufferHighlights(context.text(),
-                context.line(), context.col());
-        return approximate.isEmpty() ? precise : approximate;
-    }
-
-    private static List<DocumentHighlight> bufferHighlights(String text, int line, int col) {
-        JavaLocalScope.Scope scope = JavaLocalScope.at(text, line, col);
-        if (scope == null) return List.of();
-        List<DocumentHighlight> result = new ArrayList<>();
-        result.add(new DocumentHighlight(scope.declaration(), DocumentHighlight.Kind.TEXT));
-        scope.usages().forEach(range -> result.add(new DocumentHighlight(range, DocumentHighlight.Kind.TEXT)));
-        return List.copyOf(result);
-    }
-
-    @Override
     public List<TextEdit> computeRenameEdits(IdeRenameContext context) {
         return renameSupport.computeRenameEdits(context);
     }
@@ -3128,193 +2983,152 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     @Override
+    public CompletableFuture<SignatureHelp> provideSignatureHelpAsync(IdeSignatureHelpContext context) {
+        return navigationSupport.provideSignatureHelpAsync(context);
+    }
+
+    @Override
+    public SignatureHelp provideSignatureHelp(IdeSignatureHelpContext context) {
+        return navigationSupport.provideSignatureHelp(context);
+    }
+
+    @Override
+    public Set<Character> getSignatureTriggerCharacters() {
+        return navigationSupport.getSignatureTriggerCharacters();
+    }
+
+    @Override
+    public Set<Character> getSignatureRetriggerCharacters() {
+        return navigationSupport.getSignatureRetriggerCharacters();
+    }
+
+    @Override
+    public GlobalSearchResult search(GlobalSearchQuery query, GlobalSearchResult defaultResult) {
+        return navigationSupport.search(query, defaultResult);
+    }
+
+    @Override
+    public List<Location> findDefinitions(IdeDefinitionContext context) {
+        return navigationSupport.findDefinitions(context);
+    }
+
+    @Override
+    public List<Location> findReferences(IdeDefinitionContext context) {
+        return navigationSupport.findReferences(context);
+    }
+
+    @Override
+    public List<DocumentSymbol> getDocumentSymbols(IdeDocumentSymbolContext context) {
+        return navigationSupport.getDocumentSymbols(context);
+    }
+
+    @Override
+    public List<DocumentHighlight> getDocumentHighlights(IdeDocumentHighlightContext context) {
+        return navigationSupport.getDocumentHighlights(context);
+    }
+
+    @Override
     public boolean isGoToDeclarationEnabled() {
-        return true;
+        return navigationSupport.isGoToDeclarationEnabled();
     }
 
     @Override
     public boolean isGoToImplementationEnabled() {
-        return true;
+        return navigationSupport.isGoToImplementationEnabled();
     }
 
     @Override
     public boolean isFindUsagesEnabled() {
-        return true;
+        return navigationSupport.isFindUsagesEnabled();
     }
 
     @Override
     public void onWordClick(IdeWordClickContext context) {
-        if (isCtrlPomClick(context)) {
-            navigatePom(context.filePath(), context.text(), context.startOffset());
-            return;
-        }
-        if (!isCtrlDefinitionClick(context)) return;
-        long ticket = beginNavigation();
-        long session = lifecycle.get();
-        long clickStart = System.nanoTime();
-        background.submit(() -> {
-            IdeEditorContext editor = context.editorContext();
-            Supplier<NavigationRequest> live = () -> NavigationRequest.of(editor);
-            NavigationRequest request = new NavigationRequest(context.text(), context.line(), context.col());
-            Result result = resolveCurrent(live, request, context.filePath(), Kind.DEFINITION, false).result();
-            Kind kind = Kind.DEFINITION;
-            if (isResolved(result) && isOwnDeclaration(result.locations(), context)) {
-                kind = Kind.REFERENCES;
-                result = JavaNavigation.restrict(resolveCurrent(live, request, context.filePath(), kind, false)
-                        .result(), Extent.DOCUMENT, context.filePath());
-            }
-            publishNavigationResult(ticket, session, context.editorContext(), context.filePath(),
-                    context.text(), kind, result);
-            if (log.isDebugEnabled()) {
-                log.debug("ctrl+click resolvido em {}ms ({} destinos)",
-                        elapsedMs(clickStart), result.locations().size());
-            }
-        });
+        navigationSupport.onWordClick(context);
     }
 
-    public record NavigationRequest(String text, int line, int col) {
-        static NavigationRequest of(IdeEditorContext editor) {
-            return editor == null ? null : onUi(() -> new NavigationRequest(
-                    editor.getText(), editor.getCaretLine(), editor.getCaretCol()));
-        }
+    @Override
+    public void onGoToDeclaration(IdeEditorContext context) {
+        navigationSupport.onGoToDeclaration(context);
     }
 
-    public record ResolvedNavigation(NavigationRequest request, Result result) { }
+    @Override
+    public void onGoToImplementation(IdeEditorContext context) {
+        navigationSupport.onGoToImplementation(context);
+    }
 
-    ResolvedNavigation resolveCurrent(Supplier<NavigationRequest> live, NavigationRequest request,
+    @Override
+    public void onFindUsages(IdeEditorContext context) {
+        navigationSupport.onFindUsages(context);
+    }
+
+    @Override
+    public boolean isCallHierarchyEnabled() {
+        return navigationSupport.isCallHierarchyEnabled();
+    }
+
+    @Override
+    public boolean isTypeHierarchyEnabled() {
+        return navigationSupport.isTypeHierarchyEnabled();
+    }
+
+    @Override
+    public List<TypeHierarchyItem> prepareTypeHierarchy(IdeCallHierarchyContext context) {
+        return navigationSupport.prepareTypeHierarchy(context);
+    }
+
+    @Override
+    public List<TypeHierarchyItem> getSupertypes(TypeHierarchyItem item) {
+        return navigationSupport.getSupertypes(item);
+    }
+
+    @Override
+    public List<TypeHierarchyItem> getSubtypes(TypeHierarchyItem item) {
+        return navigationSupport.getSubtypes(item);
+    }
+
+    @Override
+    public List<CallHierarchyItem> prepareCallHierarchy(IdeCallHierarchyContext context) {
+        return navigationSupport.prepareCallHierarchy(context);
+    }
+
+    @Override
+    public List<CallHierarchyCall> getIncomingCalls(CallHierarchyItem item) {
+        return navigationSupport.getIncomingCalls(item);
+    }
+
+    @Override
+    public List<CallHierarchyCall> getOutgoingCalls(CallHierarchyItem item) {
+        return navigationSupport.getOutgoingCalls(item);
+    }
+
+    NavigationSupport.ResolvedNavigation resolveCurrent(Supplier<NavigationSupport.NavigationRequest> live, NavigationSupport.NavigationRequest request,
                                       Path file, Kind kind, boolean followEdits) {
-        Result result = resolveNavigation(file, request.text(), request.line(), request.col(), kind);
-        for (int attempt = 0; attempt < NAVIGATION_RETRIES && shouldRetryNavigation(result); attempt++) {
-            NavigationRequest current = live == null ? null : live.get();
-            if (current == null || current.text() == null) break;
-            if (!current.text().equals(request.text())) {
-                if (!followEdits) break;
-                request = current;
-            }
-            try {
-                Thread.sleep(NAVIGATION_RETRY_DELAY_MS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-            result = resolveNavigation(file, request.text(), request.line(), request.col(), kind);
-        }
-        return new ResolvedNavigation(request, result);
+        return navigationSupport.resolveCurrent(live, request, file, kind, followEdits);
     }
 
-    static boolean shouldRetryNavigation(Result result) {
-        return result != null && (result.status() == Status.STALE
-                || result.status() == Status.FAILED && result.locations().isEmpty());
-    }
-
-    private long beginNavigation() {
-        setStatusBarText(text("status.navigation.loading", "Java: buscando destinos..."));
-        return navigationRequestTicket.incrementAndGet();
-    }
-
-    private void publishNavigationResult(long ticket, long session, IdeEditorContext editor,
-                                         Path file, String requestedText, Kind kind, Result result) {
-        if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
-        List<UsagesPopup.Item> items = needsUsagesPopup(kind, result.locations())
-                ? navigationViews.buildUsageItems(result.locations(), file, requestedText) : List.of();
-        SwingUtilities.invokeLater(() -> {
-            if (ticket != navigationRequestTicket.get() || session != lifecycle.get()) return;
-            if (editor == null || liveEditorFor(file) == null) {
-                setStatusBarText(text("status.navigation.unavailable",
-                        "Java: navegacao semantica indisponivel"));
-                return;
-            }
-            String current = editor.getText();
-            if (!Objects.equals(requestedText, current)) {
-                JavaLanguageServer lsp = jdtLs;
-                if (lsp != null && current != null) background.submit(() -> lsp.changeDocument(file, current));
-                setStatusBarText(text("status.navigation.stale",
-                        "Java: o codigo mudou; tente novamente"));
-                return;
-            }
-            showNavigationResult(editor, kind, result, items);
-        });
-    }
-
-    private static boolean needsUsagesPopup(Kind kind, List<Location> targets) {
-        return targets != null && !targets.isEmpty()
-                && (targets.size() > 1 || kind == Kind.REFERENCES);
-    }
-
-    private static List<Location> localDeclaration(Path filePath, JavaLocalScope.Scope scope) {
-        Path file = JavaProjectConventions.normalize(filePath);
-        return file == null ? List.of()
-                : List.of(Location.of(file.toUri().toString(), scope.declaration()));
-    }
-
-    static boolean isResolved(Result result) {
-        return result != null && (result.status() == Status.COMPLETE || result.status() == Status.LOCAL);
+    Result resolveNavigation(Path filePath, String source, int line, int col, Kind kind) {
+        return navigationSupport.resolveNavigation(filePath, source, line, col, kind);
     }
 
     static boolean isOwnDeclaration(List<Location> definitions, IdeWordClickContext context) {
-        return context != null && definitions != null && definitions.size() == 1
-                && JavaNavigation.contains(definitions.getFirst(), context.filePath(), context.line(), context.col());
+        return NavigationSupport.isOwnDeclaration(definitions, context);
     }
 
     static boolean isCtrlDefinitionClick(IdeWordClickContext context) {
-        return isCtrlClick(context) && JavaProjectConventions.isJava(context.filePath());
+        return NavigationSupport.isCtrlDefinitionClick(context);
     }
 
-    static boolean isCtrlPomClick(IdeWordClickContext context) {
-        return isCtrlClick(context) && JavaProjectConventions.isMavenPom(context.filePath());
+    static String identifierAt(String text, int line, int col) {
+        return NavigationSupport.identifierAt(text, line, col);
     }
 
-    private static boolean isCtrlClick(IdeWordClickContext context) {
-        return context != null
-                && context.filePath() != null
-                && context.editorContext() != null
-                && context.mouseButton() == MouseEvent.BUTTON1
-                && (context.modifiersEx() & InputEvent.CTRL_DOWN_MASK) != 0;
+    private void navigateFromEditor(IdeEditorContext context, String action) {
+        navigationSupport.navigateFromEditor(context, action);
     }
 
-    record PomTarget(Path file, int line, int col) {
-        Location location() {
-            Position position = new Position(line, col);
-            return new Location(file.toUri().toString(), new Range(position, position));
-        }
-    }
-
-    Optional<PomTarget> pomTarget(Path file, String text, int offset) {
-        if (file == null || text == null) {
-            return Optional.empty();
-        }
-        Optional<PomProperties.Placeholder> placeholder = PomProperties.placeholderAt(text, offset);
-        if (placeholder.isPresent()) {
-            return pomProperties.find(file, text, placeholder.get().name())
-                    .filter(PomProperties.Declaration::navigable)
-                    .map(declaration -> new PomTarget(declaration.file(), declaration.line(),
-                            declaration.col()));
-        }
-        return pomProperties.parentAt(file, text, offset)
-                .map(parent -> new PomTarget(parent.file(), parent.line(), parent.col()));
-    }
-
-    private void navigatePom(Path file, String text, int offset) {
-        long session = lifecycle.get();
-        background.submit(() -> {
-            Optional<PomTarget> target;
-            try {
-                target = pomTarget(file, text, offset);
-            } catch (Exception e) {
-                log.debug("Falha ao resolver destino no pom: {}", e.getMessage());
-                target = Optional.empty();
-            }
-            Optional<PomTarget> resolved = target;
-            SwingUtilities.invokeLater(() -> {
-                if (session != lifecycle.get()) return;
-                if (resolved.isEmpty()) {
-                    setStatusBarText(text("status.pomTargetMissing",
-                            "Maven: declaracao nao encontrada"));
-                    return;
-                }
-                openAt(resolved.get().file(), resolved.get().line(), resolved.get().col());
-            });
-        });
+    private boolean isNavigationAvailable(Path filePath) {
+        return navigationSupport.isNavigationAvailable(filePath);
     }
 
     private Path pomLocalRepository() {
@@ -3337,125 +3151,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         public List<DependencyVersionChoice> versions(String groupId, String artifactId) {
             return dependencyManagerHost().editorCatalog().versions(groupId, artifactId);
         }
-    }
-
-    @Override
-    public void onGoToDeclaration(IdeEditorContext context) {
-        navigateFromEditor(context, "definition");
-    }
-
-    @Override
-    public void onGoToImplementation(IdeEditorContext context) {
-        navigateFromEditor(context, "implementation");
-    }
-
-    @Override
-    public void onFindUsages(IdeEditorContext context) {
-        navigateFromEditor(context, "usages");
-    }
-
-    @Override
-    public boolean isCallHierarchyEnabled() {
-        JavaLanguageServer lsp = jdtLs;
-        return lsp != null && lsp.isInteractive() && lsp.supportsCallHierarchy();
-    }
-
-    @Override
-    public boolean isTypeHierarchyEnabled() {
-        JavaLanguageServer lsp = jdtLs;
-        return lsp != null && lsp.isInteractive() && lsp.supportsTypeHierarchy();
-    }
-
-    @Override
-    public List<TypeHierarchyItem> prepareTypeHierarchy(IdeCallHierarchyContext context) {
-        JavaLanguageServer lsp = context == null ? null : interactiveServerFor(context.filePath());
-        return lsp == null ? List.of()
-                : lsp.prepareTypeHierarchy(context.filePath(), context.text(), context.line(), context.col());
-    }
-
-    @Override
-    public List<TypeHierarchyItem> getSupertypes(TypeHierarchyItem item) {
-        JavaLanguageServer lsp = jdtLs;
-        return lsp == null || !lsp.isInteractive() ? List.of() : lsp.supertypes(item);
-    }
-
-    @Override
-    public List<TypeHierarchyItem> getSubtypes(TypeHierarchyItem item) {
-        JavaLanguageServer lsp = jdtLs;
-        return lsp == null || !lsp.isInteractive() ? List.of() : lsp.subtypes(item);
-    }
-
-    @Override
-    public List<CallHierarchyItem> prepareCallHierarchy(IdeCallHierarchyContext context) {
-        if (context == null) {
-            return List.of();
-        }
-        JavaLanguageServer lsp = interactiveServerFor(context.filePath());
-        if (lsp == null) {
-            return List.of();
-        }
-        return lsp.prepareCallHierarchy(context.filePath(), context.text(),
-                context.line(), context.col());
-    }
-
-    @Override
-    public List<CallHierarchyCall> getIncomingCalls(CallHierarchyItem item) {
-        JavaLanguageServer lsp = jdtLs;
-        return lsp == null || !lsp.isInteractive() ? List.of() : lsp.incomingCalls(item);
-    }
-
-    @Override
-    public List<CallHierarchyCall> getOutgoingCalls(CallHierarchyItem item) {
-        JavaLanguageServer lsp = jdtLs;
-        return lsp == null || !lsp.isInteractive() ? List.of() : lsp.outgoingCalls(item);
-    }
-
-    private void navigateFromEditor(IdeEditorContext context, String action) {
-        if (context != null && JavaProjectConventions.isMavenPom(context.filePath())) {
-            if ("definition".equals(action)) {
-                navigatePom(context.filePath(), context.getText(), context.getCaretOffset());
-            }
-            return;
-        }
-        if (context == null || !isNavigationAvailable(context.filePath())) return;
-        Path file = context.filePath();
-        NavigationRequest request = new NavigationRequest(context.getText(),
-                context.getCaretLine(), context.getCaretCol());
-        long ticket = beginNavigation(), session = lifecycle.get();
-        Kind kind = Kind.forAction(action);
-        background.submit(() -> {
-            ResolvedNavigation resolved = resolveCurrent(() -> NavigationRequest.of(context),
-                    request, file, kind, true);
-            publishNavigationResult(ticket, session, context, file, resolved.request().text(),
-                    kind, resolved.result());
-        });
-    }
-
-    private boolean isNavigationAvailable(Path filePath) {
-        return JavaProjectConventions.isJava(filePath);
-    }
-
-    private void showNavigationResult(IdeEditorContext context, Kind kind, Result result,
-                                      List<UsagesPopup.Item> items) {
-        String status = switch (result.status()) {
-            case COMPLETE -> text("status.navigation.empty", "Java: nenhum destino encontrado");
-            case LOCAL -> text("status.navigation.local", "Java: resultado local");
-            case INDEXING -> text("status.navigation.indexing", "Java: indexacao em andamento; tente novamente");
-            case UNAVAILABLE -> text("status.navigation.unavailable", "Java: navegacao semantica indisponivel");
-            case FAILED -> text("status.navigation.failed", "Java: a busca falhou; tente novamente");
-            case STALE -> text("status.navigation.stale", "Java: o codigo mudou; tente novamente");
-        };
-        List<Location> targets = result.locations();
-        setStatusBarText(targets.isEmpty() && result.status() == Status.LOCAL
-                ? text("status.navigation.empty", "Java: nenhum destino encontrado") : status);
-        if (targets.isEmpty()) return;
-        if (result.status() == Status.COMPLETE) setStatusBarText(text("status.navigation.done", "Java: busca concluida"));
-        if (targets.size() == 1 && kind != Kind.REFERENCES) {
-            Location target = targets.getFirst();
-            navigateToLocation(target, JavaNavigation.path(target));
-            return;
-        }
-        navigationViews.openUsagesPopup(context, null, codeLensSupport.countLabel(kind, items.size()), items);
     }
 
     @Override
@@ -3746,103 +3441,10 @@ public class JavaIdeAdapter extends IdeAdapter {
                 && JavaProjectConventions.isJava(filePath);
     }
 
-    private List<Location> resolveDefinitions(Path filePath, String text, int line, int col) {
-        return resolveNavigation(filePath, text, line, col, Kind.DEFINITION).locations();
-    }
-
-    Result resolveNavigation(Path filePath, String source, int line, int col, Kind kind) {
-        if (!JavaProjectConventions.isJava(filePath)) return Result.of(Status.UNAVAILABLE);
-        long springStart = System.nanoTime();
-        SpringNavigation.Target spring = springTargetAt(filePath, source, line, col);
-        long springMs = elapsedMs(springStart);
-        if (kind == Kind.DEFINITION && spring != null && spring.kind() == SpringNavigation.Kind.CONFIG_KEY) {
-            List<Location> keys = configKeyDefinitions(spring.token());
-            if (!keys.isEmpty()) return new Result(Status.LOCAL, keys);
-        }
-        JavaLanguageServer lsp = interactiveServerFor(filePath);
-        long lspStart = System.nanoTime();
-        Result semantic = lsp == null ? Result.of(isIndexing(filePath) ? Status.INDEXING : Status.UNAVAILABLE)
-                : lsp.navigation(kind, filePath, source, line, col);
-        long lspMs = elapsedMs(lspStart);
-        if (semantic.status() == Status.COMPLETE || semantic.status() == Status.STALE
-                || !semantic.locations().isEmpty()) {
-            logNavigationTiming(kind, filePath, semantic.status(), springMs, lspMs, 0);
-            return semantic;
-        }
-        if (kind != Kind.IMPLEMENTATION) {
-            long scopeStart = System.nanoTime();
-            JavaLocalScope.Scope scope = JavaLocalScope.at(source, line, col);
-            long scopeMs = elapsedMs(scopeStart);
-            logNavigationTiming(kind, filePath, semantic.status(), springMs, lspMs, scopeMs);
-            if (scope != null) return new Result(Status.LOCAL, kind == Kind.DEFINITION
-                    ? localDeclaration(filePath, scope)
-                    : scope.usages().stream().map(range -> Location.of(
-                            filePath.toAbsolutePath().normalize().toUri().toString(), range)).toList());
-            return semantic;
-        }
-        logNavigationTiming(kind, filePath, semantic.status(), springMs, lspMs, 0);
-        return semantic;
-    }
-
-    private static long elapsedMs(long startNanos) {
-        return (System.nanoTime() - startNanos) / 1_000_000L;
-    }
-
-    private static void logNavigationTiming(Kind kind, Path filePath, Status status,
-                                            long springMs, long lspMs, long scopeMs) {
-        if (!log.isDebugEnabled()) return;
-        log.debug("navegacao {} em {}: status={} spring={}ms lsp={}ms localScope={}ms",
-                kind, filePath == null ? "?" : filePath.getFileName(), status, springMs, lspMs, scopeMs);
-    }
-
-    private SpringNavigation.Target springTargetAt(Path filePath, String text, int line, int col) {
-        if (!isSpringNavigationEnabled()) {
-            return null;
-        }
-        return SpringNavigation.definitions(spring.index().snapshot(), filePath, text, line, col)
-                .orElse(null);
-    }
-
     private boolean isSpringNavigationEnabled() {
         JavaProjectDescriptor current = descriptor;
         return current != null && current.spring() && settings().isSpringSupport()
                 && settings().isSpringNavigation();
-    }
-
-    private List<Location> resolveReferences(Path filePath, String text, int line, int col) {
-        return resolveNavigation(filePath, text, line, col, Kind.REFERENCES).locations();
-    }
-
-    static String identifierAt(String text, int line, int col) {
-        if (text == null || text.isEmpty() || line < 0 || col < 0) {
-            return null;
-        }
-        int offset = 0;
-        for (int current = 0; current < line; current++) {
-            int next = text.indexOf('\n', offset);
-            if (next < 0) {
-                return null;
-            }
-            offset = next + 1;
-        }
-        int lineEnd = text.indexOf('\n', offset);
-        if (lineEnd < 0) {
-            lineEnd = text.length();
-        }
-        int caret = Math.min(offset + col, lineEnd);
-        int start = caret;
-        while (start > offset && Character.isJavaIdentifierPart(text.charAt(start - 1))) {
-            start--;
-        }
-        int end = caret;
-        while (end < lineEnd && Character.isJavaIdentifierPart(text.charAt(end))) {
-            end++;
-        }
-        if (start >= end) {
-            return null;
-        }
-        String word = text.substring(start, end);
-        return Character.isJavaIdentifierStart(word.charAt(0)) ? word : null;
     }
 
     @Override

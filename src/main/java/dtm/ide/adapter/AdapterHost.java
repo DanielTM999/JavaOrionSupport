@@ -19,6 +19,7 @@ import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.coverage.CoverageProvisioner;
 import dtm.ide.debug.BuildToolDebugListener;
 import dtm.ide.debug.JavaDebugSession;
+import dtm.ide.deps.PomProperties;
 import dtm.ide.editor.BuildFileCompletionProvider;
 import dtm.ide.editor.JavaFastCompletionProvider;
 import dtm.ide.index.JavaLexicalIndex;
@@ -201,4 +202,8 @@ public interface AdapterHost extends AdapterContext {
     JavaFileChangeRouter fileChangeRouter();
     void requestProjectTreeRevealCreated(Path file);
     SourceActionSupport sourceActions();
+    AtomicLong navigationRequestTicket();
+    PomProperties pomProperties();
+    boolean isIndexing(Path file);
+    IdeEditorContext liveEditorFor(Path file);
 }

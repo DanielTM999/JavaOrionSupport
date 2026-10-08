@@ -75,7 +75,7 @@ class JavaIdeAdapterNavigationTest {
         AtomicInteger calls = new AtomicInteger();
         JavaIdeAdapter adapter = adapterAnswering(calls, 1);
         String source = "class A { B b; }";
-        var request = new JavaIdeAdapter.NavigationRequest(source, 0, 10);
+        var request = new dtm.ide.adapter.NavigationSupport.NavigationRequest(source, 0, 10);
 
         var resolved = adapter.resolveCurrent(() -> request, request, Path.of("A.java"),
                 dtm.ide.navigation.JavaNavigation.Kind.DEFINITION, false);
@@ -88,8 +88,8 @@ class JavaIdeAdapterNavigationTest {
     void aClickIsNotRetriedAgainstTextTheUserHasSinceChanged() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         JavaIdeAdapter adapter = adapterAnswering(calls, 5);
-        var request = new JavaIdeAdapter.NavigationRequest("class A { B b; }", 0, 10);
-        var edited = new JavaIdeAdapter.NavigationRequest("class A { B bb; }", 0, 10);
+        var request = new dtm.ide.adapter.NavigationSupport.NavigationRequest("class A { B b; }", 0, 10);
+        var edited = new dtm.ide.adapter.NavigationSupport.NavigationRequest("class A { B bb; }", 0, 10);
 
         var resolved = adapter.resolveCurrent(() -> edited, request, Path.of("A.java"),
                 dtm.ide.navigation.JavaNavigation.Kind.DEFINITION, false);
@@ -102,8 +102,8 @@ class JavaIdeAdapterNavigationTest {
     void caretNavigationFollowsTheLatestEditorText() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         JavaIdeAdapter adapter = adapterAnswering(calls, 1);
-        var request = new JavaIdeAdapter.NavigationRequest("class A { B b; }", 0, 10);
-        var edited = new JavaIdeAdapter.NavigationRequest("class A { B bb; }", 0, 10);
+        var request = new dtm.ide.adapter.NavigationSupport.NavigationRequest("class A { B b; }", 0, 10);
+        var edited = new dtm.ide.adapter.NavigationSupport.NavigationRequest("class A { B bb; }", 0, 10);
 
         var resolved = adapter.resolveCurrent(() -> edited, request, Path.of("A.java"),
                 dtm.ide.navigation.JavaNavigation.Kind.DEFINITION, true);
