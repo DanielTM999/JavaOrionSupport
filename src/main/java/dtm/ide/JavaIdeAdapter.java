@@ -10,11 +10,8 @@ import dtm.ide.api.context.IdeProjectContext;
 import dtm.ide.api.extension.IdeAdapter;
 import dtm.ide.api.search.GlobalSearchQuery;
 import dtm.ide.api.search.GlobalSearchResult;
-import dtm.ide.api.extension.PlatformPopupBuilder;
 import dtm.ide.api.extension.menu.IdeMenuBarBuilder;
 import dtm.ide.api.extension.menu.IdeMenuBuilder;
-import dtm.ide.api.extension.output.OutputPanelHandle;
-import dtm.ide.api.extension.output.OutputPanelOptions;
 import dtm.ide.api.extension.runconfig.RunConfigurationContribution;
 import dtm.ide.api.extension.runconfig.RunConfigurationData;
 import dtm.ide.api.extension.runconfig.RunExecutionContext;
@@ -24,12 +21,10 @@ import dtm.ide.api.project.editor.FileAssociated;
 import dtm.stools.component.panels.editor.code.documenthighlight.DocumentHighlight;
 import dtm.ide.api.project.editor.FormatCodeContext;
 import dtm.ide.api.project.editor.IdeCodeActionContext;
-import dtm.ide.api.extension.NotificationContext;
 import dtm.ide.api.hierarchy.CallHierarchyCall;
 import dtm.ide.api.hierarchy.CallHierarchyItem;
 import dtm.ide.api.hierarchy.TypeHierarchyItem;
 import dtm.ide.api.project.editor.IdeCallHierarchyContext;
-import dtm.ide.api.extension.editor.EmbeddedCodeEditorSettings;
 import dtm.ide.api.project.editor.IdeCodeLensContext;
 import dtm.ide.api.project.editor.IdeCompletionContext;
 import dtm.ide.api.project.editor.IdeDefinitionContext;
@@ -39,9 +34,6 @@ import dtm.ide.api.project.editor.IdeDocumentHighlightContext;
 import dtm.ide.api.project.editor.IdeDocumentSymbolContext;
 import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
-import dtm.ide.api.extension.Resource;
-import dtm.ide.api.extension.runconfig.RunBreakpointData;
-import dtm.stools.component.popup.ModernComponentDialog;
 import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildSupport;
@@ -97,10 +89,8 @@ import dtm.ide.api.project.tree.PathTransferDecision;
 import dtm.ide.api.project.tree.PathTransferRequest;
 import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
 import dtm.ide.api.theme.EditorTheme;
-import dtm.ide.api.project.diagnostics.IdeProblem;
 import dtm.ide.api.project.diagnostics.ProblemsActionHandle;
 import dtm.ide.build.ClasspathValidation;
-import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildRunConfigurations;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.swingdesigner.SwingDesignerSupport;
@@ -108,7 +98,6 @@ import dtm.ide.build.GradleBuildService;
 import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.build.MavenBuildService;
 import dtm.ide.build.BuildSystems;
-import dtm.ide.coverage.CoverageProvisioner;
 import dtm.ide.concurrent.PluginTaskExecutor;
 import dtm.ide.deps.DependencyService;
 import dtm.ide.deps.MavenCentralClient;
@@ -130,7 +119,6 @@ import dtm.ide.navigation.JavaNavigation.Result;
 import dtm.ide.editor.theme.JavaEditorTheme;
 import dtm.ide.lsp.LombokSupport;
 import dtm.ide.lsp.LombokSupportStatus;
-import dtm.ide.debug.BuildToolDebugListener;
 import dtm.ide.debug.BreakpointChanges;
 import dtm.ide.debug.ConditionEditorSession;
 import dtm.ide.debug.JavaDebugSession;
@@ -141,8 +129,6 @@ import dtm.ide.project.JavaModule;
 import dtm.ide.run.JavaRunSupport;
 import dtm.ide.run.form.RunFormChoicesLoader;
 import dtm.ide.run.MainClassScanner;
-import dtm.ide.api.project.IdeProjectFileWatcher;
-import dtm.ide.project.JavaFileChangeRouter;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.project.JavaProjectSources;
@@ -161,7 +147,6 @@ import dtm.ide.ui.DependencyManagerPanel;
 import dtm.ide.ui.JavaTestExplorerPanel;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import dtm.ide.ui.JavaProjectStructurePanel;
-import dtm.ide.ui.JavaTodoPanel;
 import dtm.ide.ui.JavaIcons;
 import dtm.ide.ui.JavaProjectTreeIcons;
 import dtm.ide.ui.JavaDebugValuePopup;
@@ -169,7 +154,6 @@ import dtm.ide.ui.JdkManagerPanel;
 import dtm.ide.api.extension.screen.ToolIconType;
 import dtm.ide.api.extension.settings.PluginSettingsPage;
 import dtm.stools.component.panels.dock.DockRegion;
-import dtm.stools.component.popup.ModernInputDialog;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Location;
@@ -185,7 +169,6 @@ import dtm.stools.component.panels.editor.code.codelens.CodeLens;
 import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
 import dtm.stools.component.panels.editor.code.hover.HoverDocumentationProvider;
 import dtm.stools.component.panels.editor.code.hover.HoverInfo;
-import dtm.stools.component.popup.ModernDialog;
 import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
 import dtm.stools.component.panels.editor.code.prototype.folding.FoldRange;
@@ -196,7 +179,6 @@ import lombok.extern.slf4j.Slf4j;
 import javax.swing.*;
 import java.awt.Dimension;
 import java.awt.Point;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -218,7 +200,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
-import java.util.function.Consumer;
 
 import static dtm.ide.adapter.AdapterText.text;
 
@@ -231,967 +212,50 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
 
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
-    private final class HostBridge implements AdapterHost {
-        @Override
-        public boolean debugActive() {
-            return debugActive.get();
-        }
-
-        @Override
-        public JavaLanguageServer interactiveServerFor(Path file) {
-            return JavaIdeAdapter.this.interactiveServerFor(file);
-        }
-
-        @Override
-        public JavaProjectDescriptor descriptor() {
-            return descriptor;
-        }
-
-        @Override
-        public JavaSnippetCompletionProvider snippets() {
-            return snippets;
-        }
-
-        @Override
-        public Path projectRoot() {
-            return projectRoot;
-        }
-
-        @Override
-        public List<String> todoMarkers() {
-            return settings().getTodoMarkers();
-        }
-
-        @Override
-        public PluginTaskExecutor background() {
-            return background;
-        }
-
-        @Override
-        public String registerTodoPanel(JavaTodoPanel panel, Icon icon) {
-            return icon == null
-                    ? JavaIdeAdapter.this.registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"),
-                            ToolIconType.INFO, panel)
-                    : JavaIdeAdapter.this.registerToolPanel(DockRegion.BOTTOM, text("panel.todo", "TODO"), icon, panel);
-        }
-
-        @Override
-        public void requestOpenToolPanel(String panelId) {
-            JavaIdeAdapter.this.requestOpenToolPanel(panelId);
-        }
-
-        @Override
-        public void openAt(Path file, int line, int column) {
-            JavaIdeAdapter.this.openAt(file, line, column);
-        }
-
-        @Override
-        public JdkService jdkService() {
-            return ensureJdkService();
-        }
-
-        @Override
-        public JdkInstallation projectJdk() {
-            return projectJdk;
-        }
-
-        @Override
-        public void projectJdk(JdkInstallation jdk) {
-            projectJdk = jdk;
-        }
-
-        @Override
-        public void descriptor(JavaProjectDescriptor value) {
-            descriptor = value;
-        }
-
-        @Override
-        public long lifecycleTicket() {
-            return lifecycle.get();
-        }
-
-        @Override
-        public long nextLifecycleTicket() {
-            return lifecycle.incrementAndGet();
-        }
-
-        @Override
-        public boolean isCurrent(long ticket, Path root) {
-            return current(ticket, root);
-        }
-
-        @Override
-        public <T> T timed(String label, Supplier<T> operation) {
-            return JavaIdeAdapter.this.timed(label, operation);
-        }
-
-        @Override
-        public void rebuildLexicalIndex(JavaProjectDescriptor value) {
-            lexicalIndex.rebuild(value);
-        }
-
-        @Override
-        public void refreshRunButtonsForCurrentFile() {
-            runLauncher.refreshRunButtonsForCurrentFile();
-        }
-
-        @Override
-        public void reloadBuildToolsPanel() {
-            if (buildToolsPanel != null) {
-                buildToolsPanel.reload();
-            }
-        }
-
-        @Override
-        public void reloadStructurePanel() {
-            JavaProjectStructurePanel panel = structurePanel;
-            if (panel != null) {
-                panel.reload();
-            }
-        }
-
-        @Override
-        public void setStatusBarText(String value) {
-            JavaIdeAdapter.this.setStatusBarText(value);
-        }
-
-        @Override
-        public DownloadProgressListener progressListener() {
-            return JavaIdeAdapter.this.progressListener();
-        }
-
-        @Override
-        public void resolveProjectJdk(long ticket, Path root) {
-            JavaIdeAdapter.this.resolveProjectJdk(ticket, root);
-        }
-
-        @Override
-        public JavaPluginSettings settings() {
-            return JavaIdeAdapter.this.settings();
-        }
-
-        @Override
-        public JComponent dependencyLibrariesView() {
-            DependencyService dependencies = ensureDependencyService();
-            if (dependencies == null || !dependencies.isSupported()) {
-                return null;
-            }
-            DependencyManagerPanel panel = dependencyPanel;
-            if (panel == null) {
-                panel = new DependencyManagerPanel(dependencyManagerHost(),
-                        JavaIdeAdapter.this::createModernDialogBuilder);
-                dependencyPanel = panel;
-            }
-            return panel;
-        }
-
-        @Override
-        public void syncProject() {
-            JavaIdeAdapter.this.syncProject();
-        }
-
-        @Override
-        public void requestRefreshCodeLenses(Path file) {
-            JavaIdeAdapter.this.requestRefreshCodeLenses(file);
-        }
-
-        @Override
-        public void refreshDiagnosticsOfOpenJavaEditors() {
-            javaEditors.keySet().forEach(JavaIdeAdapter.this::requestRefreshDiagnostics);
-        }
-
-        @Override
-        public BuildSystem buildSystem() {
-            return ensureBuildSystem();
-        }
-
-        @Override
-        public java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module) {
-            return JavaIdeAdapter.this.runtimeClasspathOf(build, module);
-        }
-
-        @Override
-        public String registerBottomPanel(String title, Icon icon, JComponent panel) {
-            return JavaIdeAdapter.this.registerToolPanel(DockRegion.BOTTOM, title, icon, panel);
-        }
-
-        @Override
-        public void openWebBrowser(String url) {
-            JavaIdeAdapter.this.openWebBrowser(url);
-        }
-
-        @Override
-        public MavenPluginGoals pluginGoals() {
-            return pluginGoals;
-        }
-
-        @Override
-        public void clearPluginRepositoryPath() {
-            pluginRepositoryPath = null;
-        }
-
-        @Override
-        public BuildSystem currentBuildSystem() {
-            return buildSystem;
-        }
-
-        @Override
-        public List<RunConfigurationData> requestRunConfigurations() {
-            return JavaIdeAdapter.this.requestRunConfigurations();
-        }
-
-        @Override
-        public RunConfigurationData requestSaveRunConfiguration(RunConfigurationData configuration) {
-            return JavaIdeAdapter.this.requestSaveRunConfiguration(configuration);
-        }
-
-        @Override
-        public boolean requestRemoveRunConfiguration(String id) {
-            return JavaIdeAdapter.this.requestRemoveRunConfiguration(id);
-        }
-
-        @Override
-        public Set<Path> migratedBuildRunConfigurations() {
-            return migratedBuildRunConfigurations;
-        }
-
-        @Override
-        public void showPopup(PlatformPopupBuilder popup) {
-            JavaIdeAdapter.this.showPopup(popup);
-        }
-
-        @Override
-        public BuildToolDebugListener openBuildDebugListener(JavaModule module, Runnable cancelProcess)
-                throws IOException {
-            return runLauncher.openBuildDebugListener(module, cancelProcess);
-        }
-
-        @Override
-        public OutputPanelHandle requestOutputPanel(String title, OutputPanelOptions options) {
-            return JavaIdeAdapter.this.requestOutputPanel(title, options);
-        }
-
-        @Override
-        public void writeOutput(OutputPanelHandle panel, String line) {
-            buildSupport.writeOutput(panel, line);
-        }
-
-        @Override
-        public void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure) {
-            buildSupport.publishBuildDiagnostics(result, revealOnFailure);
-        }
-
-        @Override
-        public JavaBuildToolsPanel buildToolsPanel() {
-            return buildToolsPanel;
-        }
-
-        @Override
-        public JavaLanguageServer languageServer() {
-            return jdtLs;
-        }
-
-        @Override
-        public void requestShowRunOutput() {
-            JavaIdeAdapter.this.requestShowRunOutput();
-        }
-
-        @Override
-        public JavaTestRunner newTestRunner(JavaProjectDescriptor current, BuildSystem build) {
-            return JavaIdeAdapter.this.newTestRunner(current, build);
-        }
-
-        @Override
-        public void publishTestDiagnostics(BuildResult result) {
-            buildSupport.publishTestDiagnostics(result);
-        }
-
-        @Override
-        public void clearCoverage() {
-            coverageSupport.clear();
-        }
-
-        @Override
-        public CoverageProvisioner coverageProvisioner() {
-            return coverageSupport.provisioner();
-        }
-
-        @Override
-        public void readCoverage(Path execFile, JavaProjectDescriptor current) {
-            coverageSupport.readCoverage(execFile, current);
-        }
-
-        @Override
-        public AtomicReference<Runnable> pendingTestDebug() {
-            return pendingTestDebug;
-        }
-
-        @Override
-        public JavaTestRunner activeTestRunner() {
-            return activeTestRunner.get();
-        }
-
-        @Override
-        public JavaModule mostSpecificModule(Collection<JavaModule> modules, Path file) {
-            return JavaIdeAdapter.mostSpecificModule(modules, file);
-        }
-
-        @Override
-        public BuildToolDebugListener openBuildDebugListener(JavaModule module, Runnable cancelProcess,
-                                                             Runnable onAttach) throws IOException {
-            return runLauncher.openBuildDebugListener(module, cancelProcess, onAttach);
-        }
-
-        @Override
-        public void showProgress(String id, String message, boolean cancellable, Runnable onCancel) {
-            JavaIdeAdapter.this.showProgress(id, message, cancellable, onCancel);
-        }
-
-        @Override
-        public void hideProgress(String id) {
-            JavaIdeAdapter.this.hideProgress(id);
-        }
-
-        @Override
-        public void requestSetRunButtonLoading(boolean loading) {
-            JavaIdeAdapter.this.requestSetRunButtonLoading(loading);
-        }
-
-        @Override
-        public void requestSetRunButtonRunning(boolean running) {
-            JavaIdeAdapter.this.requestSetRunButtonRunning(running);
-        }
-
-        @Override
-        public void warmUpDebugAdapter() {
-            debugSupport.warmUpDebugAdapter();
-        }
-
-        @Override
-        public boolean hasRunningProcess() {
-            return runLauncher.hasRunningProcess();
-        }
-
-        @Override
-        public JdkService currentJdkService() {
-            return jdkService;
-        }
-
-        @Override
-        public JavaTestExplorerPanel testPanel() {
-            return testPanel;
-        }
-
-        @Override
-        public Map<Path, IdeEditorContext> javaEditors() {
-            return javaEditors;
-        }
-
-        @Override
-        public void requestOpenFile(Path file) {
-            JavaIdeAdapter.this.requestOpenFile(file);
-        }
-
-        @Override
-        public IdeEditorContext activeJavaEditor() {
-            return activeJavaEditor;
-        }
-
-        @Override
-        public void requestCodeEditorAutocomplete() {
-            JavaIdeAdapter.this.requestCodeEditorAutocomplete();
-        }
-
-        @Override
-        public SpringSupport spring() {
-            return spring;
-        }
-
-        @Override
-        public BuildFileCompletionProvider buildFileCompletion() {
-            return buildFileCompletion;
-        }
-
-        @Override
-        public JavaFastCompletionProvider fastCompletion() {
-            return fastCompletion;
-        }
-
-        @Override
-        public JavaLexicalIndex lexicalIndex() {
-            return lexicalIndex;
-        }
-
-        @Override
-        public boolean isSpringNavigationEnabled() {
-            return JavaIdeAdapter.this.isSpringNavigationEnabled();
-        }
-
-        @Override
-        public BuildProblemsCoordinator problems() {
-            return problems;
-        }
-
-        @Override
-        public Resource resource() {
-            return getResource();
-        }
-
-        @Override
-        public void requestRefreshDiagnostics(Path file) {
-            JavaIdeAdapter.this.requestRefreshDiagnostics(file);
-        }
-
-        @Override
-        public void requestShowCodeActions(Path file) {
-            JavaIdeAdapter.this.requestShowCodeActions(file);
-        }
-
-        @Override
-        public JavaLanguageServer runningServerFor(Path file) {
-            return JavaIdeAdapter.this.runningServerFor(file);
-        }
-
-        @Override
-        public void showProgress(String id, String message) {
-            JavaIdeAdapter.this.showProgress(id, message);
-        }
-
-        @Override
-        public void updateProgress(String id, String message, int percent, boolean cancellable, Runnable onCancel) {
-            JavaIdeAdapter.this.updateProgress(id, message, percent, cancellable, onCancel);
-        }
-
-        @Override
-        public <T> ModernComponentDialog.ModernComponentDialogBuilder<T> createModernComponentDialogBuilder() {
-            return JavaIdeAdapter.this.createModernComponentDialogBuilder();
-        }
-
-        @Override
-        public ModernDialog.ModernDialogBuilder createModernDialogBuilder() {
-            return JavaIdeAdapter.this.createModernDialogBuilder();
-        }
-
-        @Override
-        public void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
-                                    IdeEditorContext context, Point screen, Kind kind) {
-            JavaIdeAdapter.this.showUsagesPopup(locations, currentFile, currentText, context, screen, kind);
-        }
-
-        @Override
-        public IdeEditorContext editorContextFor(Path file) {
-            return JavaIdeAdapter.this.editorContextFor(file);
-        }
-
-        @Override
-        public IdeEditorContext getEditor(Path file) {
-            return JavaIdeAdapter.this.getEditor(file);
-        }
-
-        @Override
-        public CoverageSupport coverage() {
-            return coverageSupport;
-        }
-
-        @Override
-        public String testPanelId() {
-            return testPanelId;
-        }
-
-        @Override
-        public void navigateToLocation(Location location, Path path) {
-            JavaIdeAdapter.this.navigateToLocation(location, path);
-        }
-
-        @Override
-        public void openSpringExplorer() {
-            JavaIdeAdapter.this.openSpringExplorer();
-        }
-
-        @Override
-        public Optional<MainClassScanner.MainClass> currentMainClass() {
-            return runLauncher.currentMainClass();
-        }
-
-        @Override
-        public RunProcessHandle requestRunConfigurationExecution(String id, boolean debug) {
-            return JavaIdeAdapter.this.requestRunConfigurationExecution(id, debug);
-        }
-
-        @Override
-        public RunProcessHandle launch(RunConfigurationData configuration, RunExecutionContext context) {
-            return JavaIdeAdapter.this.launch(configuration, context);
-        }
-
-        @Override
-        public RunProcessHandle launchDebug(RunConfigurationData configuration, RunExecutionContext context) {
-            return JavaIdeAdapter.this.launchDebug(configuration, context);
-        }
-
-        @Override
-        public JavaModule moduleContaining(JavaProjectDescriptor current, Path file, boolean testRoots) {
-            return JavaIdeAdapter.moduleContaining(current, file, testRoots);
-        }
-
-        @Override
-        public void ensureTestPanel() {
-            JavaIdeAdapter.this.ensureTestPanel();
-        }
-
-        @Override
-        public List<Location> uniqueLocations(List<Location> locations) {
-            return JavaIdeAdapter.uniqueLocations(locations);
-        }
-
-        @Override
-        public CodeLensSupport codeLens() {
-            return codeLensSupport;
-        }
-
-        @Override
-        public ClassFileSupport classFileUris() {
-            return classFileUris;
-        }
-
-        @Override
-        public AtomicLong navigationTicket() {
-            return navigationTicket;
-        }
-
-        @Override
-        public JavaEditorRegistry editors() {
-            return editors;
-        }
-
-        @Override
-        public IdeEditorContext getEditor(Path file, boolean focus, Consumer<IdeEditorContext> onReady) {
-            return JavaIdeAdapter.this.getEditor(file, focus, onReady);
-        }
-
-        @Override
-        public boolean closeCenterTab(String id) {
-            return JavaIdeAdapter.this.closeCenterTab(id);
-        }
-
-        @Override
-        public CodeEditor requestEmbeddedCodeEditor(String name, String source,
-                                                    EmbeddedCodeEditorSettings settings) {
-            return JavaIdeAdapter.this.requestEmbeddedCodeEditor(name, source, settings);
-        }
-
-        @Override
-        public String openCenterTab(String id, String title, JComponent component, boolean closable) {
-            return JavaIdeAdapter.this.openCenterTab(id, title, component, closable);
-        }
-
-        @Override
-        public boolean isDebugPaused() {
-            return debugSupport.isDebugPaused();
-        }
-
-        @Override
-        public DiagnosticsEngine diagnostics() {
-            return diagnosticsEngine;
-        }
-
-        @Override
-        public IdeEditorContext getEditor(Path file, boolean focus) {
-            return JavaIdeAdapter.this.getEditor(file, focus);
-        }
-
-        @Override
-        public <T> ModernComponentDialog.ModernComponentDialogBuilder<T> createModernComponentDialogBuilder(
-                Class<T> type) {
-            return JavaIdeAdapter.this.createModernComponentDialogBuilder(type);
-        }
-
-        @Override
-        public JavaDebugSession debugSession() {
-            return debugSupport.session();
-        }
-
-        @Override
-        public Object monitor() {
-            return JavaIdeAdapter.this;
-        }
-
-        @Override
-        public AtomicBoolean debugActiveFlag() {
-            return debugActive;
-        }
-
-        @Override
-        public NavigationViews navigationViews() {
-            return navigationViews;
-        }
-
-        @Override
-        public void requestSetHotReloadButtonVisible(boolean visible) {
-            JavaIdeAdapter.this.requestSetHotReloadButtonVisible(visible);
-        }
-
-        @Override
-        public void requestSetHotReloadButtonEnabled(boolean enabled) {
-            JavaIdeAdapter.this.requestSetHotReloadButtonEnabled(enabled);
-        }
-
-        @Override
-        public JavaLanguageServer ensureLanguageServer() {
-            return JavaIdeAdapter.this.ensureLanguageServer();
-        }
-
-        @Override
-        public String registerToolPanel(DockRegion region, String title, ToolIconType icon, JComponent component,
-                                        Dimension size) {
-            return JavaIdeAdapter.this.registerToolPanel(region, title, icon, component, size);
-        }
-
-        @Override
-        public void closeDebugRelay() {
-            runLauncher.closeDebugRelay();
-        }
-
-        @Override
-        public boolean supportsHotReloadForSelection() {
-            return runLauncher.supportsHotReloadForSelection();
-        }
-
-        @Override
-        public void requestRepaintCodeEditor(Path file) {
-            JavaIdeAdapter.this.requestRepaintCodeEditor(file);
-        }
-
-        @Override
-        public void requestRepaintCodeEditorBreakpointLine(Path file) {
-            JavaIdeAdapter.this.requestRepaintCodeEditorBreakpointLine(file);
-        }
-
-        @Override
-        public DebugSupport debug() {
-            return debugSupport;
-        }
-
-        @Override
-        public AtomicBoolean buildRunning() {
-            return buildRunning;
-        }
-
-        @Override
-        public boolean isUnloaded() {
-            return unloaded;
-        }
-
-        @Override
-        public String buildProgressAction(BuildSystem.BuildAction action) {
-            return buildSupport.buildProgressAction(action);
-        }
-
-        @Override
-        public void updateProgress(String id, String message, int percent) {
-            JavaIdeAdapter.this.updateProgress(id, message, percent);
-        }
-
-        @Override
-        public List<RunBreakpointData> requestWorkspaceBreakpoints() {
-            return JavaIdeAdapter.this.requestWorkspaceBreakpoints();
-        }
-
-        @Override
-        public void requestSetRunButtonEnabled(boolean enabled) {
-            JavaIdeAdapter.this.requestSetRunButtonEnabled(enabled);
-        }
-
-        @Override
-        public void requestSetDebugButtonEnabled(boolean enabled) {
-            JavaIdeAdapter.this.requestSetDebugButtonEnabled(enabled);
-        }
-
-        @Override
-        public void requestSetCoverageButtonVisible(boolean visible) {
-            JavaIdeAdapter.this.requestSetCoverageButtonVisible(visible);
-        }
-
-        @Override
-        public void requestSetCoverageButtonEnabled(boolean enabled) {
-            JavaIdeAdapter.this.requestSetCoverageButtonEnabled(enabled);
-        }
-
-        @Override
-        public void runBuild(BuildSystem.BuildAction action, String title, JavaModule module) {
-            buildSupport.runBuild(action, title, module);
-        }
-
-        @Override
-        public void openDependencyManager() {
-            JavaIdeAdapter.this.openDependencyManager();
-        }
-
-        @Override
-        public void clearCaches() {
-            JavaIdeAdapter.this.clearCaches();
-        }
-
-        @Override
-        public void requestProjectTreeViewRefresh() {
-            JavaIdeAdapter.this.requestProjectTreeViewRefresh();
-        }
-
-        @Override
-        public ModernInputDialog.ModernInputDialogBuilder createModernInputDialogBuilder() {
-            return JavaIdeAdapter.this.createModernInputDialogBuilder();
-        }
-
-        @Override
-        public String readCurrentText(Path file) {
-            return JavaIdeAdapter.this.readCurrentText(file);
-        }
-
-        @Override
-        public void onBuildFileChanged(Path file) {
-            JavaIdeAdapter.this.onBuildFileChanged(file);
-        }
-
-        @Override
-        public JavaFileChangeRouter fileChangeRouter() {
-            return fileWatch.fileChangeRouter();
-        }
-
-        @Override
-        public void requestProjectTreeRevealCreated(Path file) {
-            JavaIdeAdapter.this.requestProjectTreeRevealCreated(file);
-        }
-
-        @Override
-        public SourceActionSupport sourceActions() {
-            return sourceActions;
-        }
-
-        @Override
-        public AtomicLong navigationRequestTicket() {
-            return navigationRequestTicket;
-        }
-
-        @Override
-        public PomProperties pomProperties() {
-            return pomProperties;
-        }
-
-        @Override
-        public boolean isIndexing(Path file) {
-            return JavaIdeAdapter.this.isIndexing(file);
-        }
-
-        @Override
-        public IdeEditorContext liveEditorFor(Path file) {
-            return JavaIdeAdapter.this.liveEditorFor(file);
-        }
-
-        @Override
-        public void classFileUris(ClassFileSupport support) {
-            classFileUris = support;
-        }
-
-        @Override
-        public void languageServer(JavaLanguageServer server) {
-            jdtLs = server;
-        }
-
-        @Override
-        public void observeSyncWork(boolean active) {
-            projectSync.observeSyncWork(active);
-        }
-
-        @Override
-        public DownloadObserver resolveDownloadObserver() {
-            return JavaIdeAdapter.this.resolveDownloadObserver();
-        }
-
-        @Override
-        public ConditionalBreakpointSupport conditionalBreakpoints() {
-            return conditionalBreakpoints;
-        }
-
-        @Override
-        public CompletionEngine completionEngine() {
-            return completionEngine;
-        }
-
-        @Override
-        public void finishDiagnosticReanalysis(long ticket, Path root, boolean successful) {
-            JavaIdeAdapter.this.finishDiagnosticReanalysis(ticket, root, successful);
-        }
-
-        @Override
-        public void refreshProblemsPanel() {
-            JavaIdeAdapter.this.refreshProblemsPanel();
-        }
-
-        @Override
-        public void createNotification(NotificationContext context) {
-            JavaIdeAdapter.this.createNotification(context);
-        }
-
-        @Override
-        public void requestRefreshInlayHints(Path file) {
-            JavaIdeAdapter.this.requestRefreshInlayHints(file);
-        }
-
-        @Override
-        public void requestRefreshSemanticTokens(Path file) {
-            JavaIdeAdapter.this.requestRefreshSemanticTokens(file);
-        }
-
-        @Override
-        public LanguageServerManager languageServerManager() {
-            return languageServers;
-        }
-
-        @Override
-        public void requestOpenProblemsPanel() {
-            JavaIdeAdapter.this.requestOpenProblemsPanel();
-        }
-
-        @Override
-        public void publishProblems(String owner, Collection<IdeProblem> problems) {
-            JavaIdeAdapter.this.publishProblems(owner, problems);
-        }
-
-        @Override
-        public ProblemsActionHandle registerProblemsAction(String owner, String label, String tooltip, Icon icon,
-                                                           Runnable action) {
-            return JavaIdeAdapter.this.registerProblemsAction(owner, label, tooltip, icon, action);
-        }
-
-        @Override
-        public IdeProjectFileWatcher projectFileWatcher() {
-            return getProjectFileWatcher();
-        }
-
-        @Override
-        public TodoPanelHost todoSupport() {
-            return todoSupport;
-        }
-
-        @Override
-        public Map<Path, String> diskBaseline() {
-            return diskBaseline;
-        }
-
-        @Override
-        public void requestJavaTreeIconRefresh(Path file) {
-            JavaIdeAdapter.this.requestJavaTreeIconRefresh(file);
-        }
-
-        @Override
-        public FileWatchSupport fileWatch() {
-            return fileWatch;
-        }
-
-        @Override
-        public AutoCompleteIdleTrigger autoCompleteIdle() {
-            return autoCompleteIdle;
-        }
-
-        @Override
-        public void activeJavaEditor(IdeEditorContext editor) {
-            activeJavaEditor = editor;
-        }
-
-        @Override
-        public Map<Path, String> lastEditorContents() {
-            return lastEditorContents;
-        }
-
-        @Override
-        public RunLauncher runLauncher() {
-            return runLauncher;
-        }
-
-        @Override
-        public SwingDesignerHost swingDesignerHost() {
-            return swingDesignerHost;
-        }
-
-        @Override
-        public NavigationSupport navigationSupport() {
-            return navigationSupport;
-        }
-
-        @Override
-        public ProblemsSupport problemsSupport() {
-            return problemsSupport;
-        }
-
-        @Override
-        public void openBuildTools() {
-            JavaIdeAdapter.this.openBuildTools();
-        }
-
-        @Override
-        public void restartLanguageServer() {
-            JavaIdeAdapter.this.restartLanguageServer();
-        }
-
-        @Override
-        public void openProjectStructure() {
-            JavaIdeAdapter.this.openProjectStructure();
-        }
-
-        @Override
-        public void openJdkManager() {
-            JavaIdeAdapter.this.openJdkManager();
-        }
-
-        @Override
-        public void openTestExplorer() {
-            JavaIdeAdapter.this.openTestExplorer();
-        }
-    }
-
-    private final JavaEditorRegistry editors = new JavaEditorRegistry();
+    final JavaEditorRegistry editors = new JavaEditorRegistry();
     private final MavenCentralClient mavenCentral = new MavenCentralClient();
-    private final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
-    private final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
-    private final AdapterHost adapterHost = new HostBridge();
-    private final SpringSupport spring = new SpringSupport(adapterHost);
-    private final CoverageSupport coverageSupport = new CoverageSupport(adapterHost);
-    private final CompletionEngine completionEngine = new CompletionEngine(adapterHost);
-    private final DiagnosticsEngine diagnosticsEngine = new DiagnosticsEngine(adapterHost);
+    final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
+    final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
+    private final AdapterHost adapterHost = new JavaIdeAdapterHost(this);
+    final SpringSupport spring = new SpringSupport(adapterHost);
+    final CoverageSupport coverageSupport = new CoverageSupport(adapterHost);
+    final CompletionEngine completionEngine = new CompletionEngine(adapterHost);
+    final DiagnosticsEngine diagnosticsEngine = new DiagnosticsEngine(adapterHost);
     private final RenameSupport renameSupport = new RenameSupport(adapterHost);
     private final SafeDeleteSupport safeDeleteSupport = new SafeDeleteSupport(adapterHost);
-    private final CodeLensSupport codeLensSupport = new CodeLensSupport(adapterHost);
-    private final NavigationViews navigationViews = new NavigationViews(adapterHost);
-    private final SourceActionSupport sourceActions = new SourceActionSupport(adapterHost);
-    private final ConditionalBreakpointSupport conditionalBreakpoints = new ConditionalBreakpointSupport(adapterHost);
-    private final DebugSupport debugSupport = new DebugSupport(adapterHost);
-    private final RunLauncher runLauncher = new RunLauncher(adapterHost);
+    final CodeLensSupport codeLensSupport = new CodeLensSupport(adapterHost);
+    final NavigationViews navigationViews = new NavigationViews(adapterHost);
+    final SourceActionSupport sourceActions = new SourceActionSupport(adapterHost);
+    final ConditionalBreakpointSupport conditionalBreakpoints = new ConditionalBreakpointSupport(adapterHost);
+    final DebugSupport debugSupport = new DebugSupport(adapterHost);
+    final RunLauncher runLauncher = new RunLauncher(adapterHost);
     private final ProjectTreeMenuSupport projectTreeMenu = new ProjectTreeMenuSupport(adapterHost);
-    private final SwingDesignerHost swingDesignerHost = new SwingDesignerHost(adapterHost);
-    private final NavigationSupport navigationSupport = new NavigationSupport(adapterHost);
-    private final LanguageServerManager languageServers = new LanguageServerManager(adapterHost);
-    private final ProblemsSupport problemsSupport = new ProblemsSupport(adapterHost);
-    private final BuildSupport buildSupport = new BuildSupport(adapterHost);
-    private final ProjectSyncSupport projectSync = new ProjectSyncSupport(adapterHost);
-    private final FileWatchSupport fileWatch = new FileWatchSupport(adapterHost);
+    final SwingDesignerHost swingDesignerHost = new SwingDesignerHost(adapterHost);
+    final NavigationSupport navigationSupport = new NavigationSupport(adapterHost);
+    final LanguageServerManager languageServers = new LanguageServerManager(adapterHost);
+    final ProblemsSupport problemsSupport = new ProblemsSupport(adapterHost);
+    final BuildSupport buildSupport = new BuildSupport(adapterHost);
+    final ProjectSyncSupport projectSync = new ProjectSyncSupport(adapterHost);
+    final FileWatchSupport fileWatch = new FileWatchSupport(adapterHost);
     private final PathRenameSupport pathRenames = new PathRenameSupport(adapterHost);
     private final EditorEventsSupport editorEvents = new EditorEventsSupport(adapterHost);
     private final MenuContributions menus = new MenuContributions(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
-    private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
-    private final JavaFastCompletionProvider fastCompletion =
+    final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
+    final JavaFastCompletionProvider fastCompletion =
             new JavaFastCompletionProvider(lexicalIndex);
-    private final PomProperties pomProperties = new PomProperties(this::pomLocalRepository);
-    private final BuildFileCompletionProvider buildFileCompletion =
+    final PomProperties pomProperties = new PomProperties(this::pomLocalRepository);
+    final BuildFileCompletionProvider buildFileCompletion =
             new BuildFileCompletionProvider(new EditorDependencyCatalog(), pomProperties);
     private final EditorTheme theme = new JavaEditorTheme(() -> requestEditorThemeConfig("java"));
-    private final AtomicLong lifecycle = new AtomicLong();
-    private final AtomicLong navigationTicket = new AtomicLong();
-    private final AtomicLong navigationRequestTicket = new AtomicLong();
-    private final AtomicBoolean buildRunning = new AtomicBoolean();
-    private final AtomicBoolean debugActive = new AtomicBoolean();
-    private final PluginTaskExecutor background =
+    final AtomicLong lifecycle = new AtomicLong();
+    final AtomicLong navigationTicket = new AtomicLong();
+    final AtomicLong navigationRequestTicket = new AtomicLong();
+    final AtomicBoolean buildRunning = new AtomicBoolean();
+    final AtomicBoolean debugActive = new AtomicBoolean();
+    final PluginTaskExecutor background =
             new PluginTaskExecutor("java-orion-support");
-    private final AutoCompleteIdleTrigger autoCompleteIdle = new AutoCompleteIdleTrigger(
+    final AutoCompleteIdleTrigger autoCompleteIdle = new AutoCompleteIdleTrigger(
             CompletionEngine.AUTO_COMPLETE_IDLE_DELAY_MS,
             (task, delay) -> background.schedule(task, delay, TimeUnit.MILLISECONDS),
             completionEngine::isIdleCompletionEligible,
@@ -1201,41 +265,41 @@ public class JavaIdeAdapter extends IdeAdapter {
     );
 
     private final Object lifecycleLock = new Object();
-    private volatile Path projectRoot;
-    private volatile JavaProjectDescriptor descriptor;
+    volatile Path projectRoot;
+    volatile JavaProjectDescriptor descriptor;
     private final JavaPathTransferRefactoring pathTransfers = new JavaPathTransferRefactoring(new PathTransferHost(adapterHost));
     private volatile IdeProjectContext projectContext;
-    private volatile JdkService jdkService;
-    private volatile JdkInstallation projectJdk;
+    volatile JdkService jdkService;
+    volatile JdkInstallation projectJdk;
     private volatile JdkManagerPanel jdkManagerPanel;
 
-    private volatile JavaLanguageServer jdtLs;
-    private volatile ClassFileSupport classFileUris;
-    private volatile boolean unloaded;
-    private volatile BuildSystem buildSystem;
+    volatile JavaLanguageServer jdtLs;
+    volatile ClassFileSupport classFileUris;
+    volatile boolean unloaded;
+    volatile BuildSystem buildSystem;
     private volatile DependencyService dependencyService;
     private volatile DependencyManagerCoordinator dependencyCoordinator;
-    private volatile DependencyManagerPanel dependencyPanel;
-    private final AtomicReference<JavaTestRunner> activeTestRunner = new AtomicReference<>();
-    private final AtomicReference<Runnable> pendingTestDebug = new AtomicReference<>();
-    private volatile JavaTestExplorerPanel testPanel;
-    private volatile String testPanelId;
-    private final MavenPluginGoals pluginGoals = new MavenPluginGoals(this::pluginRepository);
+    volatile DependencyManagerPanel dependencyPanel;
+    final AtomicReference<JavaTestRunner> activeTestRunner = new AtomicReference<>();
+    final AtomicReference<Runnable> pendingTestDebug = new AtomicReference<>();
+    volatile JavaTestExplorerPanel testPanel;
+    volatile String testPanelId;
+    final MavenPluginGoals pluginGoals = new MavenPluginGoals(this::pluginRepository);
     private volatile Path pluginRepositoryRoot;
-    private volatile Path pluginRepositoryPath;
-    private final TodoPanelHost todoSupport = new TodoPanelHost(adapterHost);
+    volatile Path pluginRepositoryPath;
+    final TodoPanelHost todoSupport = new TodoPanelHost(adapterHost);
     private final AtomicLong treeIconRefreshTicket = new AtomicLong();
     private final AtomicBoolean treeIconRefreshAll = new AtomicBoolean();
     private final Set<Path> treeIconRefreshPaths = ConcurrentHashMap.newKeySet();
-    private final Set<Path> migratedBuildRunConfigurations = ConcurrentHashMap.newKeySet();
-    private volatile JavaProjectStructurePanel structurePanel;
-    private volatile JavaBuildToolsPanel buildToolsPanel;
+    final Set<Path> migratedBuildRunConfigurations = ConcurrentHashMap.newKeySet();
+    volatile JavaProjectStructurePanel structurePanel;
+    volatile JavaBuildToolsPanel buildToolsPanel;
     private volatile String buildToolsPanelId;
-    private volatile JavaPluginSettings settings;
-    private volatile IdeEditorContext activeJavaEditor;
-    private final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
-    private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
-    private final Map<Path, String> lastEditorContents = new ConcurrentHashMap<>();
+    volatile JavaPluginSettings settings;
+    volatile IdeEditorContext activeJavaEditor;
+    final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
+    final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
+    final Map<Path, String> lastEditorContents = new ConcurrentHashMap<>();
     private volatile List<RunConfigurationData> staticRunConfigurations = List.of();
 
     @Override
@@ -1561,7 +625,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         requestJavaTreeIconRefresh(null);
     }
 
-    private void requestJavaTreeIconRefresh(Path file) {
+    void requestJavaTreeIconRefresh(Path file) {
         Path root = projectRoot;
         if (root == null) {
             return;
@@ -1590,7 +654,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }, 350, TimeUnit.MILLISECONDS);
     }
 
-    private <T> T timed(String label, Supplier<T> operation) {
+    <T> T timed(String label, Supplier<T> operation) {
         long started = System.nanoTime();
         try {
             return operation.get();
@@ -1611,7 +675,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private void resolveProjectJdk(long ticket, Path root) {
+    void resolveProjectJdk(long ticket, Path root) {
         JavaProjectDescriptor current = descriptor;
         if (current == null || !current(ticket, root)) {
             return;
@@ -1658,7 +722,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         languageServers.startLanguageServer(ticket, root, jdk);
     }
 
-    private JavaLanguageServer ensureLanguageServer() {
+    JavaLanguageServer ensureLanguageServer() {
         return languageServers.ensureLanguageServer();
     }
 
@@ -1682,7 +746,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         languageServers.requestJdtLsProjectConfigurationRefresh(lsp);
     }
 
-    private boolean current(long ticket, Path root) {
+    boolean current(long ticket, Path root) {
         return lifecycle.get() == ticket && root != null && root.equals(projectRoot);
     }
 
@@ -1900,7 +964,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         pathRenames.onPathDeleted(path);
     }
 
-    private String readCurrentText(Path file) {
+    String readCurrentText(Path file) {
         IdeEditorContext editor = editorContextFor(file);
         if (editor != null) {
             String text = onUi(editor::getText);
@@ -1962,7 +1026,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return CodeLensSupport.springLocations(target);
     }
 
-    private IdeEditorContext editorContextFor(Path file) {
+    IdeEditorContext editorContextFor(Path file) {
         Path normalized = JavaProjectConventions.normalize(file);
         return normalized == null ? null : javaEditors.get(normalized);
     }
@@ -1986,20 +1050,20 @@ public class JavaIdeAdapter extends IdeAdapter {
         return UiThreads.locationKey(location);
     }
 
-    private static List<Location> uniqueLocations(List<Location> locations) {
+    static List<Location> uniqueLocations(List<Location> locations) {
         return JavaNavigation.unique(locations);
     }
 
-    private void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
+    void showUsagesPopup(List<Location> locations, Path currentFile, String currentText,
                                  IdeEditorContext context, Point screen, Kind kind) {
         navigationViews.showUsagesPopup(locations, currentFile, currentText, context, screen, kind);
     }
 
-    private void navigateToLocation(Location location, Path path) {
+    void navigateToLocation(Location location, Path path) {
         navigationViews.navigateToLocation(location, path);
     }
 
-    private void openAt(Path path, int line, int col) {
+    void openAt(Path path, int line, int col) {
         navigationViews.openAt(path, line, col);
     }
 
@@ -2332,7 +1396,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         editorEvents.onAfterFileSave(filePath, content);
     }
 
-    private JavaLanguageServer interactiveServerFor(Path filePath) {
+    JavaLanguageServer interactiveServerFor(Path filePath) {
         JavaLanguageServer lsp = jdtLs;
         if (lsp == null || !lsp.isInteractive() || !JavaProjectConventions.isJava(filePath)) {
             return null;
@@ -2340,7 +1404,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return lsp;
     }
 
-    private JavaLanguageServer runningServerFor(Path filePath) {
+    JavaLanguageServer runningServerFor(Path filePath) {
         JavaLanguageServer lsp = jdtLs;
         if (lsp == null || !lsp.isReady() || !JavaProjectConventions.isJava(filePath)) {
             return null;
@@ -2348,13 +1412,13 @@ public class JavaIdeAdapter extends IdeAdapter {
         return lsp;
     }
 
-    private boolean isIndexing(Path filePath) {
+    boolean isIndexing(Path filePath) {
         JavaLanguageServer lsp = jdtLs;
         return lsp != null && lsp.getState() == LanguageServerState.INDEXING
                 && JavaProjectConventions.isJava(filePath);
     }
 
-    private boolean isSpringNavigationEnabled() {
+    boolean isSpringNavigationEnabled() {
         JavaProjectDescriptor current = descriptor;
         return current != null && current.spring() && settings().isSpringSupport()
                 && settings().isSpringNavigation();
@@ -2509,7 +1573,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return DebugSupport.safeDebugExpression(source, offset);
     }
 
-    private static JavaModule moduleContaining(JavaProjectDescriptor descriptor, Path file,
+    static JavaModule moduleContaining(JavaProjectDescriptor descriptor, Path file,
                                                boolean testRoots) {
         return descriptor.modules().stream()
                 .filter(candidate -> (testRoots
@@ -2570,7 +1634,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         conditionalBreakpoints.configureConditionalBreakpointDialog(dialogView);
     }
 
-    private JavaTestRunner newTestRunner(JavaProjectDescriptor current, BuildSystem build) {
+    JavaTestRunner newTestRunner(JavaProjectDescriptor current, BuildSystem build) {
         JdkService jdks = jdkService;
         JavaTestRunner runner = new JavaTestRunner(current, build, this::getProjectJdk,
                 settings().isIncrementalBuild()
@@ -2591,7 +1655,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private void ensureTestPanel() {
+    void ensureTestPanel() {
         if (testPanel == null) {
             JavaTestExplorerPanel panel = new JavaTestExplorerPanel(new TestExplorerSupport(adapterHost), background);
             testPanel = panel;
@@ -2616,7 +1680,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         problemsSupport.openProblemsPanel();
     }
 
-    private void refreshProblemsPanel() {
+    void refreshProblemsPanel() {
         problemsSupport.refreshProblemsPanel();
     }
 
@@ -2628,7 +1692,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         problemsSupport.reanalyzeDiagnostics();
     }
 
-    private void finishDiagnosticReanalysis(long ticket, Path root, boolean successful) {
+    void finishDiagnosticReanalysis(long ticket, Path root, boolean successful) {
         problemsSupport.finishDiagnosticReanalysis(ticket, root, successful);
     }
 
@@ -2647,14 +1711,14 @@ public class JavaIdeAdapter extends IdeAdapter {
                         icon, panel, new Dimension(420, 600));
     }
 
-    private void openBuildTools() {
+    void openBuildTools() {
         ensureBuildToolsPanel();
         if (buildToolsPanelId != null) {
             requestOpenToolPanel(buildToolsPanelId);
         }
     }
 
-    private java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module) {
+    java.util.Optional<String> runtimeClasspathOf(BuildSystem build, JavaModule module) {
         JavaLanguageServer lsp = jdtLs;
         ProjectModelSupport model = lsp == null ? null : lsp.extension(ProjectModelSupport.class);
         if (model != null && lsp.isReady()) {
@@ -2703,7 +1767,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         switchToCenterTab(CenterTabIds.DEPENDENCIES_TAB_ID);
     }
 
-    private synchronized DependencyManagerCoordinator dependencyManagerHost() {
+    synchronized DependencyManagerCoordinator dependencyManagerHost() {
         DependencyManagerCoordinator current = dependencyCoordinator;
         if (current == null) {
             current = new DependencyManagerCoordinator(background, mavenCentral, new OsvClient(),
@@ -2745,7 +1809,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return ProjectSyncSupport.jdkRequirementChanged(previous, reloaded);
     }
 
-    private void onBuildFileChanged(Path filePath) {
+    void onBuildFileChanged(Path filePath) {
         projectSync.onBuildFileChanged(filePath);
     }
 
@@ -2856,7 +1920,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         background.submit(() -> restartWhenLombokAgentChanged(lsp, descriptor));
     }
 
-    private void restartLanguageServer() {
+    void restartLanguageServer() {
         JavaLanguageServer lsp = jdtLs;
         if (lsp != null) {
             lsp.resetCrashHistory();
@@ -2879,11 +1943,11 @@ public class JavaIdeAdapter extends IdeAdapter {
         clearCaches();
     }
 
-    private JavaPluginSettings settings() {
+    JavaPluginSettings settings() {
         return ensureSettings();
     }
 
-    private synchronized BuildSystem ensureBuildSystem() {
+    synchronized BuildSystem ensureBuildSystem() {
         JavaProjectDescriptor current = descriptor;
         if (current == null) {
             return null;
@@ -2909,7 +1973,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return created;
     }
 
-    private synchronized DependencyService ensureDependencyService() {
+    synchronized DependencyService ensureDependencyService() {
         JavaProjectDescriptor current = descriptor;
         if (current == null) {
             return null;
@@ -2923,7 +1987,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return created;
     }
 
-    private synchronized JdkService ensureJdkService() {
+    synchronized JdkService ensureJdkService() {
         JdkService existing = jdkService;
         if (existing != null) {
             return existing;
@@ -2933,7 +1997,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         return created;
     }
 
-    private DownloadObserver resolveDownloadObserver() {
+    DownloadObserver resolveDownloadObserver() {
         try {
             return getService(DownloadObserver.class);
         } catch (Exception e) {
@@ -2942,7 +2006,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private DownloadProgressListener progressListener() {
+    DownloadProgressListener progressListener() {
         return new DownloadProgressListener() {
             @Override
             public void onStart(String id, String label) {
