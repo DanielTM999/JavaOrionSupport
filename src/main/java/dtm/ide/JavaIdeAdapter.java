@@ -51,6 +51,7 @@ import dtm.ide.adapter.CompletionEngine;
 import dtm.ide.adapter.DebugSupport;
 import dtm.ide.adapter.ConditionalBreakpointSupport;
 import dtm.ide.adapter.DiagnosticsEngine;
+import dtm.ide.adapter.FileWatchSupport;
 import dtm.ide.adapter.RenameSupport;
 import dtm.ide.adapter.RunLauncher;
 import dtm.ide.adapter.SafeDeleteSupport;
@@ -171,7 +172,6 @@ import dtm.ide.ui.JavaTodoPanel;
 import dtm.ide.ui.JavaIcons;
 import dtm.ide.ui.JavaProjectTreeIcons;
 import dtm.ide.ui.JavaDebugValuePopup;
-import dtm.ide.ui.SpringExplorerPanel;
 import dtm.ide.ui.JdkManagerPanel;
 import dtm.ide.api.extension.screen.ToolIconType;
 import dtm.ide.api.extension.settings.PluginSettingsPage;
@@ -246,8 +246,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
-    private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
-    private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
@@ -974,7 +972,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public JavaFileChangeRouter fileChangeRouter() {
-            return fileChangeRouter;
+            return fileWatch.fileChangeRouter();
         }
 
         @Override
@@ -1082,6 +1080,26 @@ public class JavaIdeAdapter extends IdeAdapter {
                                                            Runnable action) {
             return JavaIdeAdapter.this.registerProblemsAction(owner, label, tooltip, icon, action);
         }
+    
+        @Override
+        public IdeProjectFileWatcher projectFileWatcher() {
+            return getProjectFileWatcher();
+        }
+
+        @Override
+        public TodoPanelHost todoSupport() {
+            return todoSupport;
+        }
+
+        @Override
+        public Map<Path, String> diskBaseline() {
+            return diskBaseline;
+        }
+
+        @Override
+        public void requestJavaTreeIconRefresh(Path file) {
+            JavaIdeAdapter.this.requestJavaTreeIconRefresh(file);
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -1108,6 +1126,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final ProblemsSupport problemsSupport = new ProblemsSupport(adapterHost);
     private final BuildSupport buildSupport = new BuildSupport(adapterHost);
     private final ProjectSyncSupport projectSync = new ProjectSyncSupport(adapterHost);
+    private final FileWatchSupport fileWatch = new FileWatchSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1134,8 +1153,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     
     private final Object lifecycleLock = new Object();
-    private final Object fileWatcherLock = new Object();
-    private volatile Path fileWatcherRoot;
     private volatile Path projectRoot;
     private volatile JavaProjectDescriptor descriptor;
     private final JavaPathTransferRefactoring pathTransfers = new JavaPathTransferRefactoring(new PathTransferHost());
@@ -1170,15 +1187,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JavaProjectStructurePanel structurePanel;
     private volatile JavaBuildToolsPanel buildToolsPanel;
     private volatile String buildToolsPanelId;
-    private volatile JavaFileChangeRouter fileChangeRouter;
-    private volatile IdeProjectFileWatcher projectFileWatcher;
-    private volatile String fileWatcherListenerId;
     private volatile JavaPluginSettings settings;
     private volatile IdeEditorContext activeJavaEditor;
     private final Map<Path, IdeEditorContext> javaEditors = new ConcurrentHashMap<>();
     private final Map<Path, String> diskBaseline = new ConcurrentHashMap<>();
     private final Map<Path, String> lastEditorContents = new ConcurrentHashMap<>();
-    private final AtomicLong lastConfigurationUpdateRequest = new AtomicLong();
     private volatile List<RunConfigurationData> staticRunConfigurations = List.of();
 
     @Override
@@ -1256,7 +1269,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         activeJavaEditor = null;
         runLauncher.clearSelectedRunConfig();
         runLauncher.clearMainClassMemo();
-        unregisterFileWatcher();
+        fileWatch.unregisterFileWatcher();
         DependencyManagerCoordinator coordinator = dependencyCoordinator;
         if (coordinator != null) {
             coordinator.resetLocalRepository();
@@ -1327,7 +1340,7 @@ public class JavaIdeAdapter extends IdeAdapter {
                 log.warn("Falha ao encerrar o JDT LS no unload", error);
             }
         }
-        unregisterFileWatcher();
+        fileWatch.unregisterFileWatcher();
         DependencyManagerCoordinator coordinator = dependencyCoordinator;
         dependencyCoordinator = null;
         if (coordinator != null) {
@@ -1449,7 +1462,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             logSlowBind(started, callerThread);
             return;
         }
-        registerFileWatcher();
+        fileWatch.registerFileWatcher();
         requestJavaTreeIconRefresh(null);
 
         if (settings().getLanguageServerMode().startsServer()) {
@@ -1824,223 +1837,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                 : lsp.hover(context.filePath(), context.text(), context.line(), context.col());
     }
 
-    private void registerFileWatcher() {
-        synchronized (fileWatcherLock) {
-            if (fileWatcherListenerId != null && Objects.equals(fileWatcherRoot, projectRoot)) {
-                return;
-            }
-            unregisterFileWatcher();
-            registerFileWatcherLocked();
-        }
-    }
-
-    private void registerFileWatcherLocked() {
-        IdeProjectFileWatcher watcher;
-        try {
-            watcher = getProjectFileWatcher();
-        } catch (Exception e) {
-            log.debug("Observador de arquivos indisponivel: {}", e.getMessage());
-            return;
-        }
-        if (watcher == null) {
-            log.debug("Observador de arquivos indisponivel para este projeto");
-            return;
-        }
-        JavaFileChangeRouter router = new JavaFileChangeRouter(this::onWatchedFileChanged,
-                path -> javaEditors.containsKey(JavaProjectConventions.normalize(path)), projectRoot);
-        projectFileWatcher = watcher;
-        fileChangeRouter = router;
-        fileWatcherRoot = projectRoot;
-        fileWatcherListenerId = watcher.addFileWatcherListener(router::accept);
-        log.info("Observador de arquivos do Java registrado: {}", fileWatcherListenerId);
-    }
-
-    private void unregisterFileWatcher() {
-        String listenerId;
-        IdeProjectFileWatcher watcher;
-        synchronized (fileWatcherLock) {
-            listenerId = fileWatcherListenerId;
-            watcher = projectFileWatcher;
-            fileWatcherListenerId = null;
-            projectFileWatcher = null;
-            fileWatcherRoot = null;
-        }
-        if (listenerId != null && watcher != null) {
-            try {
-                watcher.removeFileWatcherListener(listenerId);
-            } catch (Exception e) {
-                log.debug("Falha ao remover o observador de arquivos: {}", e.getMessage());
-            }
-        }
-        JavaFileChangeRouter router = fileChangeRouter;
-        fileChangeRouter = null;
-        if (router != null) {
-            router.shutdown();
-        }
-    }
-
-    private void onWatchedFileChanged(Path file, JavaFileChangeRouter.FileRole role,
-                                      JavaFileChangeRouter.Change change, boolean editorManaged) {
-        switch (role) {
-            case JAVA -> onWatchedJavaFile(file, change, editorManaged);
-            case SPRING_CONFIG -> onWatchedSpringConfigFile(file, change);
-            case BUILD -> onWatchedBuildFile(file, change);
-        }
-    }
-
-    private void onWatchedJavaFile(Path file, JavaFileChangeRouter.Change change,
-                                   boolean editorManaged) {
-        JavaProjectTreeIcons.invalidate(file);
-        requestJavaTreeIconRefresh(file);
-        if (change == JavaFileChangeRouter.Change.DELETED) {
-            forgetJavaFile(file);
-            JavaLanguageServer lsp = jdtLs;
-            if (lsp != null) {
-                lsp.pathDeleted(file);
-            }
-            return;
-        }
-        String content = JavaProjectConventions.readOrEmpty(file);
-        if (editorManaged) {
-            onExternalChangeToOpenFile(file, content);
-            return;
-        }
-        lexicalIndex.refreshFile(file, content);
-        refreshSpringIndexFor(file, content);
-
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            if (change == JavaFileChangeRouter.Change.CREATED) {
-                lsp.pathCreated(file);
-                if (!insideKnownSourceRoot(file)) {
-                    requestProjectConfigurationUpdate();
-                }
-            } else {
-                lsp.pathChanged(file);
-            }
-        }
-        requestRefreshCodeLenses(file);
-    }
-
-    private void onExternalChangeToOpenFile(Path file, String rawDiskContent) {
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp == null || rawDiskContent == null) {
-            return;
-        }
-        String diskContent = normalizeDiskText(rawDiskContent);
-        String mirrored = lsp.documentContent(file);
-        if (mirrored == null) {
-            lexicalIndex.refreshFile(file, diskContent);
-            lsp.pathChanged(file);
-            return;
-        }
-        if (diskContent.equals(mirrored)) {
-            return;
-        }
-        lexicalIndex.refreshFile(file, diskContent);
-        Path normalized = JavaProjectConventions.normalize(file);
-        IdeEditorContext editor = javaEditors.get(normalized);
-        String baseline = diskBaseline.get(normalized);
-        if (editor == null || baseline == null || !baseline.equals(mirrored)) {
-            lsp.requestExternalResync();
-            return;
-        }
-        diskBaseline.put(normalized, diskContent);
-        SwingUtilities.invokeLater(() -> editor.setText(diskContent));
-    }
-
-    static String normalizeDiskText(String raw) {
-        return raw == null ? null : raw.replace("\r\n", "\n").replace('\r', '\n');
-    }
-
     static String diskBaselineFor(Path file, String editorText) {
-        if (file == null || !Files.isRegularFile(file)) {
-            return editorText;
-        }
-        return normalizeDiskText(JavaProjectConventions.readOrEmpty(file));
-    }
-
-    private boolean insideKnownSourceRoot(Path file) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null) {
-            return true;
-        }
-        Path normalized = JavaProjectConventions.normalize(file);
-        return current.moduleOf(normalized)
-                .map(module -> Stream.concat(module.sourceRoots().stream(),
-                                module.testRoots().stream())
-                        .anyMatch(normalized::startsWith))
-                .orElse(false);
-    }
-
-    private void requestProjectConfigurationUpdate() {
-        long now = System.currentTimeMillis();
-        long previous = lastConfigurationUpdateRequest.get();
-        if (now - previous < PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS
-                || !lastConfigurationUpdateRequest.compareAndSet(previous, now)) {
-            return;
-        }
-        background.schedule(() -> {
-            JavaLanguageServer lsp = jdtLs;
-            ProjectModelSupport model = lsp == null ? null : lsp.extension(ProjectModelSupport.class);
-            if (model != null) {
-                model.projectConfigurationUpdate();
-            }
-        }, PROJECT_CONFIGURATION_REQUEST_DELAY_MS, TimeUnit.MILLISECONDS);
-    }
-
-    private void onWatchedSpringConfigFile(Path file, JavaFileChangeRouter.Change change) {
-        JavaProjectDescriptor current = descriptor;
-        Path root = projectRoot;
-        if (current == null || root == null || !current.spring()) {
-            return;
-        }
-        spring.loadConfigIndex(lifecycle.get(), root);
-    }
-
-    private void onWatchedBuildFile(Path file, JavaFileChangeRouter.Change change) {
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp != null) {
-            if (change == JavaFileChangeRouter.Change.DELETED) {
-                lsp.pathDeleted(file);
-            } else {
-                lsp.pathChanged(file);
-            }
-            ProjectModelSupport model = lsp.extension(ProjectModelSupport.class);
-            if (model != null) {
-                model.projectConfigurationUpdate();
-            }
-        }
-        onBuildFileChanged(file);
-    }
-
-    private void refreshSpringIndexFor(Path file, String content) {
-        JavaProjectDescriptor current = descriptor;
-        Path root = projectRoot;
-        long ticket = lifecycle.get();
-        if (current == null || root == null || !current.spring()
-                || !settings().isSpringSupport()) {
-            return;
-        }
-        spring.index().refreshFile(file, content).thenAccept(snapshot -> {
-            if (!current(ticket, root)) {
-                return;
-            }
-            requestRefreshCodeLenses(file);
-            SpringExplorerPanel panel = spring.panel();
-            if (panel != null) {
-                panel.reload();
-            }
-        });
-    }
-
-    private void forgetJavaFile(Path file) {
-        lexicalIndex.refreshFile(file, "");
-        todoSupport.forget(file);
-        JavaProjectDescriptor current = descriptor;
-        if (current != null && current.spring() && settings().isSpringSupport()) {
-            refreshSpringIndexFor(file, "");
-        }
+        return FileWatchSupport.diskBaselineFor(file, editorText);
     }
 
     @Override
@@ -2125,7 +1923,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (newPath == null) {
             return;
         }
-        JavaFileChangeRouter router = fileChangeRouter;
+        JavaFileChangeRouter router = fileWatch.fileChangeRouter();
         if (router == null) {
             return;
         }
@@ -2162,7 +1960,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
         Path deleted = path.toAbsolutePath().normalize();
         if (JavaProjectConventions.isJava(deleted)) {
-            forgetJavaFile(deleted);
+            fileWatch.forgetJavaFile(deleted);
         }
         if (JavaProjectConventions.isMavenPom(deleted)
                 || JavaProjectConventions.isGradleBuildFile(deleted)) {
@@ -2908,7 +2706,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         lexicalIndex.refreshFile(filePath, content);
         JavaProjectDescriptor current = descriptor;
         if (current != null && current.spring() && JavaProjectConventions.isJava(filePath)) {
-            refreshSpringIndexFor(filePath, content);
+            fileWatch.refreshSpringIndexFor(filePath, content);
         }
         if (JavaProjectConventions.isJava(filePath) && debugSupport.session() != null
                 && settings().getHotReloadMode() == HotReloadMode.AUTOMATIC) {

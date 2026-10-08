@@ -13,6 +13,7 @@ import dtm.ide.api.extension.runconfig.RunConfigurationData;
 import dtm.ide.api.extension.runconfig.RunExecutionContext;
 import dtm.ide.api.extension.runconfig.RunProcessHandle;
 import dtm.ide.api.extension.screen.ToolIconType;
+import dtm.ide.api.project.IdeProjectFileWatcher;
 import dtm.ide.api.project.diagnostics.IdeProblem;
 import dtm.ide.api.project.diagnostics.ProblemsActionHandle;
 import dtm.ide.api.project.editor.IdeEditorContext;
@@ -225,4 +226,8 @@ public interface AdapterHost extends AdapterContext {
     void requestOpenProblemsPanel();
     void publishProblems(String owner, Collection<IdeProblem> problems);
     ProblemsActionHandle registerProblemsAction(String owner, String label, String tooltip, Icon icon, Runnable action);
+    IdeProjectFileWatcher projectFileWatcher();
+    TodoPanelHost todoSupport();
+    Map<Path, String> diskBaseline();
+    void requestJavaTreeIconRefresh(Path file);
 }
