@@ -34,7 +34,6 @@ import dtm.ide.api.project.editor.IdeDocumentHighlightContext;
 import dtm.ide.api.project.editor.IdeDocumentSymbolContext;
 import dtm.ide.api.project.editor.IdeHoverContext;
 import dtm.ide.api.project.editor.IdeGhostTextContext;
-import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildSupport;
 import dtm.ide.adapter.BuildToolsSupport;
@@ -125,7 +124,6 @@ import dtm.ide.debug.BreakpointChanges;
 import dtm.ide.debug.ConditionEditorSession;
 import dtm.ide.debug.JavaDebugSession;
 import dtm.ide.inspection.InspectionSuppressionStore;
-import dtm.ide.spring.SpringNavigation;
 import dtm.ide.spring.config.SpringConfigSupport;
 import dtm.ide.project.JavaModule;
 import dtm.ide.run.JavaRunSupport;
@@ -166,7 +164,6 @@ import dtm.stools.component.panels.editor.code.CodeEditor;
 import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import dtm.stools.component.panels.editor.code.codelens.CodeLens;
 import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
-import dtm.stools.component.panels.editor.code.hover.HoverDocumentationProvider;
 import dtm.stools.component.panels.editor.code.hover.HoverInfo;
 import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
@@ -726,10 +723,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return languageServers.ensureLanguageServer();
     }
 
-    private boolean applyLombokAgent(JavaLanguageServer lsp, JavaProjectDescriptor current) {
-        return languageServers.applyLombokAgent(lsp, current);
-    }
-
     public LombokSupportStatus getLombokSupportStatus() {
         return languageServers.getLombokSupportStatus();
     }
@@ -893,10 +886,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return editorAssist.getHover(context);
     }
 
-    static String diskBaselineFor(Path file, String editorText) {
-        return FileWatchSupport.diskBaselineFor(file, editorText);
-    }
-
     @Override
     public PathRenameDecision beforePathRename(Path path) {
         return pathRenames.beforePathRename(path);
@@ -943,10 +932,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return safeDeleteSupport.canDeletePaths(paths);
     }
 
-    static List<Range> typeDeclarationRanges(List<DocumentSymbol> symbols) {
-        return SafeDeleteSupport.typeDeclarationRanges(symbols);
-    }
-
     private static <T> T onUi(Supplier<T> action) {
         return UiThreads.onUi(action);
     }
@@ -970,10 +955,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return codeLensSupport.getCodeLenses(context);
     }
 
-    private static List<Location> springLocations(SpringNavigation.Target target) {
-        return CodeLensSupport.springLocations(target);
-    }
-
     IdeEditorContext editorContextFor(Path file) {
         Path normalized = JavaProjectConventions.normalize(file);
         return normalized == null ? null : javaEditors.get(normalized);
@@ -994,10 +975,6 @@ public class JavaIdeAdapter extends IdeAdapter {
         return previous == null ? open : previous;
     }
 
-    static String locationKey(Location location) {
-        return UiThreads.locationKey(location);
-    }
-
     static List<Location> uniqueLocations(List<Location> locations) {
         return JavaNavigation.unique(locations);
     }
@@ -1013,16 +990,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     void openAt(Path path, int line, int col) {
         navigationViews.openAt(path, line, col);
-    }
-
-    static int[] clampPosition(String text, int line, int col) {
-        return NavigationViews.clampPosition(text, line, col);
-    }
-
-    static void applyClassFileEditorProviders(CodeEditor editor, Path virtual,
-                                              JavaEditorRegistry editors,
-                                              HoverDocumentationProvider hover) {
-        NavigationViews.applyClassFileEditorProviders(editor, virtual, editors, hover);
     }
 
     @Override
@@ -1221,26 +1188,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     Result resolveNavigation(Path filePath, String source, int line, int col, Kind kind) {
         return navigationSupport.resolveNavigation(filePath, source, line, col, kind);
-    }
-
-    static boolean isOwnDeclaration(List<Location> definitions, IdeWordClickContext context) {
-        return NavigationSupport.isOwnDeclaration(definitions, context);
-    }
-
-    static boolean isCtrlDefinitionClick(IdeWordClickContext context) {
-        return NavigationSupport.isCtrlDefinitionClick(context);
-    }
-
-    static String identifierAt(String text, int line, int col) {
-        return NavigationSupport.identifierAt(text, line, col);
-    }
-
-    private void navigateFromEditor(IdeEditorContext context, String action) {
-        navigationSupport.navigateFromEditor(context, action);
-    }
-
-    private boolean isNavigationAvailable(Path filePath) {
-        return navigationSupport.isNavigationAvailable(filePath);
     }
 
     private Path pomLocalRepository() {
@@ -1479,14 +1426,6 @@ public class JavaIdeAdapter extends IdeAdapter {
                 .orElse(null);
     }
 
-    static String debugProjectName(JavaModule module) {
-        return DebugSupport.debugProjectName(module);
-    }
-
-    static String safeDebugExpression(String source, int offset) {
-        return DebugSupport.safeDebugExpression(source, offset);
-    }
-
     static JavaModule moduleContaining(JavaProjectDescriptor descriptor, Path file,
                                                boolean testRoots) {
         return descriptor.modules().stream()
@@ -1582,28 +1521,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         }
     }
 
-    private void openTodoPanel() {
-        todoSupport.openPanel();
-    }
-
-    private void refreshTodosFor(Path filePath, String content) {
-        todoSupport.refresh(filePath, content);
-    }
-
-    private void openProblemsPanel() {
-        problemsSupport.openProblemsPanel();
-    }
-
     void refreshProblemsPanel() {
         problemsSupport.refreshProblemsPanel();
-    }
-
-    private void syncWithDisk() {
-        problemsSupport.syncWithDisk();
-    }
-
-    private void reanalyzeDiagnostics() {
-        problemsSupport.reanalyzeDiagnostics();
     }
 
     void finishDiagnosticReanalysis(long ticket, Path root, boolean successful) {
@@ -1719,16 +1638,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         projectSync.syncProject();
     }
 
-    static boolean jdkRequirementChanged(JavaProjectDescriptor previous, JavaProjectDescriptor reloaded) {
-        return ProjectSyncSupport.jdkRequirementChanged(previous, reloaded);
-    }
-
     void onBuildFileChanged(Path filePath) {
         projectSync.onBuildFileChanged(filePath);
-    }
-
-    static boolean validMavenReactor(Path file, Set<Path> visited) {
-        return ProjectSyncSupport.validMavenReactor(file, visited);
     }
 
     public void openProjectStructure() {
@@ -1880,10 +1791,6 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     public JdkInstallation getProjectJdk() {
         return projectJdk;
-    }
-
-    static String rootMessage(Throwable error) {
-        return AdapterFailures.rootMessage(error);
     }
 
     public Path getProjectRoot() {

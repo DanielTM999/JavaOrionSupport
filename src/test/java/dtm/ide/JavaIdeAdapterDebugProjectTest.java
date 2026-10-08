@@ -1,5 +1,6 @@
 package dtm.ide;
 
+import dtm.ide.adapter.DebugSupport;
 import dtm.ide.project.JavaModule;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -26,13 +27,13 @@ class JavaIdeAdapterDebugProjectTest {
                 List.of(aggregator, laudo, consulta), test);
 
         assertEquals(consulta, resolved);
-        assertEquals("consulta", JavaIdeAdapter.debugProjectName(resolved));
+        assertEquals("consulta", DebugSupport.debugProjectName(resolved));
     }
 
     @Test
     void anAggregatorIsNeverSentAsTheDebugProject() {
-        assertNull(JavaIdeAdapter.debugProjectName(module(root, "cautcar_laudos", "pom")));
-        assertNull(JavaIdeAdapter.debugProjectName(null));
+        assertNull(DebugSupport.debugProjectName(module(root, "cautcar_laudos", "pom")));
+        assertNull(DebugSupport.debugProjectName(null));
         assertNull(JavaIdeAdapter.mostSpecificModule(
                 List.of(module(root, "cautcar_laudos", "pom")), root.resolve("Outro.java")));
     }

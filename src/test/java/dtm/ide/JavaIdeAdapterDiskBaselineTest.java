@@ -1,5 +1,6 @@
 package dtm.ide;
 
+import dtm.ide.adapter.FileWatchSupport;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -21,7 +22,7 @@ class JavaIdeAdapterDiskBaselineTest {
         Files.writeString(moved, "public class Funcionario {\r\n}\r\n", StandardCharsets.UTF_8);
         String unsavedEditor = "public class Colaborador {\n}\n";
 
-        String baseline = JavaIdeAdapter.diskBaselineFor(moved, unsavedEditor);
+        String baseline = FileWatchSupport.diskBaselineFor(moved, unsavedEditor);
 
         assertEquals("public class Funcionario {\n}\n", baseline);
         assertNotEquals(unsavedEditor, baseline);
@@ -33,13 +34,13 @@ class JavaIdeAdapterDiskBaselineTest {
         Files.writeString(file, "class A {\r\n}\r\n", StandardCharsets.UTF_8);
         String editor = "class A {\n}\n";
 
-        assertEquals(editor, JavaIdeAdapter.diskBaselineFor(file, editor));
+        assertEquals(editor, FileWatchSupport.diskBaselineFor(file, editor));
     }
 
     @Test
     void aFileThatOnlyExistsInTheEditorUsesTheEditorText() {
         Path missing = dir.resolve("Novo.java");
 
-        assertEquals("class Novo {}", JavaIdeAdapter.diskBaselineFor(missing, "class Novo {}"));
+        assertEquals("class Novo {}", FileWatchSupport.diskBaselineFor(missing, "class Novo {}"));
     }
 }

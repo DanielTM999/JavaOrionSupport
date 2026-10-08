@@ -1,5 +1,8 @@
 package dtm.ide;
 
+import dtm.ide.adapter.DebugSupport;
+import dtm.ide.adapter.NavigationSupport;
+import dtm.ide.adapter.NavigationViews;
 import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.IdeWordClickContext;
 import dtm.stools.component.panels.editor.code.CodeEditor;
@@ -34,7 +37,7 @@ class JavaIdeAdapterNavigationTest {
 
     @Test
     void aMissingDefinitionDoesNotMeanTheClickWasOnTheDeclaration() {
-        assertFalse(JavaIdeAdapter.isOwnDeclaration(java.util.List.of(), click(
+        assertFalse(NavigationSupport.isOwnDeclaration(java.util.List.of(), click(
                 Path.of("Demo.java"), MouseEvent.BUTTON1, InputEvent.CTRL_DOWN_MASK)));
     }
 
@@ -42,10 +45,10 @@ class JavaIdeAdapterNavigationTest {
     void sameLineDeclarationMustStillContainTheClickedWord() {
         var context = click(Path.of("Demo.java"), MouseEvent.BUTTON1, InputEvent.CTRL_DOWN_MASK);
         String uri = context.filePath().toAbsolutePath().toUri().toString();
-        assertTrue(JavaIdeAdapter.isOwnDeclaration(java.util.List.of(
+        assertTrue(NavigationSupport.isOwnDeclaration(java.util.List.of(
                 dtm.stools.component.panels.editor.code.api.Location.of(uri,
                         dtm.stools.component.panels.editor.code.api.Range.of(0, 6, 0, 10))), context));
-        assertFalse(JavaIdeAdapter.isOwnDeclaration(java.util.List.of(
+        assertFalse(NavigationSupport.isOwnDeclaration(java.util.List.of(
                 dtm.stools.component.panels.editor.code.api.Location.of(uri,
                         dtm.stools.component.panels.editor.code.api.Range.of(0, 20, 0, 24))), context));
     }
@@ -114,9 +117,9 @@ class JavaIdeAdapterNavigationTest {
 
     @Test
     void theTargetPositionIsClampedToTheBufferTheEditorHolds() {
-        assertArrayEquals(new int[]{1, 3}, JavaIdeAdapter.clampPosition("abc\r\ndef", 7, 40));
-        assertArrayEquals(new int[]{0, 0}, JavaIdeAdapter.clampPosition("", 3, 2));
-        assertArrayEquals(new int[]{1, 2}, JavaIdeAdapter.clampPosition("abc\ndef", 1, 2));
+        assertArrayEquals(new int[]{1, 3}, NavigationViews.clampPosition("abc\r\ndef", 7, 40));
+        assertArrayEquals(new int[]{0, 0}, NavigationViews.clampPosition("", 3, 2));
+        assertArrayEquals(new int[]{1, 2}, NavigationViews.clampPosition("abc\ndef", 1, 2));
     }
 
     private static JavaIdeAdapter adapterAnswering(AtomicInteger calls, int staleAnswers) throws Exception {
@@ -146,7 +149,7 @@ class JavaIdeAdapterNavigationTest {
         CodeEditor editor = new CodeEditor();
         editor.setText("class Demo { }");
 
-        JavaIdeAdapter.applyClassFileEditorProviders(editor, Path.of("Demo.java"),
+        NavigationViews.applyClassFileEditorProviders(editor, Path.of("Demo.java"),
                 new JavaEditorRegistry(), context -> new HoverInfo("doc"));
 
         assertNotNull(editor.getTokenizerProvider(), "faltou o tokenizer java");
@@ -175,7 +178,7 @@ class JavaIdeAdapterNavigationTest {
             SwingUtilities.invokeAndWait(() -> {
                 frame.setVisible(true);
                 editor.setText("package java.util; public interface List { int size(); }");
-                JavaIdeAdapter.applyClassFileEditorProviders(editor, Path.of("List.java"),
+                NavigationViews.applyClassFileEditorProviders(editor, Path.of("List.java"),
                         new JavaEditorRegistry(), context -> null);
                 host.add(editor, BorderLayout.CENTER);
                 host.revalidate();
@@ -207,7 +210,7 @@ class JavaIdeAdapterNavigationTest {
         DefaultTokenColorProvider colors = new DefaultTokenColorProvider();
         editor.addProvider(colors);
 
-        JavaIdeAdapter.applyClassFileEditorProviders(editor, Path.of("Demo.java"),
+        NavigationViews.applyClassFileEditorProviders(editor, Path.of("Demo.java"),
                 new JavaEditorRegistry(), context -> null);
 
         assertSame(colors, editor.getTokenColorProvider());
@@ -215,17 +218,17 @@ class JavaIdeAdapterNavigationTest {
 
     @Test
     void ctrlLeftClickOnAJavaWordRequestsDefinitionNavigation() {
-        assertTrue(JavaIdeAdapter.isCtrlDefinitionClick(click(
+        assertTrue(NavigationSupport.isCtrlDefinitionClick(click(
                 Path.of("Demo.java"), MouseEvent.BUTTON1, InputEvent.CTRL_DOWN_MASK)));
     }
 
     @Test
     void ordinaryOrRightClicksDoNotNavigate() {
-        assertFalse(JavaIdeAdapter.isCtrlDefinitionClick(click(
+        assertFalse(NavigationSupport.isCtrlDefinitionClick(click(
                 Path.of("Demo.java"), MouseEvent.BUTTON1, 0)));
-        assertFalse(JavaIdeAdapter.isCtrlDefinitionClick(click(
+        assertFalse(NavigationSupport.isCtrlDefinitionClick(click(
                 Path.of("Demo.java"), MouseEvent.BUTTON3, InputEvent.CTRL_DOWN_MASK)));
-        assertFalse(JavaIdeAdapter.isCtrlDefinitionClick(click(
+        assertFalse(NavigationSupport.isCtrlDefinitionClick(click(
                 Path.of("pom.xml"), MouseEvent.BUTTON1, InputEvent.CTRL_DOWN_MASK)));
     }
 
@@ -234,16 +237,16 @@ class JavaIdeAdapterNavigationTest {
         String source = "var total = pedido.cliente.endereco;";
 
         assertEquals("pedido.cliente.endereco",
-                JavaIdeAdapter.safeDebugExpression(source, source.indexOf("cliente") + 2));
+                DebugSupport.safeDebugExpression(source, source.indexOf("cliente") + 2));
         assertEquals("pedido.cliente.endereco",
-                JavaIdeAdapter.safeDebugExpression(source, source.indexOf(';')));
+                DebugSupport.safeDebugExpression(source, source.indexOf(';')));
     }
 
     @Test
     void rejectsMethodCallsForAutomaticDebugEvaluation() {
         String source = "var total = pedido.calcularTotal();";
 
-        assertNull(JavaIdeAdapter.safeDebugExpression(source, source.indexOf('(')));
+        assertNull(DebugSupport.safeDebugExpression(source, source.indexOf('(')));
     }
 
     @Test
@@ -254,10 +257,10 @@ class JavaIdeAdapterNavigationTest {
                 }
                 """;
 
-        assertEquals("OrderService", JavaIdeAdapter.identifierAt(source, 1, 4));
-        assertEquals("OrderService", JavaIdeAdapter.identifierAt(source, 1, 10));
-        assertEquals("OrderService", JavaIdeAdapter.identifierAt(source, 1, 16));
-        assertEquals("service", JavaIdeAdapter.identifierAt(source, 1, 20));
+        assertEquals("OrderService", NavigationSupport.identifierAt(source, 1, 4));
+        assertEquals("OrderService", NavigationSupport.identifierAt(source, 1, 10));
+        assertEquals("OrderService", NavigationSupport.identifierAt(source, 1, 16));
+        assertEquals("service", NavigationSupport.identifierAt(source, 1, 20));
     }
 
     @Test
@@ -268,9 +271,9 @@ class JavaIdeAdapterNavigationTest {
                 }
                 """;
 
-        assertNull(JavaIdeAdapter.identifierAt(source, 1, 0));
-        assertNull(JavaIdeAdapter.identifierAt(source, 5, 0));
-        assertNull(JavaIdeAdapter.identifierAt(null, 0, 0));
+        assertNull(NavigationSupport.identifierAt(source, 1, 0));
+        assertNull(NavigationSupport.identifierAt(source, 5, 0));
+        assertNull(NavigationSupport.identifierAt(null, 0, 0));
     }
 
     @Test

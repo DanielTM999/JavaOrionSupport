@@ -1,4 +1,5 @@
 package dtm.ide;
+import dtm.ide.adapter.ProjectSyncSupport;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.*;
@@ -11,12 +12,12 @@ class JavaProjectRecoveryTest {
         Files.writeString(pom, "<project><modules><module>child</module></modules></project>");
         Path child = Files.createDirectory(root.resolve("child")).resolve("pom.xml");
         Files.writeString(child, "<project>");
-        assertFalse(JavaIdeAdapter.validMavenReactor(pom, new HashSet<>()));
+        assertFalse(ProjectSyncSupport.validMavenReactor(pom, new HashSet<>()));
         Files.writeString(child, "<project/>");
-        assertTrue(JavaIdeAdapter.validMavenReactor(pom, new HashSet<>()));
+        assertTrue(ProjectSyncSupport.validMavenReactor(pom, new HashSet<>()));
         Path fixture = Files.createDirectory(root.resolve("fixtures")).resolve("pom.xml");
         Files.writeString(fixture, "<project>");
-        assertTrue(JavaIdeAdapter.validMavenReactor(pom, new HashSet<>()));
+        assertTrue(ProjectSyncSupport.validMavenReactor(pom, new HashSet<>()));
     }
     @Test void jdkRequirementChangeIsDetectedWhenPomSwitchesFromSourceToRelease() throws Exception {
         Path pom = root.resolve("pom.xml");
@@ -28,8 +29,8 @@ class JavaProjectRecoveryTest {
         dtm.ide.project.JavaProjectDescriptor after = dtm.ide.project.JavaProjectConventions.describe(root);
         assertEquals(java.util.Optional.of(21), before.jdkMajor());
         assertEquals(java.util.Optional.of(25), after.jdkMajor());
-        assertTrue(JavaIdeAdapter.jdkRequirementChanged(before, after));
-        assertFalse(JavaIdeAdapter.jdkRequirementChanged(after, after));
-        assertFalse(JavaIdeAdapter.jdkRequirementChanged(null, after));
+        assertTrue(ProjectSyncSupport.jdkRequirementChanged(before, after));
+        assertFalse(ProjectSyncSupport.jdkRequirementChanged(after, after));
+        assertFalse(ProjectSyncSupport.jdkRequirementChanged(null, after));
     }
 }

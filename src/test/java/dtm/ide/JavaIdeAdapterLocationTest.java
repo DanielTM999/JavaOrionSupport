@@ -1,5 +1,6 @@
 package dtm.ide;
 
+import dtm.ide.adapter.UiThreads;
 import dtm.stools.component.panels.editor.code.api.Location;
 import dtm.stools.component.panels.editor.code.api.Range;
 import org.junit.jupiter.api.Test;
@@ -15,7 +16,7 @@ class JavaIdeAdapterLocationTest {
         Location fromSafeDeleteScanner = Location.of("file:///D:/project/App.java",
                 Range.of(11, 28, 11, 39));
 
-        assertNotEquals(JavaIdeAdapter.locationKey(fromLanguageServer),
-                JavaIdeAdapter.locationKey(fromSafeDeleteScanner));
+        assertNotEquals(UiThreads.locationKey(fromLanguageServer),
+                UiThreads.locationKey(fromSafeDeleteScanner));
     }
 }

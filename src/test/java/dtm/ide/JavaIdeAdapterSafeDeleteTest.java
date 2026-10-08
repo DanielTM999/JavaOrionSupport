@@ -1,5 +1,6 @@
 package dtm.ide;
 
+import dtm.ide.adapter.SafeDeleteSupport;
 import dtm.stools.component.panels.editor.code.api.DocumentSymbol;
 import dtm.stools.component.panels.editor.code.api.Range;
 import dtm.stools.component.panels.editor.code.api.SymbolKind;
@@ -25,10 +26,10 @@ class JavaIdeAdapterSafeDeleteTest {
                 List.of(field, method, constructor, nestedEnum));
         DocumentSymbol record = DocumentSymbol.leaf("Dados", SymbolKind.STRUCT, Range.of(13, 7, 13, 12));
 
-        List<Range> ranges = JavaIdeAdapter.typeDeclarationRanges(List.of(type, record));
+        List<Range> ranges = SafeDeleteSupport.typeDeclarationRanges(List.of(type, record));
 
         assertEquals(List.of(Range.of(1, 13, 1, 20), Range.of(13, 7, 13, 12), Range.of(8, 16, 8, 22)), ranges);
-        assertTrue(JavaIdeAdapter.typeDeclarationRanges(List.of(method)).isEmpty());
-        assertTrue(JavaIdeAdapter.typeDeclarationRanges(null).isEmpty());
+        assertTrue(SafeDeleteSupport.typeDeclarationRanges(List.of(method)).isEmpty());
+        assertTrue(SafeDeleteSupport.typeDeclarationRanges(null).isEmpty());
     }
 }
