@@ -46,6 +46,7 @@ import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
 import dtm.ide.adapter.BuildSupport;
 import dtm.ide.adapter.BuildToolsSupport;
+import dtm.ide.adapter.CenterTabIds;
 import dtm.ide.adapter.CodeLensSupport;
 import dtm.ide.adapter.CompletionEngine;
 import dtm.ide.adapter.DebugSupport;
@@ -69,6 +70,7 @@ import dtm.ide.adapter.ProjectSyncSupport;
 import dtm.ide.adapter.ProjectTreeMenuSupport;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.LanguageServerManager;
+import dtm.ide.adapter.MenuContributions;
 import dtm.ide.adapter.ProjectStructureSupport;
 import dtm.ide.adapter.SpringSupport;
 import dtm.ide.adapter.SwingDesignerHost;
@@ -166,7 +168,6 @@ import dtm.ide.ui.JavaDebugValuePopup;
 import dtm.ide.ui.JdkManagerPanel;
 import dtm.ide.api.extension.screen.ToolIconType;
 import dtm.ide.api.extension.settings.PluginSettingsPage;
-import dtm.stools.component.menu.bar.tree.MenuNode;
 import dtm.stools.component.panels.dock.DockRegion;
 import dtm.stools.component.popup.ModernInputDialog;
 import dtm.stools.component.panels.editor.code.api.CodeAction;
@@ -228,10 +229,8 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     private static final long SLOW_OPERATION_THRESHOLD_MS = 100;
     private static final long SELECTION_RANGE_TIMEOUT_MS = 1_000;
-    private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
-    private static final String DEPENDENCIES_TAB_ID = "javaDependencies";
     private final class HostBridge implements AdapterHost {
         @Override
         public boolean debugActive() {
@@ -1117,6 +1116,36 @@ public class JavaIdeAdapter extends IdeAdapter {
         public NavigationSupport navigationSupport() {
             return navigationSupport;
         }
+
+        @Override
+        public ProblemsSupport problemsSupport() {
+            return problemsSupport;
+        }
+
+        @Override
+        public void openBuildTools() {
+            JavaIdeAdapter.this.openBuildTools();
+        }
+
+        @Override
+        public void restartLanguageServer() {
+            JavaIdeAdapter.this.restartLanguageServer();
+        }
+
+        @Override
+        public void openProjectStructure() {
+            JavaIdeAdapter.this.openProjectStructure();
+        }
+
+        @Override
+        public void openJdkManager() {
+            JavaIdeAdapter.this.openJdkManager();
+        }
+
+        @Override
+        public void openTestExplorer() {
+            JavaIdeAdapter.this.openTestExplorer();
+        }
     }
 
     private final JavaEditorRegistry editors = new JavaEditorRegistry();
@@ -1146,6 +1175,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final FileWatchSupport fileWatch = new FileWatchSupport(adapterHost);
     private final PathRenameSupport pathRenames = new PathRenameSupport(adapterHost);
     private final EditorEventsSupport editorEvents = new EditorEventsSupport(adapterHost);
+    private final MenuContributions menus = new MenuContributions(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1178,7 +1208,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile JdkService jdkService;
     private volatile JdkInstallation projectJdk;
     private volatile JdkManagerPanel jdkManagerPanel;
-    private static final String STRUCTURE_TAB_ID = "javaProjectStructure";
 
     private volatile JavaLanguageServer jdtLs;
     private volatile ClassFileSupport classFileUris;
@@ -2370,37 +2399,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void contributeEditorMenu(IdeMenuBuilder menu, IdeEditorContext editorContext) {
-        if (menu == null || editorContext == null) return;
-        if (JavaProjectConventions.isBuildFile(editorContext.filePath())) {
-            contributeBuildFileEditorMenu(menu);
-            return;
-        }
-        if (!JavaProjectConventions.isJava(editorContext.filePath())) return;
-        boolean enabled = isNavigationAvailable(editorContext.filePath());
-        boolean debugPaused = debugSupport.isDebugPaused();
-        String debugExpression = DebugSupport.selectedDebugExpression(editorContext);
-        menu.separator()
-                .submenu(text("menu.navigate", "Navigate"), JavaIcons.search(JavaIcons.SMALL),
-                        navigate -> navigate
-                        .item(text("menu.definition", "Go to Definition"), enabled,
-                                event -> onGoToDeclaration(editorContext))
-                        .item(text("menu.implementation", "Go to Implementation"), enabled,
-                                event -> onGoToImplementation(editorContext))
-                        .item(text("menu.usages", "Find Usages"), enabled,
-                                event -> onFindUsages(editorContext)))
-                .separator()
-                .item(text("generate.title", "Generate..."), enabled,
-                        event -> sourceActions.showGenerateActions(editorContext))
-                .item(text("generate.override", "Override Methods..."), enabled,
-                        event -> sourceActions.showOverrideMethods(editorContext, false))
-                .item(text("generate.implement", "Implement Methods..."), enabled,
-                        event -> sourceActions.showOverrideMethods(editorContext, true))
-                .separator()
-                .item(text("debug.evaluate", "Evaluate Expression..."), debugPaused,
-                        event -> debugSupport.showEvaluateDialog(editorContext, 0))
-                .item(text("debug.addWatch", "Add Watch"), debugPaused
-                                && debugExpression != null,
-                        event -> debugSupport.addDebugWatch(debugExpression));
+        menus.contributeEditorMenu(menu, editorContext);
     }
 
     @Override
@@ -2422,137 +2421,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         swingDesignerHost.closeSwingDesigner();
     }
 
-    private void contributeBuildFileEditorMenu(IdeMenuBuilder menu) {
-        JavaProjectDescriptor current = descriptor;
-        if (current == null || !current.kind().hasBuildTool()) return;
-        menu.separator()
-                .item(text("tree.sync", "Sincronizar projeto"),
-                        JavaIcons.sync(JavaIcons.SMALL), event -> syncProject())
-                .item(text("tree.reload", "Recarregar projeto"),
-                        JavaIcons.refresh(JavaIcons.SMALL), event -> clearCaches())
-                .item(text("menu.buildTools", "Build Tools"),
-                        JavaIcons.buildTool(current, JavaIcons.SMALL), event -> openBuildTools());
-    }
-
     @Override
     public void contributeMenuBar(IdeMenuBarBuilder menu) {
-        menu.submenu("javaBuildMenu", text("menu.build", "Build"), build -> build
-                .item("javaCompile", text("menu.compile", "Compilar"),
-                        event -> runBuild(BuildSystem.BuildAction.COMPILE,
-                                text("menu.compile", "Compilar")))
-                .item("javaRebuild", text("menu.rebuild", "Recompilar tudo"),
-                        event -> runBuild(BuildSystem.BuildAction.REBUILD,
-                                text("menu.rebuild", "Recompilar tudo")))
-                .item("javaClean", text("menu.clean", "Limpar"),
-                        event -> runBuild(BuildSystem.BuildAction.CLEAN,
-                                text("menu.clean", "Limpar")))
-                .separator()
-                .item("javaTest", text("menu.test", "Testar"),
-                        event -> runBuild(BuildSystem.BuildAction.TEST,
-                                text("menu.test", "Testar")))
-                .item("javaPackage", text("menu.package", "Empacotar"),
-                        event -> runBuild(BuildSystem.BuildAction.PACKAGE,
-                                text("menu.package", "Empacotar")))
-                .item("javaInstall", text("menu.install", "Instalar no repositorio local"),
-                        event -> runBuild(BuildSystem.BuildAction.INSTALL,
-                                text("menu.install", "Instalar no repositorio local")))
-                .separator()
-                .add(MenuNode.item("javaSyncProject", text("menu.sync", "Sincronizar projeto"))
-                        .icon(JavaIcons.sync(JavaIcons.SMALL))
-                        .tooltip(text("menu.sync.tip",
-                                "Reler o pom ou o build.gradle e atualizar o classpath"))
-                        .onClick(event -> syncProject()))
-                .add(MenuNode.item("javaSyncWithDisk",
-                                text("menu.syncDisk", "Ressincronizar com o disco"))
-                        .icon(JavaIcons.refresh(JavaIcons.SMALL))
-                        .tooltip(text("menu.syncDisk.tip",
-                                "Reler as mudancas feitas fora do editor e reanalisar os arquivos abertos"))
-                        .onClick(event -> syncWithDisk()))
-                .add(MenuNode.item("javaReanalyzeDiagnostics",
-                                text("menu.reanalyzeDiagnostics", "Limpar e rediagnosticar"))
-                        .icon(JavaIcons.refresh(JavaIcons.SMALL))
-                        .tooltip(text("menu.reanalyzeDiagnostics.tip",
-                                "Descartar os diagnosticos atuais e reiniciar a analise Java"))
-                        .onClick(event -> reanalyzeDiagnostics()))
-                .add(MenuNode.item("javaRestartLanguageServer",
-                                text("menu.restartLsp", "Reiniciar Java Language Server"))
-                        .icon(JavaIcons.refresh(JavaIcons.SMALL))
-                        .tooltip(text("menu.restartLsp.tip",
-                                "Encerrar o JDT LS e inicia-lo novamente, mesmo apos falhas repetidas"))
-                        .onClick(event -> restartLanguageServer()))
-                .add(MenuNode.item("javaProjectStructure",
-                                text("menu.projectStructure", "Estrutura do projeto..."))
-                        .icon(JavaIcons.module(JavaIcons.SMALL))
-                        .shortcut("control alt shift S")
-                        .tooltip(text("menu.projectStructure.tip",
-                                "SDK, nivel de linguagem, pastas de codigo, modulos e bibliotecas"))
-                        .onClick(event -> openProjectStructure()))
-                .add(MenuNode.item("javaBuildJdkManager", text("menu.jdkManager", "Gerenciar JDKs"))
-                        .icon(JavaIcons.java(JavaIcons.SMALL))
-                        .tooltip(text("menu.jdkManager.tip",
-                                "Ver as JDKs instaladas, baixar novas e escolher a do projeto"))
-                        .onClick(event -> openJdkManager())));
-
-        menu.into("code")
-                .add(MenuNode.item("javaGenerate", text("generate.title", "Generate..."))
-                        .shortcut("alt INSERT")
-                        .onClick(event -> sourceActions.showGenerateActions(activeJavaEditor)))
-                .add(MenuNode.item("javaOverrideMethods",
-                                text("generate.override", "Override Methods..."))
-                        .shortcut("control INSERT")
-                        .onClick(event -> sourceActions.showOverrideMethods(activeJavaEditor, false)))
-                .add(MenuNode.item("javaImplementMethods",
-                                text("generate.implement", "Implement Methods..."))
-                        .shortcut("control I")
-                        .onClick(event -> sourceActions.showOverrideMethods(activeJavaEditor, true)))
-                .add(MenuNode.item("javaEvaluateExpression",
-                                text("debug.evaluate", "Evaluate Expression..."))
-                        .shortcut("alt F8")
-                        .onClick(event -> debugSupport.showEvaluateDialog(activeJavaEditor, 0)))
-                .add(MenuNode.separator());
-
-        menu.into("window")
-                .add(MenuNode.item(JDK_TAB_ID, text("menu.jdkManager", "Gerenciar JDKs"))
-                        .icon(JavaIcons.java(JavaIcons.SMALL))
-                        .tooltip(text("menu.jdkManager.tip",
-                                "Ver as JDKs instaladas, baixar novas e escolher a do projeto"))
-                        .onClick(event -> openJdkManager()))
-                .add(MenuNode.item(STRUCTURE_TAB_ID,
-                                text("menu.projectStructure", "Estrutura do projeto..."))
-                        .icon(JavaIcons.module(JavaIcons.SMALL))
-                        .tooltip(text("menu.projectStructure.tip",
-                                "SDK, nivel de linguagem, pastas de codigo, modulos e bibliotecas"))
-                        .onClick(event -> openProjectStructure()))
-                .add(MenuNode.item(DEPENDENCIES_TAB_ID,
-                                text("menu.dependencies", "Gerenciar dependencias"))
-                        .icon(JavaIcons.dependency(JavaIcons.SMALL))
-                        .tooltip(text("menu.dependencies.tip",
-                                "Buscar no Maven Central, adicionar, atualizar e remover dependencias"))
-                        .onClick(event -> openDependencyManager()))
-                .add(MenuNode.item("javaProblems", text("menu.problems", "Problemas"))
-                        .icon(JavaIcons.error(JavaIcons.SMALL))
-                        .tooltip(text("menu.problems.tip",
-                                "Erros e avisos do Java, Maven e Gradle"))
-                        .onClick(event -> openProblemsPanel()))
-                .add(MenuNode.item("javaTestExplorer", text("menu.tests", "Testes"))
-                        .icon(JavaIcons.test(JavaIcons.SMALL))
-                        .tooltip(text("menu.tests.tip",
-                                "Ver e executar os testes JUnit do projeto"))
-                        .onClick(event -> openTestExplorer()))
-                .add(MenuNode.item("javaTodo", text("menu.todo", "TODO"))
-                        .icon(JavaIcons.todo(JavaIcons.SMALL))
-                        .tooltip(text("menu.todo.tip",
-                                "TODO, FIXME e demais marcadores do projeto"))
-                        .onClick(event -> openTodoPanel()))
-                .add(MenuNode.item("javaBuildTools", text("menu.buildTools", "Build Tools"))
-                        .icon(JavaIcons.buildTool(descriptor, JavaIcons.SMALL))
-                        .tooltip(text("menu.buildTools.tip", "Projetos, tasks e dependencias Maven/Gradle"))
-                        .onClick(event -> openBuildTools()))
-                .add(MenuNode.item("javaSpringExplorer", text("menu.spring", "Spring"))
-                        .icon(JavaIcons.spring(JavaIcons.SMALL))
-                        .tooltip(text("menu.spring.tip",
-                                "Beans, endpoints e o estado da aplicacao em execucao"))
-                        .onClick(event -> openSpringExplorer()));
+        menus.contributeMenuBar(menu);
     }
 
     @Override
@@ -2828,8 +2699,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         } else {
             panel.reloadModules();
         }
-        openCenterTab(DEPENDENCIES_TAB_ID, text("tab.dependencies", "Dependencias"), panel, true);
-        switchToCenterTab(DEPENDENCIES_TAB_ID);
+        openCenterTab(CenterTabIds.DEPENDENCIES_TAB_ID, text("tab.dependencies", "Dependencias"), panel, true);
+        switchToCenterTab(CenterTabIds.DEPENDENCIES_TAB_ID);
     }
 
     private synchronized DependencyManagerCoordinator dependencyManagerHost() {
@@ -2890,9 +2761,9 @@ public class JavaIdeAdapter extends IdeAdapter {
         } else {
             panel.reload();
         }
-        openCenterTab(STRUCTURE_TAB_ID, text("tab.projectStructure", "Estrutura do projeto"),
+        openCenterTab(CenterTabIds.STRUCTURE_TAB_ID, text("tab.projectStructure", "Estrutura do projeto"),
                 panel, true);
-        switchToCenterTab(STRUCTURE_TAB_ID);
+        switchToCenterTab(CenterTabIds.STRUCTURE_TAB_ID);
     }
 
     public void openJdkManager() {
@@ -2903,8 +2774,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         } else {
             panel.reload();
         }
-        openCenterTab(JDK_TAB_ID, text("tab.jdkManager", "JDKs"), panel, true);
-        switchToCenterTab(JDK_TAB_ID);
+        openCenterTab(CenterTabIds.JDK_TAB_ID, text("tab.jdkManager", "JDKs"), panel, true);
+        switchToCenterTab(CenterTabIds.JDK_TAB_ID);
     }
 
     @Override

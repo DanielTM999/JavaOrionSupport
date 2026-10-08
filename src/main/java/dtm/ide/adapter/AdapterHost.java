@@ -238,4 +238,10 @@ public interface AdapterHost extends AdapterContext {
     RunLauncher runLauncher();
     SwingDesignerHost swingDesignerHost();
     NavigationSupport navigationSupport();
+    ProblemsSupport problemsSupport();
+    void openBuildTools();
+    void restartLanguageServer();
+    void openProjectStructure();
+    void openJdkManager();
+    void openTestExplorer();
 }
