@@ -384,4 +384,9 @@ public final class LanguageServerManager {
                     "Java: indexacao cancelada - IntelliSense aproximado"));
         });
     }
+
+    public static boolean needsLombokAgentRestart(JavaLanguageServer lsp) {
+        JavaAgentSupport agents = lsp.extension(JavaAgentSupport.class);
+        return agents != null && agents.needsRestartForLombokAgent();
+    }
 }

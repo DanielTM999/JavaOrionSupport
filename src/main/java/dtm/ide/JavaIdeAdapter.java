@@ -1,7 +1,6 @@
 package dtm.ide;
 
 import dtm.ide.lsp.api.ClassFileSupport;
-import dtm.ide.lsp.api.JavaAgentSupport;
 import dtm.ide.lsp.api.JavaLanguageServer;
 import dtm.ide.lsp.api.ProjectModelSupport;
 import dtm.ide.lsp.api.LanguageServerState;
@@ -62,6 +61,7 @@ import dtm.ide.adapter.GhostTextSupport;
 import dtm.ide.adapter.NavigationSupport;
 import dtm.ide.adapter.NavigationViews;
 import dtm.ide.adapter.ProblemsSupport;
+import dtm.ide.adapter.ProjectSyncSupport;
 import dtm.ide.adapter.ProjectTreeMenuSupport;
 import dtm.ide.adapter.JdkManagerSupport;
 import dtm.ide.adapter.LanguageServerManager;
@@ -217,7 +217,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
@@ -228,7 +227,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
@@ -253,9 +251,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
-    private static final String SYNC_PROGRESS_ID = "javaProjectSync";
-    private static final long SYNC_WORK_START_GRACE_MS = 3_000;
-    private static final long SYNC_WORK_MAX_MS = 120_000;
     private static final String DEPENDENCIES_TAB_ID = "javaDependencies";
     private final class HostBridge implements AdapterHost {
         @Override
@@ -1024,10 +1019,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public void observeSyncWork(boolean active) {
-            SyncWork sync = syncWork.get();
-            if (sync != null) {
-                sync.observe(active);
-            }
+            projectSync.observeSyncWork(active);
         }
 
         @Override
@@ -1115,6 +1107,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final LanguageServerManager languageServers = new LanguageServerManager(adapterHost);
     private final ProblemsSupport problemsSupport = new ProblemsSupport(adapterHost);
     private final BuildSupport buildSupport = new BuildSupport(adapterHost);
+    private final ProjectSyncSupport projectSync = new ProjectSyncSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1165,13 +1158,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final AtomicReference<Runnable> pendingTestDebug = new AtomicReference<>();
     private volatile JavaTestExplorerPanel testPanel;
     private volatile String testPanelId;
-    private final AtomicBoolean buildToolsSyncPending = new AtomicBoolean();
     private final Set<Path> pendingModuleDirectoryRenames = ConcurrentHashMap.newKeySet();
-    private final AtomicLong syncGeneration = new AtomicLong();
-    private final AtomicLong automaticSyncTicket = new AtomicLong();
-    private final AtomicBoolean syncRunning = new AtomicBoolean();
-    private final java.util.concurrent.atomic.AtomicInteger automaticSyncAttempts = new java.util.concurrent.atomic.AtomicInteger();
-    private final AtomicReference<SyncWork> syncWork = new AtomicReference<>();
     private final MavenPluginGoals pluginGoals = new MavenPluginGoals(this::pluginRepository);
     private volatile Path pluginRepositoryRoot;
     private volatile Path pluginRepositoryPath;
@@ -1281,7 +1268,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (choicesLoader != null) {
             choicesLoader.invalidate();
         }
-        buildToolsSyncPending.set(false);
+        projectSync.clearPending();
         spring.resetConfiguration();
         problems.clearAll();
         problemsSupport.reanalysisRunning().set(false);
@@ -1293,11 +1280,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         lastEditorContents.clear();
         languageServers.progress().set(0);
         hideProgress(LanguageServerManager.LSP_PROGRESS_ID);
-        syncGeneration.incrementAndGet();
-        syncRunning.set(false);
-        automaticSyncTicket.incrementAndGet();
-        syncWork.set(null);
-        hideProgress(SYNC_PROGRESS_ID);
+        projectSync.reset();
         JavaBuildToolsPanel toolsPanel = buildToolsPanel;
         if (toolsPanel != null) {
             toolsPanel.setSyncing(false);
@@ -3478,8 +3461,7 @@ public class JavaIdeAdapter extends IdeAdapter {
             current.onRepositoryInvalidated(() -> {
                 BuildSystem build = buildSystem;
                 if (build != null) build.invalidateClasspathCache();
-                automaticSyncAttempts.set(0);
-                scheduleAutomaticSync();
+                projectSync.restartAutomaticSync();
             });
             current.warmLocalCatalog();
             JavaPluginSettings active = settings;
@@ -3503,177 +3485,19 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     public void syncProject() {
-        Path root = projectRoot;
-        if (root == null) {
-            return;
-        }
-        if (!syncRunning.compareAndSet(false, true)) {
-            buildToolsSyncPending.set(true);
-            return;
-        }
-        long ticket = lifecycle.get();
-        long generation = syncGeneration.incrementAndGet();
-        buildToolsSyncPending.set(false);
-        String label = text("status.syncing", "Java: sincronizando o projeto...");
-        setStatusBarText(label);
-        showProgress(SYNC_PROGRESS_ID, label);
-        JavaBuildToolsPanel panel = buildToolsPanel;
-        if (panel != null) {
-            panel.setSyncing(true);
-        }
-        background.submit(() -> {
-            boolean waiting = false;
-            try {
-                BuildSystem build = buildSystem;
-                if (build != null) {
-                    build.invalidateClasspathCache();
-                }
-                JavaProjectDescriptor previous = descriptor;
-                JavaProjectDescriptor reloaded = timed("describe(syncProject)",
-                        () -> JavaProjectConventions.describe(root));
-                if (!current(ticket, root)) {
-                    return;
-                }
-                if (reloaded != null) {
-                    descriptor = reloaded;
-                }
-                if (jdkRequirementChanged(previous, reloaded)) {
-                    log.info("JDK pedida pelo projeto mudou de {} para {}; reavaliando a JDK do projeto",
-                            previous.jdkMajor().orElse(null), reloaded.jdkMajor().orElse(null));
-                    setStatusBarText(text("status.jdkRequirementChanged",
-                            "Java: o projeto pede outra JDK - recarregando"));
-                    clearCaches();
-                    return;
-                }
-                JavaLanguageServer lsp = jdtLs;
-                applyLombokAgent(lsp, descriptor);
-                boolean agentChanged = lsp != null && needsLombokAgentRestart(lsp);
-                if (agentChanged || lsp == null) {
-                    clearCaches();
-                    return;
-                }
-                ProjectModelSupport model = lsp.extension(ProjectModelSupport.class);
-                SyncWork work = new SyncWork();
-                syncWork.set(work);
-                if (model == null || !model.updateProjectConfiguration(root)) {
-                    syncWork.compareAndSet(work, null);
-                    clearCaches();
-                    return;
-                }
-                waiting = true;
-                work.completion().whenComplete((ignored, error) -> {
-                    syncWork.compareAndSet(work, null);
-                    boolean recovered = error == null;
-                    try {
-                        if (recovered && current(ticket, root) && syncGeneration.get() == generation) model.resynchronizeAfterProjectUpdate();
-                    } catch (Exception failure) {
-                        recovered = false;
-                        log.warn("Falha ao sincronizar documentos apos atualizar o projeto", failure);
-                    } finally {
-                        finishSync(generation, ticket, root, recovered);
-                    }
-                });
-            } finally {
-                if (!waiting) {
-                    finishSync(generation, ticket, root, false);
-                }
-            }
-        });
+        projectSync.syncProject();
     }
 
     static boolean jdkRequirementChanged(JavaProjectDescriptor previous, JavaProjectDescriptor reloaded) {
-        return previous != null && reloaded != null
-                && !previous.jdkMajor().equals(reloaded.jdkMajor());
-    }
-
-    private void finishSync(long generation, long ticket, Path root, boolean synced) {
-        if (syncGeneration.get() != generation) {
-            return;
-        }
-        syncRunning.set(false);
-        if (buildToolsSyncPending.getAndSet(false)) scheduleAutomaticSync();
-        else if (!synced && current(ticket, root) && automaticSyncAttempts.incrementAndGet() <= 3) scheduleAutomaticSync();
-        hideProgress(SYNC_PROGRESS_ID);
-        JavaBuildToolsPanel panel = buildToolsPanel;
-        if (panel != null) {
-            panel.setSyncing(false);
-        }
-        if (!synced || !current(ticket, root)) {
-            return;
-        }
-        requestProjectTreeViewRefresh();
-        SwingUtilities.invokeLater(() -> {
-            if (!current(ticket, root)) {
-                return;
-            }
-            refreshBuildToolsPanel();
-            setStatusBarText(text("status.synced", "Java: projeto sincronizado"));
-        });
-    }
-
-    private static final class SyncWork {
-        private final CompletableFuture<Boolean> started = new CompletableFuture<>();
-        private final CompletableFuture<Void> finished = new CompletableFuture<>();
-
-        void observe(boolean active) {
-            if (active) {
-                started.complete(true);
-            } else if (started.isDone()) {
-                finished.complete(null);
-            }
-        }
-
-        CompletableFuture<Void> completion() {
-            return started.completeOnTimeout(false, SYNC_WORK_START_GRACE_MS, TimeUnit.MILLISECONDS)
-                    .thenCompose(active -> active
-                            ? finished.completeOnTimeout(null, SYNC_WORK_MAX_MS, TimeUnit.MILLISECONDS)
-                            : CompletableFuture.completedFuture(null));
-        }
-    }
-
-    private void refreshBuildToolsPanel() {
-        JavaBuildToolsPanel panel = buildToolsPanel;
-        if (panel != null) {
-            panel.reload();
-        }
+        return ProjectSyncSupport.jdkRequirementChanged(previous, reloaded);
     }
 
     private void onBuildFileChanged(Path filePath) {
-        buildToolsSyncPending.set(true);
-        automaticSyncAttempts.set(0);
-        JavaBuildToolsPanel panel = buildToolsPanel;
-        if (panel != null) panel.setSyncPending(true);
-        scheduleAutomaticSync();
-    }
-
-    private void scheduleAutomaticSync() {
-        long ticket = automaticSyncTicket.incrementAndGet();
-        long session = lifecycle.get();
-        background.schedule(() -> {
-            Path root = projectRoot;
-            if (root == null || session != lifecycle.get() || ticket != automaticSyncTicket.get()) return;
-            if (descriptor != null && descriptor.isMaven()) {
-                if (!validMavenReactor(root.resolve("pom.xml"), new java.util.HashSet<>())) {
-                    setStatusBarText("Java: corrija o POM; a sincronizacao sera retomada automaticamente");
-                    return;
-                }
-            }
-            SwingUtilities.invokeLater(this::syncProject);
-        }, 1200, TimeUnit.MILLISECONDS);
+        projectSync.onBuildFileChanged(filePath);
     }
 
     static boolean validMavenReactor(Path file, Set<Path> visited) {
-        Path normalized = file.toAbsolutePath().normalize();
-        if (!visited.add(normalized)) return true;
-        dtm.ide.project.MavenPom pom = dtm.ide.project.MavenPom.parse(normalized);
-        if (!pom.isValid()) return false;
-        for (String module : pom.values("modules", "module")) {
-            if (module.contains("${")) continue;
-            Path child = normalized.getParent().resolve(module).normalize();
-            if (!child.getFileName().toString().endsWith(".xml")) child = child.resolve("pom.xml");
-            if (!validMavenReactor(child, visited)) return false;
-        }
-        return true;
+        return ProjectSyncSupport.validMavenReactor(file, visited);
     }
 
     public void openProjectStructure() {
@@ -3788,17 +3612,12 @@ public class JavaIdeAdapter extends IdeAdapter {
         clearCaches();
     }
 
-    private static boolean needsLombokAgentRestart(JavaLanguageServer lsp) {
-        JavaAgentSupport agents = lsp.extension(JavaAgentSupport.class);
-        return agents != null && agents.needsRestartForLombokAgent();
-    }
-
     private void restartWhenLombokAgentChanged(JavaLanguageServer lsp, JavaProjectDescriptor current) {
         if (current == null || lsp == null) {
             return;
         }
         applyLombokAgent(lsp, current);
-        if (!needsLombokAgentRestart(lsp)) {
+        if (!LanguageServerManager.needsLombokAgentRestart(lsp)) {
             return;
         }
         log.info("Agente do Lombok mudou; reiniciando o IntelliSense Java");
