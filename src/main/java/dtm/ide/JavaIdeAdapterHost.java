@@ -91,10 +91,16 @@ import static dtm.ide.adapter.AdapterText.text;
 
 final class JavaIdeAdapterHost implements AdapterHost {
 
-    private final JavaIdeAdapter adapter;
+    private volatile JavaIdeAdapter adapter;
 
     JavaIdeAdapterHost(JavaIdeAdapter adapter) {
         this.adapter = adapter;
+    }
+
+    void attach(JavaIdeAdapter live) {
+        if (adapter != live) {
+            adapter = live;
+        }
     }
 
     @Override

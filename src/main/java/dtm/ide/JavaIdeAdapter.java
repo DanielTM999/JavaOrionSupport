@@ -211,7 +211,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final MavenCentralClient mavenCentral = new MavenCentralClient();
     final BuildProblemsCoordinator problems = new BuildProblemsCoordinator();
     final JavaSnippetCompletionProvider snippets = new JavaSnippetCompletionProvider();
-    private final AdapterHost adapterHost = new JavaIdeAdapterHost(this);
+    private final JavaIdeAdapterHost adapterHost = new JavaIdeAdapterHost(this);
     private final SettingsChangeSupport settingsChanges = new SettingsChangeSupport(adapterHost);
     final SpringSupport spring = new SpringSupport(adapterHost);
     final CoverageSupport coverageSupport = new CoverageSupport(adapterHost);
@@ -343,6 +343,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void teardownProject(boolean switching) {
+        adapterHost.attach(this);
         Path closingRoot;
         synchronized (lifecycleLock) {
             lifecycle.incrementAndGet();
@@ -409,6 +410,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void onUnload() {
+        adapterHost.attach(this);
         unloaded = true;
         lifecycle.incrementAndGet();
         buildSupport.cancelStartupBuild();
@@ -535,6 +537,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private void bind(IdeProjectContext context) {
+        adapterHost.attach(this);
         long started = System.nanoTime();
         String callerThread = Thread.currentThread().getName();
         log.info("bind iniciado na thread {}", callerThread);
@@ -1348,6 +1351,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public void contributeMenuBar(IdeMenuBarBuilder menu) {
+        adapterHost.attach(this);
         menus.contributeMenuBar(menu);
     }
 
@@ -1669,6 +1673,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
     @Override
     public List<PluginSettingsPage> getSettingsPages() {
+        adapterHost.attach(this);
         return List.of(new JavaSettingsPage(ensureSettings(), settingsChanges::applySettings,
                 suppressions(), projectRoot));
     }
