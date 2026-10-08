@@ -45,6 +45,7 @@ import dtm.ide.api.extension.runconfig.RunBreakpointData;
 import dtm.stools.component.popup.ModernComponentDialog;
 import dtm.ide.adapter.AdapterFailures;
 import dtm.ide.adapter.AdapterHost;
+import dtm.ide.adapter.BuildSupport;
 import dtm.ide.adapter.BuildToolsSupport;
 import dtm.ide.adapter.CodeLensSupport;
 import dtm.ide.adapter.CompletionEngine;
@@ -93,20 +94,14 @@ import dtm.ide.api.project.tree.ProjectTreeIgnoreRule;
 import dtm.ide.api.theme.EditorTheme;
 import dtm.ide.api.project.diagnostics.IdeProblem;
 import dtm.ide.api.project.diagnostics.ProblemsActionHandle;
-import dtm.ide.build.BuildDiagnostic;
-import dtm.ide.build.BuildProgressTracker;
 import dtm.ide.build.ClasspathValidation;
-import dtm.ide.build.BuildRequest;
 import dtm.ide.build.BuildResult;
-import dtm.ide.build.incremental.IncrementalJavaBuilder;
-import dtm.ide.build.incremental.ModuleBuildState;
 import dtm.ide.build.BuildRunConfigurations;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.swingdesigner.SwingDesignerSupport;
 import dtm.ide.build.GradleBuildService;
 import dtm.ide.build.MavenPluginGoals;
 import dtm.ide.build.MavenBuildService;
-import dtm.ide.build.StaticAnalysisReportParser;
 import dtm.ide.build.BuildSystems;
 import dtm.ide.coverage.CoverageProvisioner;
 import dtm.ide.concurrent.PluginTaskExecutor;
@@ -130,8 +125,6 @@ import dtm.ide.navigation.JavaNavigation;
 import dtm.ide.navigation.JavaNavigation.Kind;
 import dtm.ide.navigation.JavaNavigation.Result;
 import dtm.ide.editor.theme.JavaEditorTheme;
-import dtm.ide.lsp.LanguageServers;
-import dtm.ide.lsp.LombokAgentResolver;
 import dtm.ide.lsp.LombokSupport;
 import dtm.ide.lsp.LombokSupportStatus;
 import dtm.ide.debug.BuildToolDebugListener;
@@ -150,7 +143,6 @@ import dtm.ide.project.JavaFileChangeRouter;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.project.JavaProjectSources;
-import dtm.ide.project.JdtOutputIsolation;
 import dtm.ide.refactor.JavaPathTransferPlan;
 import dtm.ide.refactor.MavenModuleRename;
 import dtm.ide.refactor.JavaPathTransferRefactoring;
@@ -200,7 +192,6 @@ import dtm.stools.component.panels.editor.code.autocomplete.AutoCompleteItem;
 import dtm.stools.component.menu.popup.ActionMenu;
 import dtm.stools.component.panels.editor.code.codelens.CodeLens;
 import dtm.stools.component.panels.editor.code.diagnostics.Diagnostic;
-import dtm.stools.component.panels.editor.code.diagnostics.DiagnosticSeverity;
 import dtm.stools.component.panels.editor.code.hover.HoverDocumentationProvider;
 import dtm.stools.component.panels.editor.code.hover.HoverInfo;
 import dtm.stools.component.popup.ModernDialog;
@@ -217,7 +208,6 @@ import java.awt.Point;
 import java.awt.SecondaryLoop;
 import java.awt.Toolkit;
 import java.awt.event.MouseEvent;
-import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -229,7 +219,6 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Objects;
@@ -244,7 +233,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.function.Consumer;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -262,10 +250,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private static final int GHOST_TEXT_IDLE_DELAY_MS = 1_000;
     private static final long PROJECT_CONFIGURATION_REQUEST_DELAY_MS = 1_500;
     private static final long PROJECT_CONFIGURATION_REQUEST_COOLDOWN_MS = 10_000;
-    private static final String BUILD_PROGRESS_ID = "javaBuild";
-    private static final String STARTUP_BUILD_PROGRESS_ID = "javaStartupBuild";
-    private static final long STARTUP_BUILD_LSP_WAIT_MS = 180_000;
-    private static final long STARTUP_BUILD_LSP_POLL_MS = 500;
     private static final String JDK_TAB_ID = "javaJdkManager";
 
     private static final String NAVIGATION_PROGRESS_ID = "javaNavigation";
@@ -515,12 +499,12 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public void writeOutput(OutputPanelHandle panel, String line) {
-            JavaIdeAdapter.this.writeOutput(panel, line);
+            buildSupport.writeOutput(panel, line);
         }
 
         @Override
         public void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure) {
-            JavaIdeAdapter.this.publishBuildDiagnostics(result, revealOnFailure);
+            buildSupport.publishBuildDiagnostics(result, revealOnFailure);
         }
 
         @Override
@@ -545,7 +529,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public void publishTestDiagnostics(BuildResult result) {
-            JavaIdeAdapter.this.publishTestDiagnostics(result);
+            buildSupport.publishTestDiagnostics(result);
         }
 
         @Override
@@ -925,7 +909,7 @@ public class JavaIdeAdapter extends IdeAdapter {
 
         @Override
         public String buildProgressAction(BuildSystem.BuildAction action) {
-            return JavaIdeAdapter.this.buildProgressAction(action);
+            return buildSupport.buildProgressAction(action);
         }
 
         @Override
@@ -960,7 +944,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     
         @Override
         public void runBuild(BuildSystem.BuildAction action, String title, JavaModule module) {
-            JavaIdeAdapter.this.runBuild(action, title, module);
+            buildSupport.runBuild(action, title, module);
         }
 
         @Override
@@ -1130,6 +1114,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     private final NavigationSupport navigationSupport = new NavigationSupport(adapterHost);
     private final LanguageServerManager languageServers = new LanguageServerManager(adapterHost);
     private final ProblemsSupport problemsSupport = new ProblemsSupport(adapterHost);
+    private final BuildSupport buildSupport = new BuildSupport(adapterHost);
     private final GhostTextSupport ghostTextSupport = new GhostTextSupport(adapterHost);
     private final JavaLexicalIndex lexicalIndex = new JavaLexicalIndex();
     private final JavaFastCompletionProvider fastCompletion =
@@ -1176,7 +1161,6 @@ public class JavaIdeAdapter extends IdeAdapter {
     private volatile DependencyService dependencyService;
     private volatile DependencyManagerCoordinator dependencyCoordinator;
     private volatile DependencyManagerPanel dependencyPanel;
-    private final AtomicReference<IncrementalJavaBuilder> startupBuilder = new AtomicReference<>();
     private final AtomicReference<JavaTestRunner> activeTestRunner = new AtomicReference<>();
     private final AtomicReference<Runnable> pendingTestDebug = new AtomicReference<>();
     private volatile JavaTestExplorerPanel testPanel;
@@ -1279,8 +1263,8 @@ public class JavaIdeAdapter extends IdeAdapter {
         runLauncher.clearRunSupport();
         closeSwingDesigner();
         runLauncher.clearRunBuildProgress();
-        cancelStartupBuild();
-        hideProgress(STARTUP_BUILD_PROGRESS_ID);
+        buildSupport.cancelStartupBuild();
+        hideProgress(BuildSupport.STARTUP_BUILD_PROGRESS_ID);
         debugSupport.closeDebugSession();
         activeJavaEditor = null;
         runLauncher.clearSelectedRunConfig();
@@ -1326,7 +1310,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     public void onUnload() {
         unloaded = true;
         lifecycle.incrementAndGet();
-        cancelStartupBuild();
+        buildSupport.cancelStartupBuild();
         background.close();
         closeSwingDesigner();
         dtm.ide.run.OwnedRunProcesses.shutdownAll();
@@ -1613,110 +1597,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                         + " " + resolution.requestedMajor());
             }
             startLanguageServer(ticket, root, resolution.installation());
-            background.submit(() -> startupBuild(ticket, root));
+            background.submit(() -> buildSupport.startupBuild(ticket, root));
         });
-    }
-
-    private void startupBuild(long ticket, Path root) {
-        if (!settings().isBuildOnProjectOpen() || !current(ticket, root)) {
-            return;
-        }
-        JavaProjectDescriptor current = descriptor;
-        BuildSystem build = ensureBuildSystem();
-        if (current == null || build == null || current.rootModule() == null) {
-            return;
-        }
-        if (isStartupBuildCached(current, build)) {
-            setStatusBarText(text("status.buildCached", "Java: build em cache (sem mudancas)"));
-            return;
-        }
-        awaitLanguageServerBeforeBuild(ticket, root);
-        if (!current(ticket, root) || build.isRunning() || !buildRunning.compareAndSet(false, true)) {
-            return;
-        }
-        if (isStartupBuildCached(current, build)) {
-            buildRunning.set(false);
-            setStatusBarText(text("status.buildCached", "Java: build em cache (sem mudancas)"));
-            return;
-        }
-
-        BuildProgressTracker progress = new BuildProgressTracker(
-                text("progress.buildingModule", "Buildando modulo"), current, null,
-                update -> updateProgress(STARTUP_BUILD_PROGRESS_ID,
-                        update.label(), update.percent()));
-        BuildProgressTracker.Update initial = progress.initial();
-        showProgress(STARTUP_BUILD_PROGRESS_ID, initial.label(), true, this::cancelStartupBuild);
-        if (initial.percent() >= 0) {
-            updateProgress(STARTUP_BUILD_PROGRESS_ID, initial.label(), initial.percent());
-        }
-        try {
-            BuildResult result = runStartupBuild(current, build, progress);
-            if (!current(ticket, root)) {
-                return;
-            }
-            publishBuildDiagnostics(result, true);
-            setStatusBarText(result.summary().isEmpty() ? "" : "Java: " + result.summary());
-        } finally {
-            startupBuilder.set(null);
-            BuildProgressTracker.Update completed = progress.completed();
-            updateProgress(STARTUP_BUILD_PROGRESS_ID, completed.label(), completed.percent());
-            hideProgress(STARTUP_BUILD_PROGRESS_ID);
-            buildRunning.set(false);
-        }
-    }
-
-    private boolean isStartupBuildCached(JavaProjectDescriptor current, BuildSystem build) {
-        if (!settings().isIncrementalBuild()) {
-            return false;
-        }
-        try {
-            return new IncrementalJavaBuilder(current, () -> build, this::getProjectJdk)
-                    .isUpToDate(current.rootModule());
-        } catch (Exception e) {
-            log.debug("Falha ao verificar o cache do build incremental: {}", e.getMessage());
-            return false;
-        }
-    }
-
-    private void awaitLanguageServerBeforeBuild(long ticket, Path root) {
-        JavaLanguageServer lsp = jdtLs;
-        if (lsp == null) {
-            return;
-        }
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(STARTUP_BUILD_LSP_WAIT_MS);
-        while (current(ticket, root) && System.nanoTime() < deadline) {
-            LanguageServerState state = lsp.getState();
-            if (state != LanguageServerState.STARTING && state != LanguageServerState.INDEXING) {
-                return;
-            }
-            lsp.awaitReady(STARTUP_BUILD_LSP_POLL_MS);
-        }
-    }
-
-    private BuildResult runStartupBuild(JavaProjectDescriptor current, BuildSystem build,
-                                        BuildProgressTracker progress) {
-        JavaModule rootModule = current.rootModule();
-        if (settings().isIncrementalBuild()) {
-            IncrementalJavaBuilder builder =
-                    new IncrementalJavaBuilder(current, this::ensureBuildSystem, this::getProjectJdk)
-                            .withModuleListener(progress::moduleStarted);
-            if (builder.isApplicable(rootModule)) {
-                startupBuilder.set(builder);
-                return builder.build(rootModule, false, progress);
-            }
-        }
-        return executeBuild(BuildSystem.BuildAction.COMPILE, build, null, progress);
-    }
-
-    private void cancelStartupBuild() {
-        IncrementalJavaBuilder builder = startupBuilder.getAndSet(null);
-        if (builder != null) {
-            builder.cancel();
-        }
-        BuildSystem build = buildSystem;
-        if (build != null && build.isRunning()) {
-            build.cancel();
-        }
     }
 
     private void promptForProjectJdk(long ticket, Path root, JdkService.JdkResolution resolution) {
@@ -3564,127 +3446,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     public void runBuild(BuildSystem.BuildAction action, String title) {
-        runBuild(action, title, null);
-    }
-
-    private void runBuild(BuildSystem.BuildAction action, String title, JavaModule requestedModule) {
-        Path root = projectRoot;
-        BuildSystem build = ensureBuildSystem();
-        if (root == null || build == null) {
-            return;
-        }
-        if (build.isRunning() || !buildRunning.compareAndSet(false, true)) {
-            setStatusBarText(text("status.buildRunning", "Java: ja existe um build em andamento"));
-            return;
-        }
-
-        long ticket = lifecycle.get();
-        JavaModule module = requestedModule != null && requestedModule.isAggregator()
-                ? null : requestedModule;
-        BuildProgressTracker progress = new BuildProgressTracker(
-                buildProgressAction(action), descriptor, module,
-                update -> updateProgress(BUILD_PROGRESS_ID, update.label(), update.percent()));
-        BuildProgressTracker.Update initial = progress.initial();
-        showProgress(BUILD_PROGRESS_ID, initial.label());
-        if (initial.percent() >= 0) {
-            updateProgress(BUILD_PROGRESS_ID, initial.label(), initial.percent());
-        }
-        background.submit(() -> {
-            try {
-                BuildResult result = executeBuild(action, build, module, progress);
-                if (!current(ticket, root)) {
-                    return;
-                }
-                publishBuildDiagnostics(result, true);
-                setStatusBarText(result.summary().isEmpty() ? "" : "Java: " + result.summary());
-            } finally {
-                BuildProgressTracker.Update completed = progress.completed();
-                updateProgress(BUILD_PROGRESS_ID, completed.label(), completed.percent());
-                hideProgress(BUILD_PROGRESS_ID);
-                buildRunning.set(false);
-            }
-        });
-    }
-
-    private BuildResult executeBuild(BuildSystem.BuildAction action, BuildSystem build,
-                                     JavaModule module, Consumer<String> output) {
-        JavaPluginSettings preferences = settings();
-        if (action == BuildSystem.BuildAction.REBUILD || action == BuildSystem.BuildAction.CLEAN) {
-            discardIncrementalState();
-        }
-        JavaProjectDescriptor current = descriptor;
-        if ((action == BuildSystem.BuildAction.COMPILE || action == BuildSystem.BuildAction.TEST_COMPILE)
-                && preferences.isIncrementalBuild() && current != null) {
-            JavaModule target = module == null ? current.rootModule() : module;
-            IncrementalJavaBuilder builder =
-                    new IncrementalJavaBuilder(current, () -> build, this::getProjectJdk);
-            if (target != null && builder.isApplicable(target)) {
-                return builder.build(target, action == BuildSystem.BuildAction.TEST_COMPILE, output);
-            }
-        }
-        BuildRequest request = BuildRequest.of(action, module)
-                .withOffline(preferences.isBuildOffline());
-        return build.execute(request, output);
-    }
-
-    private void discardIncrementalState() {
-        if (descriptor == null || descriptor.root() == null) {
-            return;
-        }
-        ModuleBuildState.discard(IncrementalJavaBuilder.stateDirectory(descriptor.root()));
-    }
-
-    private String buildProgressAction(BuildSystem.BuildAction action) {
-        return switch (action) {
-            case COMPILE -> text("progress.compiling", "Compilando");
-            case TEST_COMPILE -> text("progress.testCompiling", "Compilando testes");
-            case REBUILD -> text("progress.rebuilding", "Recompilando");
-            case CLEAN -> text("progress.cleaning", "Limpando");
-            case TEST -> text("progress.testing", "Executando testes");
-            case PACKAGE -> text("progress.packaging", "Empacotando");
-            case INSTALL -> text("progress.installing", "Instalando");
-        };
-    }
-
-    private void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure) {
-        publishBuildDiagnostics(result, revealOnFailure, BuildProblemsCoordinator.Channel.BUILD);
-    }
-
-    private void publishTestDiagnostics(BuildResult result) {
-        publishBuildDiagnostics(result, true, BuildProblemsCoordinator.Channel.TEST);
-    }
-
-    private void publishBuildDiagnostics(BuildResult result, boolean revealOnFailure,
-                                         BuildProblemsCoordinator.Channel channel) {
-        if (result == null) {
-            return;
-        }
-        List<BuildDiagnostic> reported = new ArrayList<>(result.diagnostics());
-        reported.addAll(StaticAnalysisReportParser.discover(descriptor));
-        List<BuildDiagnostic> published = !reported.isEmpty() || result.successful()
-                ? List.copyOf(reported)
-                : List.of(new BuildDiagnostic(null, 0, 0, DiagnosticSeverity.ERROR,
-                        result.summary(), "build"));
-        Set<Path> affected = problems.replace(channel, published);
-        affected.forEach(this::requestRefreshDiagnostics);
-
-        refreshProblemsPanel();
-        if (revealOnFailure && !result.successful()) {
-            SwingUtilities.invokeLater(this::requestOpenProblemsPanel);
-        }
-    }
-
-    private void writeOutput(OutputPanelHandle panel, String line) {
-        if (panel == null) {
-            return;
-        }
-        try {
-            panel.getOutputStream().write((line + System.lineSeparator())
-                    .getBytes(StandardCharsets.UTF_8));
-            panel.getOutputStream().flush();
-        } catch (Exception e) {
-            log.debug("Falha ao escrever no painel de saida: {}", e.getMessage());
-        }
+        buildSupport.runBuild(action, title, null);
     }
 
     public void openDependencyManager() {
