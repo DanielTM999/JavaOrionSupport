@@ -9,7 +9,6 @@ import dtm.ide.build.BuildResult;
 import dtm.ide.build.BuildSystem;
 import dtm.ide.build.StaticAnalysisReportParser;
 import dtm.ide.build.incremental.IncrementalJavaBuilder;
-import dtm.ide.build.incremental.ModuleBuildState;
 import dtm.ide.lsp.api.JavaLanguageServer;
 import dtm.ide.lsp.api.LanguageServerState;
 import dtm.ide.project.JavaModule;
@@ -186,11 +185,11 @@ public final class BuildSupport {
         });
     }
 
-    private BuildResult executeBuild(BuildSystem.BuildAction action, BuildSystem build,
+    BuildResult executeBuild(BuildSystem.BuildAction action, BuildSystem build,
                                      JavaModule module, Consumer<String> output) {
         JavaPluginSettings preferences = host.settings();
         if (action == BuildSystem.BuildAction.REBUILD || action == BuildSystem.BuildAction.CLEAN) {
-            discardIncrementalState();
+            dtm.ide.build.ProjectBuildCaches.invalidate(build, host.projectRoot());
         }
         JavaProjectDescriptor current = host.descriptor();
         if ((action == BuildSystem.BuildAction.COMPILE || action == BuildSystem.BuildAction.TEST_COMPILE)
@@ -205,13 +204,6 @@ public final class BuildSupport {
         BuildRequest request = BuildRequest.of(action, module)
                 .withOffline(preferences.isBuildOffline());
         return build.execute(request, output);
-    }
-
-    private void discardIncrementalState() {
-        if (host.descriptor() == null || host.descriptor().root() == null) {
-            return;
-        }
-        ModuleBuildState.discard(IncrementalJavaBuilder.stateDirectory(host.descriptor().root()));
     }
 
     public String buildProgressAction(BuildSystem.BuildAction action) {

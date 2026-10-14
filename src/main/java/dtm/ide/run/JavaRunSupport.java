@@ -583,13 +583,16 @@ public class JavaRunSupport {
         if (classpath.isPresent() && !classpath.get().isBlank()) {
             return classpath.get();
         }
-        if (build != null) {
-            notice(text("warn.classpathUnresolved",
-                    "Aviso: nao foi possivel resolver as dependencias do modulo")
-                    + " " + module.name() + "; "
-                    + text("warn.classpathFallback",
-                    "executando apenas com as classes do workspace (bibliotecas externas ausentes)."));
-            build.lastClasspathFailure(module).ifPresent(this::notice);
+        JavaProjectDescriptor descriptor = descriptorSupplier.get();
+        if (build != null || (descriptor != null && descriptor.kind().hasBuildTool())) {
+            String message = text("error.classpathUnresolved",
+                    "Nao foi possivel resolver o classpath do modulo; a execucao foi cancelada:")
+                    + " " + module.name();
+            if (build != null) {
+                String details = build.lastClasspathFailure(module).orElse("");
+                if (!details.isBlank()) message += System.lineSeparator() + details;
+            }
+            throw new IllegalStateException(message);
         }
         log.info("Classpath nao resolvido; usando apenas as classes compiladas do projeto a partir de {}",
                 module.root());

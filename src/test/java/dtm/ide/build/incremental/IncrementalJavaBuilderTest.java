@@ -449,6 +449,61 @@ class IncrementalJavaBuilderTest {
     }
 
     @Test
+    void changingADependencyPomRefreshesTheConsumersClasspath() {
+        pom("persistence");
+        write(pomFile(), webPomWithPersistence(""));
+        source("Lojista.java", "package a; public class Lojista {}");
+        builder(descriptorWith("web", "persistence")).build(module(), false, line -> { });
+        build.requests.clear();
+        int resolutions = build.classpathResolutions;
+        write(root.resolve("persistence/pom.xml"),
+                "<project><groupId>com.example</groupId><artifactId>persistence</artifactId>"
+                        + "<dependencies><dependency><groupId>org.example</groupId>"
+                        + "<artifactId>new-api</artifactId><version>1</version>"
+                        + "</dependency></dependencies></project>");
+
+        BuildResult result = builder(descriptorWith("web", "persistence"))
+                .build(module(), false, line -> { });
+
+        assertTrue(result.successful());
+        assertTrue(build.classpathResolutions > resolutions);
+        assertEquals(List.of("persistence", "web"), build.requests.getFirst().modules().stream()
+                .map(JavaModule::artifactId).toList());
+    }
+
+    @Test
+    void changingAnUnrelatedModulesPomKeepsTheIncrementalState() {
+        pom("unrelated");
+        source("Lojista.java", "package a; public class Lojista {}");
+        builder(descriptorWith("web", "unrelated")).build(module(), false, line -> { });
+        build.requests.clear();
+        int resolutions = build.classpathResolutions;
+        write(root.resolve("unrelated/pom.xml"), "<project><!-- changed --></project>");
+
+        BuildResult result = builder(descriptorWith("web", "unrelated"))
+                .build(module(), false, line -> { });
+
+        assertTrue(result.successful());
+        assertEquals(resolutions, build.classpathResolutions);
+        assertTrue(build.requests.isEmpty());
+    }
+
+    @Test
+    void changingMavenConfigurationRefreshesTheIncrementalClasspath() {
+        source("Lojista.java", "package a; public class Lojista {}");
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+        int resolutions = build.classpathResolutions;
+        write(root.resolve(".mvn/maven.config"), "-Pnew-profile");
+
+        BuildResult result = builder().build(module(), false, line -> { });
+
+        assertTrue(result.successful());
+        assertTrue(build.classpathResolutions > resolutions);
+        assertEquals(1, build.requests.size());
+    }
+
+    @Test
     void theModuleListenerAnnouncesTheBatchOnItsFirstModule() {
         pom("persistence");
         write(pomFile(), "<project><groupId>com.example</groupId><artifactId>web</artifactId>"

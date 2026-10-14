@@ -232,34 +232,39 @@ class JavaRunSupportTest {
     }
 
     @Test
-    void fallsBackToCompiledClassesWhenTheClasspathCannotBeResolved() {
+    void unresolvedMavenClasspathCancelsTheRunInsteadOfDroppingLibraries() throws Exception {
         JavaRunSupport withoutClasspath = new JavaRunSupport(() -> descriptor, () -> jdk,
-                () -> new FakeBuildSystem(true, false), line -> {
-        });
-
-        JavaRunSupport.LaunchCommand launch = withoutClasspath.buildCommand(
-                configuration(JavaRunSupport.TYPE_RUN,
-                        Map.of(JavaRunSupport.PROPERTY_MAIN_CLASS, "com.example.Main")),
-                descriptor, jdk, 0);
-
-        int classpathIndex = launch.command().indexOf("-cp");
-        assertEquals(root.resolve("target/classes").toString(),
-                launch.command().get(classpathIndex + 1));
+                () -> new FakeBuildSystem(true, false), line -> {});
+        RunConfigurationData config = configuration(JavaRunSupport.TYPE_RUN,
+                Map.of(JavaRunSupport.PROPERTY_MAIN_CLASS, "com.example.Main"));
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> withoutClasspath.buildCommand(config, descriptor, jdk, 0));
+        assertTrue(failure.getMessage().contains("demo"));
+        assertTrue(failure.getMessage().contains("[ERROR] dependencia ausente"));
+        var handle = withoutClasspath.launch(config, null, 0);
+        assertFalse(handle.isAlive());
+        assertTrue(handle.isReadonly());
+        assertTrue(new String(handle.getOutput().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+                .contains("[ERROR] dependencia ausente"));
     }
 
     @Test
-    void anUnresolvedClasspathIsReportedInsteadOfSilentlyDroppingTheLibraries() {
-        List<String> output = new java.util.ArrayList<>();
-        JavaRunSupport withoutClasspath = new JavaRunSupport(() -> descriptor, () -> jdk,
-                () -> new FakeBuildSystem(true, false), output::add);
+    void mavenWithoutAnAvailableBuildServiceCannotLaunchAnIncompleteClasspath() {
+        JavaRunSupport withoutBuild = new JavaRunSupport(() -> descriptor, () -> jdk, () -> null, line -> {});
+        assertThrows(IllegalStateException.class, () -> withoutBuild.buildCommand(
+                configuration(JavaRunSupport.TYPE_RUN, Map.of(JavaRunSupport.PROPERTY_MAIN_CLASS, "Main")),
+                descriptor, jdk, 0));
+    }
 
-        withoutClasspath.buildCommand(configuration(JavaRunSupport.TYPE_RUN,
-                        Map.of(JavaRunSupport.PROPERTY_MAIN_CLASS, "com.example.Main")),
-                descriptor, jdk, 0);
-
-        assertTrue(output.stream().anyMatch(line -> line.contains("demo")
-                && line.contains("classes do workspace")), String.join("\n", output));
-        assertTrue(output.contains("[ERROR] dependencia ausente"), String.join("\n", output));
+    @Test
+    void plainJavaCanUseWorkspaceOutputsWithoutABuildTool() {
+        descriptor = new JavaProjectDescriptor(root, JavaProjectKind.PLAIN_JAVA, descriptor.modules(),
+                false, false, 21, null);
+        JavaRunSupport plain = new JavaRunSupport(() -> descriptor, () -> jdk, () -> null, line -> {});
+        var launch = plain.buildCommand(configuration(JavaRunSupport.TYPE_RUN,
+                Map.of(JavaRunSupport.PROPERTY_MAIN_CLASS, "Main")), descriptor, jdk, 0);
+        assertEquals(root.resolve("target/classes").toString(),
+                launch.command().get(launch.command().indexOf("-cp") + 1));
     }
 
     @Test

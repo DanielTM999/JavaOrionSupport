@@ -173,7 +173,173 @@ class MavenBuildServiceTest {
         assertTrue(output.contains("OPTS -Dorion.debug=on"), String.join("\n", output));
     }
 
+    @Test
+    void multimoduleResolutionUsesCurrentReactorInsteadOfInstalledSiblingPoms() throws Exception {
+        JavaModule app = module(root.resolve("app"));
+        Path currentJar = java.nio.file.Files.writeString(root.resolve("current.jar"), "jar");
+        var calls = new java.util.ArrayList<List<String>>();
+        MavenBuildService service = service(descriptor(rootModule(), app), (command, directory, env, out) -> {
+            calls.add(command);
+            assertEquals(root, directory);
+            assertTrue(command.contains("-am"));
+            assertEquals("app", command.get(command.indexOf("-pl") + 1));
+            return writeClasspath(command, directory, currentJar.toString());
+        });
+        assertTrue(service.resolveRuntimeClasspath(app).orElseThrow().contains(currentJar.toString()));
+        assertEquals(1, calls.size());
+    }
+
+    @Test
+    void failedReactorResolutionCannotFallBackToObsoleteInstalledDependencies() {
+        JavaModule app = module(root.resolve("app"));
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        MavenBuildService service = service(descriptor(rootModule(), app), (command, directory, env, out) -> {
+            calls.incrementAndGet();
+            assertEquals(root, directory);
+            out.accept("[ERROR] Current reactor dependency is unavailable");
+            return 1;
+        });
+        assertTrue(service.resolveRuntimeClasspath(app).isEmpty());
+        assertEquals(1, calls.get());
+        assertTrue(service.lastClasspathFailure(app).orElseThrow().contains("reactor dependency"));
+    }
+
+    @Test
+    void pomChangesInvalidateTheClasspathAlreadyLoadedInMemory() throws Exception {
+        JavaModule app = module(root.resolve("app"));
+        java.nio.file.Files.createDirectories(app.root());
+        Path pom = java.nio.file.Files.writeString(app.root().resolve("pom.xml"), "<project/>");
+        Path first = java.nio.file.Files.writeString(root.resolve("first.jar"), "jar");
+        Path added = java.nio.file.Files.writeString(root.resolve("added.jar"), "jar");
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        MavenBuildService service = service(descriptor(rootModule(), app), (command, directory, env, out) ->
+                writeClasspath(command, directory, calls.incrementAndGet() == 1 ? first.toString() : added.toString()));
+        assertTrue(service.resolveRuntimeClasspath(app).orElseThrow().contains(first.toString()));
+        assertTrue(service.resolveRuntimeClasspath(app).orElseThrow().contains(first.toString()));
+        assertEquals(1, calls.get());
+        java.nio.file.Files.writeString(pom, "<project><!-- added dependency --></project>");
+        assertTrue(service.resolveRuntimeClasspath(app).orElseThrow().contains(added.toString()));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void deletedJarsCannotRemainInTheInMemoryClasspath() throws Exception {
+        JavaModule module = rootModule();
+        Path first = java.nio.file.Files.writeString(root.resolve("first.jar"), "jar");
+        Path second = java.nio.file.Files.writeString(root.resolve("second.jar"), "jar");
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        MavenBuildService service = service(descriptor(module), (command, directory, env, out) ->
+                writeClasspath(command, directory, calls.incrementAndGet() == 1 ? first.toString() : second.toString()));
+        assertTrue(service.resolveRuntimeClasspath(module).orElseThrow().contains(first.toString()));
+        java.nio.file.Files.delete(first);
+        assertTrue(service.resolveRuntimeClasspath(module).orElseThrow().contains(second.toString()));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void clearingProjectCachesDropsMemoryPersistedAndIncrementalData() throws Exception {
+        JavaModule module = rootModule();
+        Path first = java.nio.file.Files.writeString(root.resolve("first.jar"), "jar");
+        Path second = java.nio.file.Files.writeString(root.resolve("second.jar"), "jar");
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        MavenBuildService service = service(descriptor(module), (command, directory, env, out) ->
+                writeClasspath(command, directory, calls.incrementAndGet() == 1 ? first.toString() : second.toString()));
+        assertTrue(service.resolveRuntimeClasspath(module).orElseThrow().contains(first.toString()));
+        Path incremental = root.resolve(".orion/incremental/state.txt");
+        java.nio.file.Files.createDirectories(incremental.getParent());
+        java.nio.file.Files.writeString(incremental, "cached");
+        ProjectBuildCaches.invalidate(service, root);
+        assertFalse(java.nio.file.Files.exists(incremental));
+        try (var files = java.nio.file.Files.list(root.resolve(".orion/classpath"))) {
+            assertEquals(0, files.count());
+        }
+        assertTrue(service.resolveRuntimeClasspath(module).orElseThrow().contains(second.toString()));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void noExternalDependenciesIsAValidClasspathAndCanBePersisted() {
+        JavaModule module = rootModule();
+        MavenBuildService service = service(descriptor(module), (command, directory, env, out) ->
+                writeClasspath(command, directory, ""));
+        assertEquals(module.outputDir().toString(), service.resolveRuntimeClasspath(module).orElseThrow());
+        MavenBuildService reopened = service(descriptor(module), (command, directory, env, out) -> {
+            throw new AssertionError("The successful empty dependency list should be reusable");
+        });
+        assertEquals(module.outputDir().toString(), reopened.resolveRuntimeClasspath(module).orElseThrow());
+    }
+
+    @Test
+    void clearingDuringResolutionPreventsTheOldResultFromRepopulatingCaches() throws Exception {
+        JavaModule module = rootModule();
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var answer = new java.util.concurrent.atomic.AtomicReference<java.util.Optional<String>>();
+        MavenBuildService service = service(descriptor(module), (command, directory, env, out) -> {
+            entered.countDown();
+            try {
+                assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                return writeClasspath(command, directory, "");
+            } catch (InterruptedException e) { throw new AssertionError(e); }
+        });
+        Thread resolving = Thread.ofVirtual().start(() -> answer.set(service.resolveRuntimeClasspath(module)));
+        try {
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            service.invalidateClasspathCache();
+        } finally { release.countDown(); }
+        assertTrue(resolving.join(java.time.Duration.ofSeconds(5)));
+        assertEquals(java.util.Optional.empty(), answer.get());
+        Path persisted = root.resolve(".orion/classpath/" + module.artifactId() + "-runtime.classpath");
+        assertFalse(java.nio.file.Files.exists(persisted));
+        assertEquals(module.outputDir().toString(), service.resolveRuntimeClasspath(module).orElseThrow());
+    }
+
+    @Test
+    void aRecreatedServiceDoesNotShareThePendingReactorsOutputFile() throws Exception {
+        JavaModule app = module(root.resolve("app"));
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var pendingFile = new java.util.concurrent.atomic.AtomicReference<Path>();
+        MavenBuildService previous = service(descriptor(rootModule(), app), (command, directory, env, out) -> {
+            String relative = command.stream().filter(arg -> arg.startsWith("-Dmdep.outputFile="))
+                    .findFirst().orElseThrow().substring("-Dmdep.outputFile=".length());
+            pendingFile.set(app.root().resolve(relative));
+            entered.countDown();
+            try {
+                assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                return writeClasspath(command, directory, "");
+            } catch (InterruptedException e) { throw new AssertionError(e); }
+        });
+        Thread pending = Thread.ofVirtual().start(() -> previous.resolveRuntimeClasspath(app));
+        try {
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            previous.invalidateClasspathCache();
+            MavenBuildService recreated = service(descriptor(rootModule(), app), (command, directory, env, out) ->
+                    writeClasspath(command, directory, ""));
+            assertTrue(recreated.resolveRuntimeClasspath(app).isPresent());
+            assertTrue(java.nio.file.Files.exists(pendingFile.get()), "The new service must not delete the old query's file");
+        } finally { release.countDown(); }
+        assertTrue(pending.join(java.time.Duration.ofSeconds(5)));
+    }
+
+    private static int writeClasspath(List<String> command, Path directory, String classpath) {
+        try {
+            String output = command.stream().filter(arg -> arg.startsWith("-Dmdep.outputFile="))
+                    .findFirst().orElseThrow().substring("-Dmdep.outputFile=".length());
+            Path moduleDirectory = command.contains("-pl")
+                    ? directory.resolve(command.get(command.indexOf("-pl") + 1)) : directory;
+            Path file = moduleDirectory.resolve(output);
+            java.nio.file.Files.createDirectories(file.getParent());
+            java.nio.file.Files.writeString(file, classpath);
+            return 0;
+        } catch (Exception e) { throw new AssertionError(e); }
+    }
+
     private MavenBuildService service(JavaProjectDescriptor descriptor) {
+        return service(descriptor, null);
+    }
+
+    private MavenBuildService service(JavaProjectDescriptor descriptor, MavenBuildService.ClasspathCommand runner) {
         BuildToolProvisioner provisioner = new BuildToolProvisioner(null, null) {
             @Override
             public BuildTool ensureMaven(JavaProjectDescriptor ignored,
@@ -181,7 +347,7 @@ class MavenBuildServiceTest {
                 return new BuildTool(executable(), ToolOrigin.PATH);
             }
         };
-        return new MavenBuildService(descriptor, provisioner, null, null);
+        return new MavenBuildService(descriptor, provisioner, null, null, runner);
     }
 
     private Path executable() {

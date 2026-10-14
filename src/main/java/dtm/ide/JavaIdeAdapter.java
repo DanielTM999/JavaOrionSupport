@@ -502,6 +502,7 @@ public class JavaIdeAdapter extends IdeAdapter {
         synchronized (lifecycleLock) {
             ticket = lifecycle.incrementAndGet();
         }
+        dtm.ide.build.ProjectBuildCaches.invalidate(buildSystem, root);
         buildSystem = null;
         dependencyService = null;
         problems.clearAll();

@@ -968,5 +968,6 @@
   "JavaModuleRenameDialogPanel.error.invalid": "The name contains characters that are not allowed.",
   "JavaModuleRenameDialogPanel.error.same": "The new name is the same as the current one.",
   "JavaModuleRenameDialogPanel.error.exists": "A folder with that name already exists.",
-  "JavaModuleRenameDialogPanel.error.artifactInUse": "Another module of the project already uses that artifactId."
+  "JavaModuleRenameDialogPanel.error.artifactInUse": "Another module of the project already uses that artifactId.",
+  "JavaRunSupport.error.classpathUnresolved": "Could not resolve the module classpath; execution was cancelled:"
 }

@@ -721,11 +721,16 @@ public final class IncrementalJavaBuilder {
 
     private String localFingerprintOf(JavaModule module) {
         JdkInstallation jdk = jdkSupplier.get();
-        return ModuleBuildState.fingerprintOf(
-                ModuleBuildState.FORMAT_VERSION,
-                hashOfFile(module.root().resolve(JavaProjectConventions.POM_FILE)),
-                hashOfFile(descriptor.root().resolve(JavaProjectConventions.POM_FILE)),
-                jdk == null ? "" : jdk.home().toString());
+        List<String> inputs = new ArrayList<>();
+        inputs.add(ModuleBuildState.FORMAT_VERSION);
+        inputs.add(jdk == null ? "" : jdk.home().toString());
+        inputs.add(hashOfFile(descriptor.root().resolve(JavaProjectConventions.POM_FILE)));
+        inputs.add(hashOfFile(descriptor.root().resolve(".mvn/maven.config")));
+        for (JavaModule dependency : WorkspaceModuleGraph.of(descriptor).buildOrderFor(module)) {
+            inputs.add(dependency.root().toString());
+            inputs.add(hashOfFile(dependency.root().resolve(JavaProjectConventions.POM_FILE)));
+        }
+        return ModuleBuildState.fingerprintOf(inputs.toArray(String[]::new));
     }
 
     private boolean outputIsComplete(JavaModule module, boolean test, List<Path> sources) {

@@ -33,13 +33,23 @@ public final class MavenBuildService implements BuildSystem {
     private final DownloadProgressListener progressListener;
     private final ProcessRunner runner = new ProcessRunner();
     private final ProcessRunner classpathRunner = new ProcessRunner();
-    private final Map<String, String> classpathCache = new ConcurrentHashMap<>();
+    private final Map<String, CachedClasspath> classpathCache = new ConcurrentHashMap<>();
+    private final Object cacheLock = new Object();
+    private long cacheGeneration;
+    private final ClasspathCommand classpathCommand;
+
+    private record CachedClasspath(String fingerprint, String value) { }
+
+    @FunctionalInterface
+    interface ClasspathCommand {
+        int run(List<String> command, Path directory, Map<String, String> environment, Consumer<String> output);
+    }
     private final Map<Path, String> lastClasspathFailures = new ConcurrentHashMap<>();
 
     private static final String TEST_OUTPUT_DIR = "target/test-classes";
     private static final String REACTOR_CLASSPATH_FILE = "target/orion-classpath.txt";
     private static final String PERSISTED_CLASSPATH_DIR = ".orion/classpath";
-    private static final String PERSISTED_CLASSPATH_FORMAT = "1";
+    private static final String PERSISTED_CLASSPATH_FORMAT = "2";
     private static final int MAX_FAILURE_LINES = 12;
 
     private volatile Supplier<Set<String>> activeProfiles;
@@ -47,6 +57,13 @@ public final class MavenBuildService implements BuildSystem {
     public MavenBuildService(JavaProjectDescriptor descriptor, BuildToolProvisioner provisioner,
                              Supplier<JdkInstallation> jdkSupplier,
                              DownloadProgressListener progressListener) {
+        this(descriptor, provisioner, jdkSupplier, progressListener, null);
+    }
+
+    MavenBuildService(JavaProjectDescriptor descriptor, BuildToolProvisioner provisioner,
+                      Supplier<JdkInstallation> jdkSupplier, DownloadProgressListener progressListener,
+                      ClasspathCommand classpathCommand) {
+        this.classpathCommand = classpathCommand == null ? classpathRunner::run : classpathCommand;
         this.descriptor = descriptor;
         this.provisioner = provisioner;
         this.jdkSupplier = jdkSupplier;
@@ -128,34 +145,46 @@ public final class MavenBuildService implements BuildSystem {
         return resolveClasspath(module, "compile");
     }
 
-    private Optional<String> resolveClasspath(JavaModule module, String scope) {
-        if (module == null) {
-            return Optional.empty();
-        }
+    private synchronized Optional<String> resolveClasspath(JavaModule module, String scope) {
+        if (module == null) return Optional.empty();
         boolean test = "test".equals(scope);
         String key = cacheKey(module, scope);
-        String cached = classpathCache.get(key);
-        if (cached != null) {
-            return Optional.of(cached);
-        }
         String fingerprint = persistentFingerprint(module, scope);
-        Optional<String> resolved = readPersisted(module, scope, fingerprint);
-        if (resolved.isEmpty()) {
-            resolved = resolveInModule(module, scope);
-            if (resolved.isEmpty()) {
-                resolved = resolveInReactor(module, scope);
+        long generation;
+        synchronized (cacheLock) {
+            generation = cacheGeneration;
+            CachedClasspath cached = classpathCache.get(key);
+            if (cached != null && cached.fingerprint().equals(fingerprint)
+                    && !ClasspathValidation.hasMissingJar(cached.value())) {
+                return Optional.of(cached.value());
             }
-            if (resolved.isEmpty()) {
-                return Optional.empty();
+            classpathCache.remove(key);
+        }
+        Optional<String> resolved = readPersisted(module, scope, fingerprint);
+        boolean fresh = resolved.isEmpty();
+        if (fresh) {
+            // Module-only Maven resolution consults installed sibling POMs, which may be obsolete.
+            resolved = usesReactor(module) ? resolveInReactor(module, scope) : resolveInModule(module, scope);
+            if (resolved.isEmpty()) return Optional.empty();
+        }
+        if (ClasspathValidation.hasMissingJar(resolved.get())) return Optional.empty();
+        String dependencies = ReactorClasspath.substituteWorkspaceModules(resolved.get(), descriptor, module, test);
+        String full = prefixOutputDirs(module, test)
+                + (dependencies.isBlank() ? "" : java.io.File.pathSeparator + dependencies);
+        String currentFingerprint = persistentFingerprint(module, scope);
+        synchronized (cacheLock) {
+            if (generation != cacheGeneration || !fingerprint.equals(currentFingerprint)) {
+                return Optional.empty(); // A concurrent clear or POM change invalidated this resolution.
             }
             lastClasspathFailures.remove(module.root());
-            persist(module, scope, fingerprint, resolved.get());
+            if (fresh) persist(module, scope, fingerprint, resolved.get());
+            classpathCache.put(key, new CachedClasspath(fingerprint, full));
         }
-        String full = prefixOutputDirs(module, test)
-                + ReactorClasspath.substituteWorkspaceModules(resolved.get(), descriptor, module,
-                        test);
-        classpathCache.put(key, full);
         return Optional.of(full);
+    }
+
+    private boolean usesReactor(JavaModule module) {
+        return !module.root().equals(descriptor.root()) && descriptor.modules().size() > 1;
     }
 
     private Path persistedFile(JavaModule module, String scope) {
@@ -204,7 +233,7 @@ public final class MavenBuildService implements BuildSystem {
                 return Optional.empty();
             }
             String classpath = lines.get(1).trim();
-            if (classpath.isBlank() || ClasspathValidation.hasMissingJar(classpath)) {
+            if (ClasspathValidation.hasMissingJar(classpath)) {
                 return Optional.empty();
             }
             return Optional.of(classpath);
@@ -236,7 +265,7 @@ public final class MavenBuildService implements BuildSystem {
             appendActiveProfiles(command);
 
             List<String> errors = new ArrayList<>();
-            int exitCode = classpathRunner.run(command, module.root(),
+            int exitCode = classpathCommand.run(command, module.root(),
                     environmentFor(BuildRequest.of(BuildAction.COMPILE, module)),
                     line -> collectError(errors, line));
             if (exitCode != 0) {
@@ -256,10 +285,14 @@ public final class MavenBuildService implements BuildSystem {
         if (module.root().equals(descriptor.root())) {
             return Optional.empty();
         }
-        Path outputFile = module.root().resolve(REACTOR_CLASSPATH_FILE);
+        Path outputFile = null;
         try {
+            Path outputDirectory = module.root().resolve("target");
+            Files.createDirectories(outputDirectory);
+            outputFile = Files.createTempFile(outputDirectory, "orion-classpath-", ".txt");
+            String relativeOutput = module.root().relativize(outputFile).toString().replace('\\', '/');
             List<String> errors = new ArrayList<>();
-            int exitCode = classpathRunner.run(reactorClasspathCommand(module, scope),
+            int exitCode = classpathCommand.run(reactorClasspathCommand(module, scope, relativeOutput),
                     descriptor.root(),
                     environmentFor(BuildRequest.of(BuildAction.COMPILE, module)),
                     line -> collectError(errors, line));
@@ -278,6 +311,10 @@ public final class MavenBuildService implements BuildSystem {
     }
 
     List<String> reactorClasspathCommand(JavaModule module, String scope) {
+        return reactorClasspathCommand(module, scope, REACTOR_CLASSPATH_FILE);
+    }
+
+    private List<String> reactorClasspathCommand(JavaModule module, String scope, String outputFile) {
         boolean test = "test".equals(scope);
         List<String> command = new ArrayList<>(baseCommand());
         command.add("-q");
@@ -288,7 +325,7 @@ public final class MavenBuildService implements BuildSystem {
         if (test) {
             command.add("-Dmaven.test.skip=true");
         }
-        command.add("-Dmdep.outputFile=" + REACTOR_CLASSPATH_FILE);
+        command.add("-Dmdep.outputFile=" + outputFile);
         command.add("-Dmdep.includeScope=" + scope);
         command.add("-pl");
         command.add(relativeModulePath(module));
@@ -331,7 +368,7 @@ public final class MavenBuildService implements BuildSystem {
             return Optional.empty();
         }
         String classpath = Files.readString(outputFile).trim();
-        return classpath.isBlank() ? Optional.empty() : Optional.of(classpath);
+        return Optional.of(classpath);
     }
 
     private static void deleteQuietly(Path path) {
@@ -351,22 +388,18 @@ public final class MavenBuildService implements BuildSystem {
     private static String prefixOutputDirs(JavaModule module, boolean test) {
         String separator = java.io.File.pathSeparator;
         if (!test) {
-            return module.outputDir() + separator;
+            return module.outputDir().toString();
         }
-        return module.root().resolve(TEST_OUTPUT_DIR) + separator + module.outputDir() + separator;
+        return module.root().resolve(TEST_OUTPUT_DIR) + separator + module.outputDir();
     }
 
     @Override
     public void invalidateClasspathCache() {
-        classpathCache.clear();
-        Path persisted = descriptor.root().resolve(PERSISTED_CLASSPATH_DIR);
-        if (!Files.isDirectory(persisted)) {
-            return;
-        }
-        try (var files = Files.list(persisted)) {
-            files.forEach(MavenBuildService::deleteQuietly);
-        } catch (Exception e) {
-            log.debug("Nao foi possivel limpar {}: {}", persisted, e.getMessage());
+        synchronized (cacheLock) {
+            cacheGeneration++;
+            classpathCache.clear();
+            lastClasspathFailures.clear();
+            ProjectBuildCaches.clearPersistedClasspaths(descriptor.root());
         }
     }
 
