@@ -40,9 +40,7 @@ public final class DependencyInventoryService {
         return resolve(module, source, graph);
     }
 
-    DependencyInventorySnapshot resolve(JavaModule module,
-                                        List<DependencyCoordinate> declared,
-                                        DependencyGraphService.Snapshot graph) {
+    DependencyInventorySnapshot resolve(JavaModule module, List<DependencyCoordinate> declared, DependencyGraphService.Snapshot graph) {
         List<DependencyCoordinate> source = declared == null ? List.of() : List.copyOf(declared);
         DependencyGraphService.Snapshot resolvedGraph = graph == null
                 ? new DependencyGraphService.Snapshot(List.of(), true) : graph;
