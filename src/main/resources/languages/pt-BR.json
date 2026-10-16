@@ -911,7 +911,6 @@
   "JavaDebugValueTree.pauseHint": "Pause em uma linha com valores locais ou selecione outro frame.",
   "JavaIdeAdapter.delete.incomplete": "A busca de usos ficou incompleta; não foi possível verificar todos os arquivos.",
   "JavaIdeAdapter.lens.failed": "Tentar novamente",
-  "JavaIdeAdapter.status.navigation.done": "Java: busca concluída",
   "JavaIdeAdapter.status.navigation.failed": "Java: a busca falhou; tente novamente",
   "JavaIdeAdapter.status.navigation.indexing": "Java: indexação em andamento; tente novamente",
   "JavaIdeAdapter.status.navigation.loading": "Java: buscando destinos...",
