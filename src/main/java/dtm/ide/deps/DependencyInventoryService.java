@@ -32,8 +32,7 @@ public final class DependencyInventoryService {
         this.buildSystem = buildSystem;
     }
 
-    public DependencyInventorySnapshot resolve(JavaModule module,
-                                                List<DependencyCoordinate> declared) {
+    public DependencyInventorySnapshot resolve(JavaModule module, List<DependencyCoordinate> declared) {
         List<DependencyCoordinate> source = declared == null ? List.of() : List.copyOf(declared);
         DependencyGraphService.Snapshot graph =
                 new DependencyGraphService(descriptor, buildSystem).resolve(module);
