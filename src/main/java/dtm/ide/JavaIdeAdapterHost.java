@@ -227,6 +227,11 @@ final class JavaIdeAdapterHost implements AdapterHost {
     }
 
     @Override
+    public void clearStatusBarText() {
+        adapter.clearStatusBarText();
+    }
+
+    @Override
     public DownloadProgressListener progressListener() {
         return adapter.progressListener();
     }

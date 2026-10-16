@@ -2,8 +2,7 @@ package dtm.ide.deps;
 
 import java.util.List;
 
-public record ResolvedDependency(DependencyCoordinate coordinate, int depth, List<String> path,
-                                 boolean conflict, String requestedVersion) {
+public record ResolvedDependency(DependencyCoordinate coordinate, int depth, List<String> path, boolean conflict, String requestedVersion) {
 
     public ResolvedDependency {
         depth = Math.max(0, depth);

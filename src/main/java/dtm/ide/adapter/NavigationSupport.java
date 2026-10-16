@@ -308,6 +308,7 @@ public final class NavigationSupport {
                 ? host.navigationViews().buildUsageItems(result.locations(), file, requestedText) : List.of();
         SwingUtilities.invokeLater(() -> {
             if (ticket != host.navigationRequestTicket().get() || session != host.lifecycleTicket()) return;
+            host.clearStatusBarText();
             if (editor == null || host.liveEditorFor(file) == null) {
                 host.setStatusBarText(text("status.navigation.unavailable",
                         "Java: navegacao semantica indisponivel"));

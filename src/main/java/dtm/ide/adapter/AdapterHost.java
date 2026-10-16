@@ -86,6 +86,7 @@ public interface AdapterHost extends AdapterContext {
     void reloadBuildToolsPanel();
     void reloadStructurePanel();
     void setStatusBarText(String text);
+    void clearStatusBarText();
     DownloadProgressListener progressListener();
     void resolveProjectJdk(long ticket, Path root);
     JavaPluginSettings settings();

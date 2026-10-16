@@ -159,7 +159,7 @@ public final class NavigationViews {
         if (path == null) return;
         host.getEditor(path, true, editor -> {
             int[] target = clampPosition(editor.getText(), line, col);
-            editor.setCaretPosition(target[0], target[1]);
+            editor.navigateTo(target[0], target[1]);
         });
     }
 

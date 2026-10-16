@@ -114,6 +114,23 @@ public final class UsagesPopup {
         list.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
         list.setCellRenderer((ignored, value, index, selected, focused) ->
                 renderRow(value, index, selected));
+        JLabel footer = new JLabel(" ");
+        footer.setOpaque(true);
+        footer.setBackground(HEADER_BG);
+        footer.setForeground(MUTED);
+        footer.setFont(UI_FONT.deriveFont(11f));
+        footer.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 0, 0, 0, BORDER),
+                BorderFactory.createEmptyBorder(4, 10, 4, 10)));
+        list.addListSelectionListener(event -> {
+            Item selected = list.getSelectedValue();
+            String location = selected == null || selected.location() == null ? "" : selected.location();
+            footer.setText(location.isEmpty() ? " " : location);
+            footer.setToolTipText(location.isEmpty() ? null : location);
+        });
+        if (!empty) {
+            root.add(footer, BorderLayout.SOUTH);
+        }
         list.setSelectedIndex(0);
 
         Runnable activate = () -> {
@@ -165,7 +182,8 @@ public final class UsagesPopup {
         root.add(scroll, BorderLayout.CENTER);
 
         int rows = Math.min(Math.max(items.size(), 1), 12);
-        root.setPreferredSize(new Dimension(560, 68 + rows * 24));
+        int footerHeight = empty ? 0 : footer.getPreferredSize().height;
+        root.setPreferredSize(new Dimension(560, 68 + footerHeight + rows * 24));
         SwingUtilities.invokeLater(search::requestFocusInWindow);
         return root;
     }
