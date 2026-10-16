@@ -21,6 +21,7 @@ import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -462,6 +463,31 @@ class JdtLsProtocolTest {
     }
 
     @Test
+    void aFailedLensRequestIsRetriedWithoutWaitingForAnEdit() throws Exception {
+        AtomicInteger refreshed = new AtomicInteger();
+        service.setCodeLensRefreshListener(path -> refreshed.incrementAndGet());
+        service.openDocument(FILE, TEXT);
+        assertTrue(service.codeLenses(FILE, TEXT).isEmpty());
+        JsonNode failed = awaitRequest("textDocument/codeLens");
+        synchronized (toClient) {
+            writeFrame(toClient, "{\"jsonrpc\":\"2.0\",\"id\":" + failed.get("id")
+                    + ",\"error\":{\"code\":-32603,\"message\":\"busy\"}}");
+        }
+        responses.put("textDocument/codeLens", "[{\"range\":{\"start\":{\"line\":1,\"character\":6},"
+                + "\"end\":{\"line\":1,\"character\":10}},\"data\":[\"" + FILE.toUri()
+                + "\",{\"line\":1,\"character\":6},\"implementations\"]}]");
+        responses.put("codeLens/resolve", "echo-lens");
+        Thread.sleep(1_200);
+        int beforeRetry = refreshed.get();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
+        while (refreshed.get() == beforeRetry && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertTrue(refreshed.get() > beforeRetry, "o code lens nao foi pedido de novo depois da falha");
+        assertEquals(1, count("textDocument/codeLens"));
+    }
+
+    @Test
     void aLateLensResolutionCannotReappearAfterClose() throws Exception {
         responses.put("textDocument/codeLens", "[{\"range\":{\"start\":{\"line\":1,\"character\":6},"
                 + "\"end\":{\"line\":1,\"character\":10}},\"data\":[\"" + FILE.toUri()
@@ -514,8 +540,7 @@ class JdtLsProtocolTest {
 
         JsonNode watched = awaitRequest("workspace/didChangeWatchedFiles");
         JsonNode change = watched.path("params").path("changes").get(0);
-        assertEquals(OTHER_FILE.toUri().toString().toLowerCase(java.util.Locale.ROOT),
-                change.path("uri").asText().toLowerCase(java.util.Locale.ROOT));
+        assertEquals(LspConversions.toUri(OTHER_FILE), change.path("uri").asText());
         assertEquals(1, change.path("type").asInt());
 
         awaitRequest("textDocument/didClose");
@@ -568,9 +593,65 @@ class JdtLsProtocolTest {
         service.drainPendingWatchedFiles();
 
         JsonNode watched = awaitRequest("workspace/didChangeWatchedFiles");
-        assertEquals(OTHER_FILE.toUri().toString().toLowerCase(java.util.Locale.ROOT),
-                watched.path("params").path("changes").get(0).path("uri").asText()
-                        .toLowerCase(java.util.Locale.ROOT));
+        assertEquals(LspConversions.toUri(OTHER_FILE),
+                watched.path("params").path("changes").get(0).path("uri").asText());
+    }
+
+    @Test
+    void sincronizarComODiscoRecarregaAsRaizesDeCodigoDoProjeto() throws Exception {
+        Path project = Files.createTempDirectory("orion-roots");
+        Path sources = Files.createDirectories(project.resolve("src/main/java"));
+        Path tests = Files.createDirectories(project.resolve("src/test/java"));
+        set("projectRoot", project);
+        service.setSourceRoots(List.of(sources, tests, project.resolve("src/ausente"),
+                Path.of("fora-do-projeto").toAbsolutePath()));
+        drainNotifications();
+
+        service.resynchronizeWithDisk();
+
+        JsonNode changes = awaitRequest("workspace/didChangeWatchedFiles").path("params").path("changes");
+        assertEquals(List.of(LspConversions.toUri(sources), LspConversions.toUri(tests)),
+                uris(changes));
+        changes.forEach(change -> assertEquals(2, change.path("type").asInt()));
+    }
+
+    @Test
+    void semRaizesConhecidasRecarregaOProjetoInteiro() throws Exception {
+        Path project = Files.createTempDirectory("orion-roots");
+        set("projectRoot", project);
+        drainNotifications();
+
+        service.resynchronizeWithDisk();
+
+        JsonNode changes = awaitRequest("workspace/didChangeWatchedFiles").path("params").path("changes");
+        assertEquals(List.of(LspConversions.toUri(project)), uris(changes));
+    }
+
+    @Test
+    void umLoteEstouradoRecarregaAsRaizesEmVezDeSerDescartado() throws Exception {
+        Path project = Files.createTempDirectory("orion-roots");
+        Path sources = Files.createDirectories(project.resolve("src/main/java"));
+        set("projectRoot", project);
+        service.setSourceRoots(List.of(sources));
+        service.setExternalResyncDelayMs(40);
+        drainNotifications();
+        set("state", LanguageServerState.STARTING);
+
+        for (int index = 0; index <= 50_000; index++) {
+            service.pathChanged(sources.resolve("Gerada" + index + ".java"));
+        }
+        set("state", LanguageServerState.READY);
+        service.drainPendingWatchedFiles();
+
+        JsonNode changes = awaitRequest("workspace/didChangeWatchedFiles").path("params").path("changes");
+        assertEquals(List.of(LspConversions.toUri(sources)), uris(changes));
+        assertEquals(1, count("workspace/didChangeWatchedFiles"));
+    }
+
+    private static List<String> uris(JsonNode changes) {
+        List<String> uris = new java.util.ArrayList<>();
+        changes.forEach(change -> uris.add(change.path("uri").asText()));
+        return uris;
     }
 
     private JsonNode awaitRequest(String method) throws InterruptedException {

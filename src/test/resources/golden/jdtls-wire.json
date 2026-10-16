@@ -1,7 +1,7 @@
 {
   "launch" : {
     "args" : [ "-configuration", "<SDK>\\jdtls\\1.60.0\\config_win", "-data", "<WORKSPACE>" ],
-    "jvm" : [ "-Declipse.application=org.eclipse.jdt.ls.core.id1", "-Dosgi.bundles.defaultStartLevel=4", "-Declipse.product=org.eclipse.jdt.ls.core.product", "-Dlog.level=WARNING", "-Dfile.encoding=UTF-8", "-Dmaven.repo.local=<M2_REPO>", "-Djava.import.generatesMetadataFilesAtProjectRoot=false", "-DDetectVMInstallationsJob.disabled=true", "-Dsun.zip.disableMemoryMapping=true", "-Xms256m", "-Xmx2G", "-XX:+UseParallelGC", "-XX:GCTimeRatio=4", "-XX:AdaptiveSizePolicyWeight=90", "-Xlog:disable", "-XX:+AutoCreateSharedArchive", "-XX:SharedArchiveFile=<SDK>\\jdtls\\1.60.0\\jdtls-jdk25.jsa", "--add-modules=ALL-SYSTEM", "--add-opens=java.base/java.util=ALL-UNNAMED", "--add-opens=java.base/java.lang=ALL-UNNAMED" ]
+    "jvm" : [ "-Declipse.application=org.eclipse.jdt.ls.core.id1", "-Dosgi.bundles.defaultStartLevel=4", "-Declipse.product=org.eclipse.jdt.ls.core.product", "-Dlog.level=WARNING", "-Dfile.encoding=UTF-8", "-Dmaven.repo.local=<M2_REPO>", "-Djava.import.generatesMetadataFilesAtProjectRoot=false", "-DDetectVMInstallationsJob.disabled=true", "-Dsun.zip.disableMemoryMapping=true", "-Dosgi.bundlefile.limit=1000", "-Xms256m", "-Xmx2G", "-XX:+UseParallelGC", "-XX:GCTimeRatio=4", "-XX:AdaptiveSizePolicyWeight=90", "-Xlog:disable", "-XX:+AutoCreateSharedArchive", "-XX:SharedArchiveFile=<SDK>\\jdtls\\1.60.0\\jdtls-jdk25.jsa", "--add-modules=ALL-SYSTEM", "--add-opens=java.base/java.util=ALL-UNNAMED", "--add-opens=java.base/java.lang=ALL-UNNAMED" ]
   },
   "messages" : {
     "exit" : [ { } ],
@@ -1047,8 +1047,13 @@
     } ],
     "workspace/didChangeWatchedFiles" : [ {
       "changes" : [ {
+        "type" : 2,
+        "uri" : "file://<PROJECT>/"
+      } ]
+    }, {
+      "changes" : [ {
         "type" : 1,
-        "uri" : "file://<PROJECT>/src/main/java/demo/extra.java"
+        "uri" : "file://<PROJECT>/src/main/java/demo/Extra.java"
       } ]
     } ],
     "workspace/executeCommand" : [ {

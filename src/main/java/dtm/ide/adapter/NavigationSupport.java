@@ -502,10 +502,12 @@ public final class NavigationSupport {
             case STALE -> text("status.navigation.stale", "Java: o codigo mudou; tente novamente");
         };
         List<Location> targets = result.locations();
-        host.setStatusBarText(targets.isEmpty() && result.status() == Status.LOCAL
-                ? text("status.navigation.empty", "Java: nenhum destino encontrado") : status);
-        if (targets.isEmpty()) return;
-        if (result.status() == Status.COMPLETE) host.setStatusBarText(text("status.navigation.done", "Java: busca concluida"));
+        if (targets.isEmpty()) {
+            host.setStatusBarText(result.status() == Status.LOCAL
+                    ? text("status.navigation.empty", "Java: nenhum destino encontrado") : status);
+            return;
+        }
+        if (result.status() != Status.COMPLETE && result.status() != Status.LOCAL) host.setStatusBarText(status);
         if (targets.size() == 1 && kind != Kind.REFERENCES) {
             Location target = targets.getFirst();
             host.navigateToLocation(target, JavaNavigation.path(target));

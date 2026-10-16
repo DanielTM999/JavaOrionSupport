@@ -17,7 +17,7 @@ final class WatchedFileBatch {
 
     private final int capacity;
     private final long maxDelayNanos;
-    private final Map<Path, Integer> changes = new LinkedHashMap<>();
+    private final Map<Path, Entry> changes = new LinkedHashMap<>();
 
     private boolean overflowed;
     private boolean waiting;
@@ -29,14 +29,18 @@ final class WatchedFileBatch {
     }
 
     synchronized void add(Path path, int changeType, long nowNanos) {
-        if (path == null) {
+        add(path, path, changeType, nowNanos);
+    }
+
+    synchronized void add(Path key, Path path, int changeType, long nowNanos) {
+        if (key == null || path == null) {
             return;
         }
         if (!waiting) {
             waiting = true;
             firstQueuedNanos = nowNanos;
         }
-        Integer previous = changes.get(path);
+        Entry previous = changes.get(key);
         if (previous == null && changes.size() >= capacity) {
             overflowed = true;
             changes.clear();
@@ -45,7 +49,7 @@ final class WatchedFileBatch {
         if (overflowed) {
             return;
         }
-        changes.put(path, merge(previous, changeType));
+        changes.put(key, new Entry(path, merge(previous == null ? null : previous.changeType(), changeType)));
     }
 
     private static int merge(Integer previous, int changeType) {
@@ -78,8 +82,7 @@ final class WatchedFileBatch {
     }
 
     synchronized List<Entry> drain() {
-        List<Entry> drained = new ArrayList<>(changes.size());
-        changes.forEach((path, type) -> drained.add(new Entry(path, type)));
+        List<Entry> drained = new ArrayList<>(changes.values());
         reset();
         return drained;
     }

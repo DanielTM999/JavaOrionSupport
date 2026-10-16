@@ -160,6 +160,14 @@ class JdtLsServiceTest {
     }
 
     @Test
+    void equinoxKeepsEveryBundleJarOpenInsteadOfReopeningThemDuringBoot() {
+        List<String> command = commandFor(JdkVendor.TEMURIN, 21);
+
+        assertTrue(command.contains("-Dosgi.bundlefile.limit=1000"));
+        assertTrue(command.indexOf("-Dosgi.bundlefile.limit=1000") < command.indexOf("-jar"));
+    }
+
+    @Test
     void aModernHotSpotServerBootsWithTheSharedArchiveAndWithoutScanningForJdks() {
         List<String> command = commandFor(JdkVendor.TEMURIN, 21);
 

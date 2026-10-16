@@ -26,6 +26,7 @@ final class LspSession {
         void invalidateWorkspaceNavigation();
         StatusListener statusListener();
         Map<String, Object> effectiveSettings();
+        String startupPhase();
     }
 
     private final Host host;
@@ -49,7 +50,7 @@ final class LspSession {
         JsonNode result = awaitWhileAlive(rpc.request("initialize", params),
                 () -> server.isAlive() && current.getAsBoolean(),
                 INITIALIZE_WAIT_SLICE_MS, INITIALIZE_CEILING_MS,
-                elapsed -> host.statusListener().onStatus("Java: iniciando o JDT LS... "
+                elapsed -> host.statusListener().onStatus("Java: " + host.startupPhase() + "... "
                         + TimeUnit.MILLISECONDS.toSeconds(elapsed) + " s", -1));
         ServerCapabilities capabilities = LspClientCapabilities.readServerCapabilities(result);
         rpc.notify("initialized", Map.of());

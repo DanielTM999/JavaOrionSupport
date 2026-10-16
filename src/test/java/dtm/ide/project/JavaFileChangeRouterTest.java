@@ -73,6 +73,32 @@ class JavaFileChangeRouterTest {
     }
 
     @Test
+    void generatedSourcesAreRoutedButTheRestOfTheOutputIsNot() {
+        Path root = Path.of("/projeto");
+
+        assertFalse(JavaFileChangeRouter.isIgnored(
+                root.resolve("app/target/generated-sources/annotations/a/A_.java"), root));
+        assertFalse(JavaFileChangeRouter.isIgnored(
+                root.resolve("app/target/generated-test-sources/test-annotations/a/T.java"), root));
+        assertFalse(JavaFileChangeRouter.isIgnored(
+                root.resolve("build/generated/sources/annotationProcessor/java/main/a/G.java"), root));
+        assertTrue(JavaFileChangeRouter.isIgnored(root.resolve("app/target/classes/a/A.class"), root));
+        assertTrue(JavaFileChangeRouter.isIgnored(root.resolve("build/tmp/a/A.java"), root));
+        assertTrue(JavaFileChangeRouter.isGeneratedSource(
+                root.resolve("app/target/generated-sources/annotations/a/A_.java")));
+        assertFalse(JavaFileChangeRouter.isGeneratedSource(root.resolve("src/main/java/a/A.java")));
+    }
+
+    @Test
+    void theIdeWatcherKeepsItsDefaultsAndReopensSourcesAndGeneratedCode() {
+        assertTrue(JavaFileChangeRouter.FILE_WATCHER_RULES.ignored()
+                .containsAll(dtm.ide.api.project.FileWatcherRules.DEFAULT_IGNORED));
+        assertTrue(JavaFileChangeRouter.FILE_WATCHER_RULES.watched().containsAll(List.of(
+                "**/src/*/java", "**/target/generated-sources", "**/target/generated-test-sources",
+                "**/build/generated")));
+    }
+
+    @Test
     void aProjectStoredBelowABinFolderIsJudgedFromItsOwnRoot() {
         Path projectRoot = Path.of("/opt/bin/projeto");
 

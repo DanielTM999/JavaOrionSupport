@@ -85,6 +85,8 @@ import dtm.ide.api.project.editor.ConditionalBreakpointContext;
 import dtm.ide.api.project.editor.ConditionalBreakpointDialogView;
 import dtm.ide.api.project.editor.NativeEditorType;
 import dtm.ide.api.project.editor.view.IdeEditorViewModesBuilder;
+import dtm.ide.api.project.FileWatcherRules;
+import dtm.ide.project.JavaFileChangeRouter;
 import dtm.ide.api.project.tree.PathRenameDecision;
 import dtm.ide.api.project.tree.PathTransferDecision;
 import dtm.ide.api.project.tree.PathTransferRequest;
@@ -1308,6 +1310,11 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     @Override
+    public FileWatcherRules fileWatcherRules() {
+        return JavaFileChangeRouter.FILE_WATCHER_RULES;
+    }
+
+    @Override
     public List<ProjectTreeIgnoreRule> resolveProjectTreeIgnoredFolders(Path projectPath) {
         return List.of(
                 ProjectTreeIgnoreRule.any("build"),
@@ -1315,7 +1322,8 @@ public class JavaIdeAdapter extends IdeAdapter {
                 ProjectTreeIgnoreRule.any("bin"),
                 ProjectTreeIgnoreRule.any(".gradle"),
                 ProjectTreeIgnoreRule.any(".settings"),
-                ProjectTreeIgnoreRule.specific(".orion"));
+                ProjectTreeIgnoreRule.specific(".orion"),
+                ProjectTreeIgnoreRule.keep("**/src/*/java"));
     }
 
     @Override

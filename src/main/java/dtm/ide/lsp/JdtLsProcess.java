@@ -19,6 +19,7 @@ import java.util.concurrent.TimeoutException;
 @Slf4j
 final class JdtLsProcess {
     private static final int MIN_AUTO_SHARED_ARCHIVE_MAJOR = 19;
+    private static final int BUNDLE_FILE_LIMIT = 1000;
 
     interface Host {
         Path resolveMavenRepository();
@@ -54,6 +55,7 @@ final class JdtLsProcess {
         command.add("-Djava.import.generatesMetadataFilesAtProjectRoot=false");
         command.add("-DDetectVMInstallationsJob.disabled=true");
         command.add("-Dsun.zip.disableMemoryMapping=true");
+        command.add("-Dosgi.bundlefile.limit=" + BUNDLE_FILE_LIMIT);
         command.add("-Xms256m");
         command.add("-Xmx" + host.maxHeap());
         Path lombok = host.lombokAgentJar();

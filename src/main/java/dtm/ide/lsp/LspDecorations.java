@@ -29,6 +29,7 @@ final class LspDecorations {
     private static final int MAX_CODE_LENS_RETRIES = 2;
     private static final long CODE_LENS_WORK_REFRESH_COOLDOWN_MS = 2_000;
     private static final long CODE_LENS_EDIT_REFRESH_DELAY_MS = 800;
+    private static final long[] CODE_LENS_FAILURE_RETRY_DELAYS_MS = {2_000, 5_000, 10_000, 20_000, 30_000};
 
     static final List<String> TOKEN_TYPES = List.of(
             "namespace", "class", "interface", "enum", "enumMember", "type", "typeParameter",
@@ -69,6 +70,7 @@ final class LspDecorations {
     private final Host host;
     private final Map<String, LensWork> codeLensCache = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> codeLensRefreshTickets = new ConcurrentHashMap<>();
+    private final Map<String, Integer> codeLensFailures = new ConcurrentHashMap<>();
     private final AtomicLong lastCodeLensWorkRefresh = new AtomicLong();
 
     LspDecorations(LspRequests requests, Executor executor, Host host) {
@@ -166,9 +168,10 @@ final class LspDecorations {
                     Map.of("textDocument", Map.of("uri", uri)), REQUEST_TIMEOUT_MS * 2);
             if (!currentLensWork(uri, work)) return;
             if (response == null || !response.isArray()) {
-                codeLensCache.remove(uri, work);
+                if (codeLensCache.remove(uri, work)) scheduleCodeLensRetry(file, uri);
                 return;
             }
+            codeLensFailures.remove(uri);
             List<JsonNode> raw = new ArrayList<>();
             response.forEach(raw::add);
             List<JavaCodeLens> resolved = new ArrayList<>();
@@ -281,10 +284,26 @@ final class LspDecorations {
                 });
     }
 
+    private void scheduleCodeLensRetry(Path filePath, String uri) {
+        int failures = codeLensFailures.merge(uri, 1, Integer::sum);
+        if (failures > CODE_LENS_FAILURE_RETRY_DELAYS_MS.length) {
+            return;
+        }
+        CompletableFuture.delayedExecutor(CODE_LENS_FAILURE_RETRY_DELAYS_MS[failures - 1],
+                TimeUnit.MILLISECONDS, executor).execute(() -> {
+            if (codeLensFailures.get(uri) == null || codeLensCache.containsKey(uri)
+                    || host.documents().content(uri) == null || !host.isReady()) {
+                return;
+            }
+            host.codeLensRefreshed(filePath);
+        });
+    }
+
     void reset() {
         codeLensCache.values().forEach(LensWork::cancel);
         codeLensCache.clear();
         codeLensRefreshTickets.clear();
+        codeLensFailures.clear();
     }
 
     void discardAll() {
@@ -294,5 +313,6 @@ final class LspDecorations {
 
     void forgetRefreshTicket(String uri) {
         codeLensRefreshTickets.remove(uri);
+        codeLensFailures.remove(uri);
     }
 }

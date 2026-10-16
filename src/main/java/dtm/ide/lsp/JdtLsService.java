@@ -49,6 +49,7 @@ import dtm.stools.component.panels.editor.code.prototype.folding.FoldRange;
 import dtm.stools.component.panels.editor.code.inlay.InlayHint;
 import dtm.stools.component.panels.editor.code.signature.SignatureHelp;
 import lombok.extern.slf4j.Slf4j;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -90,8 +91,11 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static final long EXIT_TIMEOUT_MS = 5_000;
     private static final long UNLOAD_SHUTDOWN_TIMEOUT_MS = 500;
     private static final long UNLOAD_EXIT_TIMEOUT_MS = 500;
+    private static final long UNLOAD_READY_SHUTDOWN_TIMEOUT_MS = 4_000;
+    private static final long UNLOAD_READY_EXIT_TIMEOUT_MS = 1_500;
     private static final long UNLOAD_RETIRE_WAIT_MS = 3_000;
     private static final long EXIT_HOOK_SHUTDOWN_TIMEOUT_MS = 1_000;
+    private static final long EXIT_HOOK_READY_SHUTDOWN_TIMEOUT_MS = 3_000;
     private static final long EXIT_HOOK_TOTAL_TIMEOUT_MS = 4_000;
     private static final long RETIRE_WAIT_MS = 20_000;
     private static final long[] CRASH_RESTART_DELAYS_MS = {1_000, 5_000, 30_000};
@@ -145,8 +149,10 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private volatile dtm.ide.settings.JdtBuildMode buildMode =
             dtm.ide.settings.JdtBuildMode.PROJECT_BUILD;
     private volatile Path lombokAgentJar;
+    private volatile JdtLsStartupLog startupLog;
     private volatile Path launchedLombokAgentJar;
     private volatile boolean springSupport;
+    private volatile List<Path> sourceRoots = List.of();
     private final JdtDialect dialect = new JdtDialect(progressAggregator, this::publishProgress,
             () -> serviceReadyLatch);
     private volatile Map<String, Object> effectiveSettings = Map.of();
@@ -502,6 +508,11 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 public void resynchronizeOpenDocuments() {
                     JdtLsService.this.resynchronizeOpenDocuments(resyncMode(), false, null);
                 }
+
+                @Override
+                public List<Path> diskRoots() {
+                    return JdtLsService.this.diskRoots();
+                }
             });
 
     private final JdtLsProcess processSupport = new JdtLsProcess(new JdtLsProcess.Host() {
@@ -592,6 +603,12 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         @Override
         public Map<String, Object> effectiveSettings() {
             return effectiveSettings;
+        }
+
+        @Override
+        public String startupPhase() {
+            JdtLsStartupLog log = startupLog;
+            return log == null ? "iniciando o JDT LS" : log.describe();
         }
     });
 
@@ -790,6 +807,27 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
         this.springSupport = enabled;
     }
 
+    public void setSourceRoots(List<Path> roots) {
+        this.sourceRoots = roots == null ? List.of() : roots.stream()
+                .filter(java.util.Objects::nonNull)
+                .map(root -> root.toAbsolutePath().normalize())
+                .distinct()
+                .toList();
+    }
+
+    List<Path> diskRoots() {
+        Path root = projectRoot;
+        if (root == null) {
+            return List.of();
+        }
+        Path project = root.toAbsolutePath().normalize();
+        List<Path> existing = sourceRoots.stream()
+                .filter(candidate -> candidate.startsWith(project))
+                .filter(Files::isDirectory)
+                .toList();
+        return existing.isEmpty() ? List.of(project) : existing;
+    }
+
     public void setStatusListener(StatusListener listener) {
         this.statusListener = listener == null ? (message, percent) -> {
         } : listener;
@@ -918,6 +956,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             if (!isCurrent(launchGeneration)) {
                 return;
             }
+            startupLog = new JdtLsStartupLog(workspace.resolve(".metadata").resolve(".log"));
             long processStarted = System.nanoTime();
             started = new ProcessBuilder(command)
                     .directory(root.toFile())
@@ -952,6 +991,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             publishProgress(progressAggregator.initialized("indexando projeto..."));
             flushOpenDocuments();
             drainPendingWatchedFiles();
+            watched.refreshFromDisk();
             provisionBundlesInBackground(progress);
             dialect.awaitWorkspaceReady(rpc, serviceReadyLatch, () -> isCurrent(launchGeneration));
             if (startupFailure != null) {
@@ -1196,9 +1236,11 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     }
 
     public void shutdown() {
+        boolean ready = state == LanguageServerState.READY;
         terminated = true;
         try {
-            stop(UNLOAD_SHUTDOWN_TIMEOUT_MS, UNLOAD_EXIT_TIMEOUT_MS);
+            stop(ready ? UNLOAD_READY_SHUTDOWN_TIMEOUT_MS : UNLOAD_SHUTDOWN_TIMEOUT_MS,
+                    ready ? UNLOAD_READY_EXIT_TIMEOUT_MS : UNLOAD_EXIT_TIMEOUT_MS);
             try {
                 retiring.get(UNLOAD_RETIRE_WAIT_MS, TimeUnit.MILLISECONDS);
             } catch (InterruptedException interrupted) {
@@ -1289,9 +1331,11 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private static void stopAllOnExit() {
         List<Thread> stoppers = new ArrayList<>();
         for (JdtLsService service : List.copyOf(LIVE_SERVICES)) {
+            long shutdownTimeoutMs = service.state == LanguageServerState.READY
+                    ? EXIT_HOOK_READY_SHUTDOWN_TIMEOUT_MS : EXIT_HOOK_SHUTDOWN_TIMEOUT_MS;
             service.terminated = true;
             stoppers.add(Thread.ofPlatform().name("jdtls-exit").start(() -> {
-                service.finishRetired(service.detach(), EXIT_HOOK_SHUTDOWN_TIMEOUT_MS,
+                service.finishRetired(service.detach(), shutdownTimeoutMs,
                         EXIT_HOOK_SHUTDOWN_TIMEOUT_MS);
                 for (ProcessHandle handle : List.copyOf(service.retiringProcesses)) {
                     JdtLsProcess.terminateProcessTree(handle);
@@ -1540,8 +1584,10 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
             return;
         }
         invalidateWorkspaceNavigation();
+        watched.refreshFromDisk();
         executor.execute(() -> resynchronizeOpenDocuments(LspDocumentSync.ResyncMode.REOPEN, true,
                 "Java: sincronizado com o disco"));
+        watched.scheduleExternalResync();
     }
 
     public String documentContent(Path filePath) {
@@ -1607,7 +1653,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
         diagnosticsStore.removeBelow(deleted);
 
-        queueWatchedFile(deleted, WatchedFileBatch.DELETED);
+        queueWatchedFile(deletedPath, WatchedFileBatch.DELETED);
         if (affectsProjectStructure(deleted)) {
             projectConfigurationUpdate();
         }

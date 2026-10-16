@@ -26,6 +26,7 @@ final class LspWatchedFiles {
         void discardCodeLenses(String uri);
         void forgetCompletion(String uri);
         void resynchronizeOpenDocuments();
+        List<Path> diskRoots();
     }
 
     private final ExecutorService executor;
@@ -48,14 +49,14 @@ final class LspWatchedFiles {
         if (path == null) {
             return;
         }
-        Path target = normalizePath(path);
+        Path target = path.toAbsolutePath().normalize();
         String uri = LspConversions.toUri(target);
         host.forgetSymbols(uri);
         host.discardCodeLenses(uri);
         host.forgetCompletion(uri);
         host.invalidateWorkspaceNavigation();
 
-        watchedFiles.add(target, changeType, System.nanoTime());
+        watchedFiles.add(normalizePath(target), target, changeType, System.nanoTime());
         if (host.canSyncDocuments()) {
             scheduleWatchedFlush();
         }
@@ -101,9 +102,26 @@ final class LspWatchedFiles {
                 rpc.notify("workspace/didChangeWatchedFiles", Map.of("changes", List.copyOf(chunk)));
             }
         } else {
-            log.debug("Lote de mudancas externas estourou; ressincronizando tudo");
+            log.debug("Lote de mudancas externas estourou; recarregando as raizes do disco");
+            refreshFromDisk();
         }
         scheduleExternalResync();
+    }
+
+    void refreshFromDisk() {
+        LspJsonRpcClient rpc = host.client();
+        if (rpc == null || rpc.isClosed() || !host.canSyncDocuments()) {
+            return;
+        }
+        List<Map<String, Object>> changes = host.diskRoots().stream()
+                .map(root -> Map.<String, Object>of("uri", LspConversions.toUri(root),
+                        "type", WatchedFileBatch.CHANGED))
+                .toList();
+        if (changes.isEmpty()) {
+            return;
+        }
+        host.invalidateWorkspaceNavigation();
+        rpc.notify("workspace/didChangeWatchedFiles", Map.of("changes", changes));
     }
 
     void scheduleExternalResync() {

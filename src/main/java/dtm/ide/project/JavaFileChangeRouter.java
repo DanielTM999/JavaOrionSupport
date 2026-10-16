@@ -1,5 +1,6 @@
 package dtm.ide.project;
 
+import dtm.ide.api.project.FileWatcherRules;
 import dtm.ide.spring.config.SpringConfigSupport;
 import lombok.extern.slf4j.Slf4j;
 
@@ -35,6 +36,16 @@ public final class JavaFileChangeRouter {
 
     private static final Set<String> SOURCE_SEGMENTS = Set.of(
             "src", "java", "kotlin", "groovy", "scala", "resources");
+
+    private static final Map<String, Set<String>> GENERATED_SOURCE_SEGMENTS = Map.of(
+            "target", Set.of("generated-sources", "generated-test-sources"),
+            "build", Set.of("generated"));
+
+    public static final FileWatcherRules FILE_WATCHER_RULES = FileWatcherRules.defaults().watching(
+            "**/src/*/java",
+            "**/target/generated-sources",
+            "**/target/generated-test-sources",
+            "**/build/generated");
 
     public enum Change {
         CREATED,
@@ -288,8 +299,9 @@ public final class JavaFileChangeRouter {
     static boolean isIgnored(Path file, Path root) {
         Path scope = root != null && file.startsWith(root) ? root.relativize(file) : file;
         boolean insideSources = false;
-        for (Path segment : scope) {
-            String name = segment.toString();
+        int count = scope.getNameCount();
+        for (int index = 0; index < count; index++) {
+            String name = scope.getName(index).toString();
             if (IGNORED_SEGMENTS.contains(name)) {
                 return true;
             }
@@ -300,10 +312,34 @@ public final class JavaFileChangeRouter {
             if (SOURCE_SEGMENTS.contains(lower)) {
                 insideSources = true;
             } else if (OUTPUT_SEGMENTS.contains(lower)) {
+                if (index + 1 < count && isGeneratedSourceFolder(lower, scope.getName(index + 1).toString())) {
+                    insideSources = true;
+                    index++;
+                    continue;
+                }
                 return true;
             }
         }
         return false;
+    }
+
+    public static boolean isGeneratedSource(Path file) {
+        if (file == null) {
+            return false;
+        }
+        int count = file.getNameCount();
+        for (int index = 0; index + 1 < count; index++) {
+            String output = file.getName(index).toString().toLowerCase(java.util.Locale.ROOT);
+            if (isGeneratedSourceFolder(output, file.getName(index + 1).toString())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isGeneratedSourceFolder(String outputSegment, String next) {
+        Set<String> generated = GENERATED_SOURCE_SEGMENTS.get(outputSegment);
+        return generated != null && generated.contains(next.toLowerCase(java.util.Locale.ROOT));
     }
 
     static FileRole roleOf(Path file) {

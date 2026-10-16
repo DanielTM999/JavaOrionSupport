@@ -67,6 +67,8 @@ public interface JavaLanguageServer {
 
     void setSpringSupport(boolean enabled);
 
+    void setSourceRoots(List<Path> roots);
+
     void setStatusListener(StatusListener listener);
 
     void setWorkListener(WorkListener listener);

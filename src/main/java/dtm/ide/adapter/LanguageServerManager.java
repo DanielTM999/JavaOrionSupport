@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import javax.swing.*;
 
 import static dtm.ide.adapter.AdapterText.text;
@@ -87,6 +88,7 @@ public final class LanguageServerManager {
                     + JdtOutputIsolation.BUILD_DIRECTORY);
         }
         lsp.setSpringSupport(current != null && current.spring() && host.settings().isSpringSupport());
+        lsp.setSourceRoots(sourceRootsOf(current));
         applyLombokAgent(lsp, current);
         String loading = text("status.startingLsp", "Java: carregando IntelliSense...");
         lspProgress.set(5);
@@ -113,6 +115,15 @@ public final class LanguageServerManager {
             }
             host.finishDiagnosticReanalysis(ticket, root, error == null && lsp.isReady());
         });
+    }
+
+    static List<Path> sourceRootsOf(JavaProjectDescriptor descriptor) {
+        if (descriptor == null) {
+            return List.of();
+        }
+        return descriptor.modules().stream()
+                .flatMap(module -> Stream.concat(module.sourceRoots().stream(), module.testRoots().stream()))
+                .toList();
     }
 
     public JavaLanguageServer ensureLanguageServer() {

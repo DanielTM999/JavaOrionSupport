@@ -146,7 +146,7 @@ class JdtLsWireGoldenTest {
         Path created = Files.writeString(dir.resolve("Extra.java"), "package demo;\nclass Extra {}\n");
         service.pathCreated(created);
         Path wire = project.resolve(FakeJdtLsServer.WIRE_LOG);
-        await(() -> wireContains(wire, "workspace/didChangeWatchedFiles"), 10_000);
+        await(() -> wireContains(wire, "Extra.java"), 10_000);
         service.closeDocument(file);
         service.stop();
         service = null;

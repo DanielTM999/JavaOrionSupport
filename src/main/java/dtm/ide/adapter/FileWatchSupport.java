@@ -183,6 +183,9 @@ public final class FileWatchSupport {
             return true;
         }
         Path normalized = JavaProjectConventions.normalize(file);
+        if (JavaFileChangeRouter.isGeneratedSource(normalized)) {
+            return true;
+        }
         return current.moduleOf(normalized)
                 .map(module -> Stream.concat(module.sourceRoots().stream(),
                                 module.testRoots().stream())
