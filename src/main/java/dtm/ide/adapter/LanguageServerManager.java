@@ -82,13 +82,14 @@ public final class LanguageServerManager {
         JdtBuildMode buildMode = host.settings().getJdtBuildMode();
         lsp.setBuildMode(buildMode);
         appliedBuildMode = buildMode;
-        if (buildMode.isAutobuild() && JdtOutputIsolation.ensure(current)) {
+        if (buildMode.isAutobuild() && isolateJdtOutput(current)) {
             host.setStatusBarText(text("status.jdtOutputIsolated",
                     "Java: saida do autobuild isolada em") + " "
                     + JdtOutputIsolation.BUILD_DIRECTORY);
         }
         lsp.setSpringSupport(current != null && current.spring() && host.settings().isSpringSupport());
         lsp.setSourceRoots(sourceRootsOf(current));
+        applyConfigurationRoots(lsp, current);
         applyLombokAgent(lsp, current);
         String loading = text("status.startingLsp", "Java: carregando IntelliSense...");
         lspProgress.set(5);
@@ -124,6 +125,25 @@ public final class LanguageServerManager {
         return descriptor.modules().stream()
                 .flatMap(module -> Stream.concat(module.sourceRoots().stream(), module.testRoots().stream()))
                 .toList();
+    }
+
+    static boolean isolateJdtOutput(JavaProjectDescriptor descriptor) {
+        if (descriptor == null || !descriptor.isMavenWorkspace()) {
+            return JdtOutputIsolation.ensure(descriptor);
+        }
+        boolean changed = false;
+        for (Path projectRoot : descriptor.projectRoots()) {
+            changed |= JdtOutputIsolation.ensureForPom(projectRoot.resolve("pom.xml"));
+        }
+        return changed;
+    }
+
+    public static void applyConfigurationRoots(JavaLanguageServer lsp, JavaProjectDescriptor descriptor) {
+        ProjectModelSupport model = lsp == null ? null : lsp.extension(ProjectModelSupport.class);
+        if (model != null) {
+            model.setConfigurationRoots(descriptor != null && descriptor.isMavenWorkspace()
+                    ? descriptor.projectRoots() : List.of());
+        }
     }
 
     public JavaLanguageServer ensureLanguageServer() {

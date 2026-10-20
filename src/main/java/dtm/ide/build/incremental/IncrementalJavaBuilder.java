@@ -60,8 +60,13 @@ public final class IncrementalJavaBuilder {
     private final ProcessRunner runner = new ProcessRunner();
 
     private static final Map<Path, Path> LOCAL_REPOSITORIES = new ConcurrentHashMap<>();
+    private static final Set<String> CONFIRMED_FAILURES = ConcurrentHashMap.newKeySet();
+    private static final int MAX_CONFIRMED_FAILURES = 256;
+
+    private volatile boolean cancelled;
 
     private final Map<Path, Boolean> resourceLayouts = new ConcurrentHashMap<>();
+    private final Map<Path, MavenCompilerOptions> compilerOptions = new ConcurrentHashMap<>();
     private Supplier<Path> localRepository;
 
     private JavacExecutor javac = this::runJavac;
@@ -93,7 +98,7 @@ public final class IncrementalJavaBuilder {
     private List<Path> processorPathOf(JavaModule module) {
         List<AnnotationProcessorPaths.Coordinate> declared = AnnotationProcessorPaths.declared(
                 module.root().resolve(JavaProjectConventions.POM_FILE),
-                descriptor.root().resolve(JavaProjectConventions.POM_FILE));
+                descriptor.buildRootOf(module).resolve(JavaProjectConventions.POM_FILE));
         if (declared.isEmpty()) {
             return List.of();
         }
@@ -168,11 +173,20 @@ public final class IncrementalJavaBuilder {
             BuildResult result = plan.recompileAll()
                     ? recompileModule(plan, false, output)
                     : buildIncremental(plan, false, output);
-            diagnostics.addAll(result.diagnostics());
             if (!result.successful()) {
+                List<ModulePlan> remaining = plans.subList(index, plans.size()).stream()
+                        .filter(candidate -> !candidate.full())
+                        .toList();
+                Optional<BuildResult> verified = verifyWithMaven(remaining, result, output);
+                if (verified.isPresent()) {
+                    diagnostics.addAll(verified.get().diagnostics());
+                    break;
+                }
+                diagnostics.addAll(result.diagnostics());
                 return new BuildResult(result.exitCode(), diagnostics,
                         Duration.between(start, Instant.now()), result.command());
             }
+            diagnostics.addAll(result.diagnostics());
         }
         BuildResult resources = syncResources(target, plans, false, output);
         if (!resources.successful()) {
@@ -194,8 +208,69 @@ public final class IncrementalJavaBuilder {
     }
 
     public void cancel() {
+        cancelled = true;
         runner.cancel();
         JavacDaemons.cancelAll();
+    }
+
+    private Optional<BuildResult> verifyWithMaven(List<ModulePlan> remaining, BuildResult failed,
+                                                  Consumer<String> output) {
+        if (cancelled || remaining.isEmpty() || failed.diagnostics().isEmpty()) {
+            return Optional.empty();
+        }
+        JavaModule failing = remaining.getFirst().module();
+        String key = failureKey(failing, failed.diagnostics());
+        if (CONFIRMED_FAILURES.contains(key)) {
+            return Optional.empty();
+        }
+        List<JavaModule> modules = remaining.stream().map(ModulePlan::module).toList();
+        log.warn("javac falhou em {} com {} diagnostico(s); conferindo com o Maven antes de publicar: {}",
+                failing.artifactId(), failed.diagnostics().size(), summaryOf(failed.diagnostics()));
+        emit(output, "[" + failing.artifactId() + "] javac falhou; conferindo com o Maven");
+        BuildResult maven = delegateAll(modules, false, output, "conferencia do javac");
+        if (cancelled) {
+            return Optional.empty();
+        }
+        if (!maven.successful()) {
+            rememberConfirmed(key);
+            log.info("Maven confirmou os erros do javac em {}", failing.artifactId());
+            return Optional.empty();
+        }
+        log.warn("Maven compilou {} sem os erros do javac; estado incremental regravado", labelOf(modules));
+        for (ModulePlan plan : remaining) {
+            refreshState(plan.module(), false, plan.state(), plan.fingerprint(), plan.classpath(),
+                    plan.stateFile());
+        }
+        return Optional.of(maven);
+    }
+
+    private static String failureKey(JavaModule module, List<BuildDiagnostic> diagnostics) {
+        List<String> parts = new ArrayList<>();
+        parts.add(module.root().toString());
+        diagnostics.stream()
+                .map(diagnostic -> diagnostic.file() + ":" + diagnostic.line() + ":" + diagnostic.message())
+                .sorted()
+                .forEach(parts::add);
+        return ModuleBuildState.fingerprintOf(parts.toArray(String[]::new));
+    }
+
+    private static void rememberConfirmed(String key) {
+        if (CONFIRMED_FAILURES.size() >= MAX_CONFIRMED_FAILURES) {
+            CONFIRMED_FAILURES.clear();
+        }
+        CONFIRMED_FAILURES.add(key);
+    }
+
+    public static String summaryOf(List<BuildDiagnostic> diagnostics) {
+        return diagnostics.stream()
+                .limit(5)
+                .map(diagnostic -> (diagnostic.file() == null ? "" : diagnostic.file().getFileName() + ":"
+                        + diagnostic.line() + " ") + diagnostic.message())
+                .collect(java.util.stream.Collectors.joining(" | "));
+    }
+
+    static void forgetConfirmedFailures() {
+        CONFIRMED_FAILURES.clear();
     }
 
     public boolean isRunning() {
@@ -254,6 +329,11 @@ public final class IncrementalJavaBuilder {
     }
 
     private ModulePlan planOf(JavaModule module, boolean test) {
+        MavenCompilerOptions options = compilerOptionsOf(module);
+        if (!options.isSupported()) {
+            return logged(new ModulePlan(module, null, ModuleBuildState.load(stateFileOf(module, test)), null,
+                    stateFileOf(module, test), true, options.unsupported()));
+        }
         List<Path> sources = collectSources(module, test);
         Optional<ModulePlan> cached = cachedPlanOf(module, test, sources);
         if (cached.isPresent()) {
@@ -300,7 +380,7 @@ public final class IncrementalJavaBuilder {
                 : compile(module, test, new LinkedHashSet<>(sources), plan.classpath(),
                         outputDirOf(module, test), output);
         if (!result.successful()) {
-            if (!result.diagnostics().isEmpty()) {
+            if (!result.diagnostics().isEmpty() || cancelled) {
                 return result;
             }
             log.info("javac falhou sem diagnosticos em {}; voltando para o Maven", module.artifactId());
@@ -338,7 +418,7 @@ public final class IncrementalJavaBuilder {
                 : compile(module, true, new LinkedHashSet<>(sources), plan.classpath(),
                         outputDirOf(module, true), output);
         if (!result.successful()) {
-            if (!result.diagnostics().isEmpty()) {
+            if (!result.diagnostics().isEmpty() || cancelled) {
                 return result;
             }
             log.info("javac falhou sem diagnosticos nos testes de {}; voltando para o Maven",
@@ -459,7 +539,7 @@ public final class IncrementalJavaBuilder {
         return resourceLayouts.computeIfAbsent(module.root(), ignored ->
                 !MavenResourceLayout.customizes(module.root().resolve(JavaProjectConventions.POM_FILE))
                         && !MavenResourceLayout.customizes(
-                                descriptor.root().resolve(JavaProjectConventions.POM_FILE)));
+                                descriptor.buildRootOf(module).resolve(JavaProjectConventions.POM_FILE)));
     }
 
     private BuildResult copyResourcesWithMaven(JavaModule target, boolean test, Consumer<String> output) {
@@ -507,7 +587,7 @@ public final class IncrementalJavaBuilder {
             state.save();
             return result;
         }
-        if (!result.diagnostics().isEmpty()) {
+        if (!result.diagnostics().isEmpty() || cancelled) {
             return result;
         }
         log.info("javac falhou sem diagnosticos em {}; voltando para o Maven", module.artifactId());
@@ -569,10 +649,11 @@ public final class IncrementalJavaBuilder {
             command.add(outputDir.toString());
             command.add("-s");
             command.add(generated.toString());
+            MavenCompilerOptions options = compilerOptionsOf(module);
             command.add("-encoding");
-            command.add("UTF-8");
+            command.add(options.encoding());
             command.add("-g");
-            command.add("-proc:full");
+            command.add("-proc:" + options.proc());
             command.add("-implicit:none");
             command.add("-nowarn");
             command.add("-cp");
@@ -585,10 +666,7 @@ public final class IncrementalJavaBuilder {
                 command.add("-processorpath");
                 command.add(String.join(java.io.File.pathSeparator, entries));
             }
-            JavacCommands.releaseArgument(descriptor, jdk, List.of()).ifPresent(release -> {
-                command.add("--release");
-                command.add(release);
-            });
+            command.addAll(languageArguments(options, test, jdk));
 
             if (sources.size() > JavacCommands.ARGUMENT_FILE_THRESHOLD) {
                 argumentFile = JavacCommands.writeArgumentFile(sources);
@@ -615,6 +693,50 @@ public final class IncrementalJavaBuilder {
         } finally {
             JavacCommands.deleteQuietly(argumentFile);
         }
+    }
+
+    MavenCompilerOptions compilerOptionsOf(JavaModule module) {
+        return compilerOptions.computeIfAbsent(module.root(), ignored -> descriptor.isMaven()
+                ? MavenCompilerOptions.of(module.root().resolve(JavaProjectConventions.POM_FILE),
+                        descriptor.buildRootOf(module).resolve(JavaProjectConventions.POM_FILE))
+                : MavenCompilerOptions.defaults());
+    }
+
+    private List<String> languageArguments(MavenCompilerOptions options, boolean test, JdkInstallation jdk) {
+        List<String> arguments = new ArrayList<>();
+        Optional<Integer> release = options.releaseMajor(test);
+        if (release.isPresent()) {
+            JavacCommands.releaseArgument(release.get(), jdk).ifPresent(value -> {
+                arguments.add("--release");
+                arguments.add(value);
+            });
+        } else if (options.declaresLanguageLevel(test)) {
+            options.sourceLevel(test).ifPresent(value -> {
+                arguments.add("-source");
+                arguments.add(value);
+            });
+            options.targetLevel(test).ifPresent(value -> {
+                arguments.add("-target");
+                arguments.add(value);
+            });
+        } else {
+            JavacCommands.releaseArgument(descriptor, jdk, List.of()).ifPresent(value -> {
+                arguments.add("--release");
+                arguments.add(value);
+            });
+        }
+        if (!options.processors().isEmpty()) {
+            arguments.add("-processor");
+            arguments.add(String.join(",", options.processors()));
+        }
+        if (options.parameters()) {
+            arguments.add("-parameters");
+        }
+        if (options.enablePreview()) {
+            arguments.add("--enable-preview");
+        }
+        arguments.addAll(options.compilerArgs());
+        return arguments;
     }
 
     private BuildResult delegate(JavaModule module, boolean test, Consumer<String> output,
@@ -724,8 +846,9 @@ public final class IncrementalJavaBuilder {
         List<String> inputs = new ArrayList<>();
         inputs.add(ModuleBuildState.FORMAT_VERSION);
         inputs.add(jdk == null ? "" : jdk.home().toString());
-        inputs.add(hashOfFile(descriptor.root().resolve(JavaProjectConventions.POM_FILE)));
-        inputs.add(hashOfFile(descriptor.root().resolve(".mvn/maven.config")));
+        Path buildRoot = descriptor.buildRootOf(module);
+        inputs.add(hashOfFile(buildRoot.resolve(JavaProjectConventions.POM_FILE)));
+        inputs.add(hashOfFile(buildRoot.resolve(".mvn/maven.config")));
         for (JavaModule dependency : WorkspaceModuleGraph.of(descriptor).buildOrderFor(module)) {
             inputs.add(dependency.root().toString());
             inputs.add(hashOfFile(dependency.root().resolve(JavaProjectConventions.POM_FILE)));

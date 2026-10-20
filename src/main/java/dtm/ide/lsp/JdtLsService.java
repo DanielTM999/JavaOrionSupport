@@ -153,6 +153,7 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
     private volatile Path launchedLombokAgentJar;
     private volatile boolean springSupport;
     private volatile List<Path> sourceRoots = List.of();
+    private volatile List<Path> configurationRoots = List.of();
     private final JdtDialect dialect = new JdtDialect(progressAggregator, this::publishProgress,
             () -> serviceReadyLatch);
     private volatile Map<String, Object> effectiveSettings = Map.of();
@@ -809,6 +810,15 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
 
     public void setSourceRoots(List<Path> roots) {
         this.sourceRoots = roots == null ? List.of() : roots.stream()
+                .filter(java.util.Objects::nonNull)
+                .map(root -> root.toAbsolutePath().normalize())
+                .distinct()
+                .toList();
+    }
+
+    @Override
+    public void setConfigurationRoots(List<Path> roots) {
+        this.configurationRoots = roots == null ? List.of() : roots.stream()
                 .filter(java.util.Objects::nonNull)
                 .map(root -> root.toAbsolutePath().normalize())
                 .distinct()
@@ -1633,8 +1643,11 @@ public class JdtLsService implements JavaLanguageServer, SourceGenerationSupport
                 || !lastProjectConfigurationUpdate.compareAndSet(previous, now)) {
             return;
         }
-        rpc.notify("java/projectConfigurationUpdate",
-                Map.of("uri", LspConversions.toUri(root)));
+        List<Path> targets = configurationRoots.isEmpty() ? List.of(root) : configurationRoots;
+        for (Path target : targets) {
+            rpc.notify("java/projectConfigurationUpdate",
+                    Map.of("uri", LspConversions.toUri(target)));
+        }
     }
 
     public void pathDeleted(Path deletedPath) {

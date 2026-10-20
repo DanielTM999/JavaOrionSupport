@@ -1,6 +1,7 @@
 package dtm.ide.lsp.api;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 public interface ProjectModelSupport {
@@ -10,6 +11,9 @@ public interface ProjectModelSupport {
     void resynchronizeAfterProjectUpdate();
 
     void projectConfigurationUpdate();
+
+    default void setConfigurationRoots(List<Path> roots) {
+    }
 
     String buildWorkspace(boolean fullBuild);
 

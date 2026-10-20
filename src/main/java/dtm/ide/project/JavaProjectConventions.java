@@ -9,9 +9,12 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -123,11 +126,16 @@ public final class JavaProjectConventions {
             List<Path> nested = discoverNestedProjectRoots(root);
             if (nested.size() > 1) {
                 modules = new ArrayList<>();
+                List<JavaProjectDescriptor> children = new ArrayList<>();
                 for (Path child : nested) {
                     JavaProjectDescriptor childDescriptor = describe(child);
                     if (childDescriptor != null) {
+                        children.add(childDescriptor);
                         modules.addAll(childDescriptor.modules());
                     }
+                }
+                if (!children.isEmpty() && children.stream().allMatch(JavaProjectDescriptor::isMaven)) {
+                    return mavenWorkspace(root, children);
                 }
                 kind = JavaProjectKind.JAVA_WORKSPACE;
             } else if (nested.size() == 1) {
@@ -149,6 +157,62 @@ public final class JavaProjectConventions {
         boolean spring = springBoot || detectSpring(root, modules);
         return new JavaProjectDescriptor(root, kind, modules, springBoot, spring,
                 detectJdkVersion(root, kind), findWrapper(root, kind));
+    }
+
+    private static JavaProjectDescriptor mavenWorkspace(Path root, List<JavaProjectDescriptor> children) {
+        Map<Path, JavaModule> unique = new LinkedHashMap<>();
+        for (JavaProjectDescriptor child : children) {
+            for (JavaModule module : child.modules()) {
+                unique.putIfAbsent(normalize(module.root()), module);
+            }
+        }
+        Map<Path, Set<Path>> aggregated = new LinkedHashMap<>();
+        for (JavaProjectDescriptor child : children) {
+            Set<Path> declared = new LinkedHashSet<>();
+            collectDeclaredModuleRoots(child.root(), declared);
+            declared.remove(child.root());
+            aggregated.put(child.root(), declared);
+        }
+        List<Path> buildRoots = new ArrayList<>();
+        for (JavaProjectDescriptor child : children) {
+            boolean coveredByAnother = aggregated.entrySet().stream()
+                    .filter(entry -> !entry.getKey().equals(child.root()))
+                    .anyMatch(entry -> entry.getValue().contains(child.root()));
+            if (!coveredByAnother) {
+                buildRoots.add(child.root());
+            }
+        }
+        List<JavaModule> modules = applyLayoutOverrides(root, List.copyOf(unique.values()));
+        Integer jdk = children.stream()
+                .map(JavaProjectDescriptor::jdkVersion)
+                .filter(Objects::nonNull)
+                .max(Integer::compare)
+                .orElse(null);
+        boolean springBoot = children.stream().anyMatch(JavaProjectDescriptor::springBoot);
+        boolean spring = springBoot || children.stream().anyMatch(JavaProjectDescriptor::spring);
+        return new JavaProjectDescriptor(root, JavaProjectKind.MAVEN_WORKSPACE, modules, springBoot, spring,
+                jdk, null, buildRoots);
+    }
+
+    private static void collectDeclaredModuleRoots(Path moduleRoot, Set<Path> collected) {
+        Path normalized = normalize(moduleRoot);
+        if (!collected.add(normalized)) {
+            return;
+        }
+        Path pom = normalized.resolve(POM_FILE);
+        if (!Files.isRegularFile(pom)) {
+            return;
+        }
+        for (String child : MavenPom.parse(pom).values("modules", "module")) {
+            if (child.isBlank() || child.contains("${")) {
+                continue;
+            }
+            Path childRoot = normalize(normalized.resolve(child.trim()));
+            if (childRoot.getFileName() != null && childRoot.getFileName().toString().endsWith(".xml")) {
+                childRoot = childRoot.getParent();
+            }
+            collectDeclaredModuleRoots(childRoot, collected);
+        }
     }
 
     private static List<JavaModule> applyLayoutOverrides(Path root, List<JavaModule> modules) {

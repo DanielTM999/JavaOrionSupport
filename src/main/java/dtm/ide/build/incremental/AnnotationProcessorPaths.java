@@ -88,7 +88,7 @@ final class AnnotationProcessorPaths {
         return paths;
     }
 
-    private static void collectProperties(Element project, Map<String, String> properties) {
+    static void collectProperties(Element project, Map<String, String> properties) {
         if (project == null) {
             return;
         }
@@ -111,7 +111,7 @@ final class AnnotationProcessorPaths {
         }
     }
 
-    private static String expand(String value, Map<String, String> properties) {
+    static String expand(String value, Map<String, String> properties) {
         String current = value;
         for (int depth = 0; depth < 5 && current.contains("${"); depth++) {
             Matcher matcher = PLACEHOLDER.matcher(current);
@@ -130,7 +130,7 @@ final class AnnotationProcessorPaths {
         return current;
     }
 
-    private static Element parse(Path pom) {
+    static Element parse(Path pom) {
         if (pom == null || !Files.isRegularFile(pom)) {
             return null;
         }
@@ -146,12 +146,12 @@ final class AnnotationProcessorPaths {
         }
     }
 
-    private static Element child(Element parent, String name) {
+    static Element child(Element parent, String name) {
         List<Element> found = children(parent, name);
         return found.isEmpty() ? null : found.getFirst();
     }
 
-    private static List<Element> children(Element parent, String name) {
+    static List<Element> children(Element parent, String name) {
         List<Element> found = new ArrayList<>();
         if (parent == null) {
             return found;
@@ -165,7 +165,7 @@ final class AnnotationProcessorPaths {
         return found;
     }
 
-    private static String text(Element element) {
+    static String text(Element element) {
         return element == null ? "" : element.getTextContent().trim();
     }
 }

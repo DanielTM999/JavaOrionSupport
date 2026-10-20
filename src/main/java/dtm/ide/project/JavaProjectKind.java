@@ -14,7 +14,9 @@ public enum JavaProjectKind {
 
     PLAIN_JAVA("plain-java"),
 
-    JAVA_WORKSPACE("java-workspace");
+    JAVA_WORKSPACE("java-workspace"),
+
+    MAVEN_WORKSPACE("maven-workspace");
 
     private final String key;
 
@@ -27,7 +29,7 @@ public enum JavaProjectKind {
     }
 
     public boolean isMaven() {
-        return this == MAVEN || this == MAVEN_MULTIMODULE;
+        return this == MAVEN || this == MAVEN_MULTIMODULE || this == MAVEN_WORKSPACE;
     }
 
     public boolean isGradle() {
@@ -35,7 +37,8 @@ public enum JavaProjectKind {
     }
 
     public boolean isMultiModule() {
-        return this == MAVEN_MULTIMODULE || this == GRADLE_MULTIPROJECT || this == JAVA_WORKSPACE;
+        return this == MAVEN_MULTIMODULE || this == GRADLE_MULTIPROJECT || this == JAVA_WORKSPACE
+                || this == MAVEN_WORKSPACE;
     }
 
     public boolean hasBuildTool() {

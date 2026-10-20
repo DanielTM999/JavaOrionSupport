@@ -3,6 +3,7 @@ package dtm.ide.build;
 import dtm.ide.deps.DependencyCoordinate;
 import dtm.ide.project.JavaModule;
 import dtm.ide.project.JavaProjectDescriptor;
+import dtm.ide.project.MavenWorkspaceAggregator;
 import dtm.ide.sdk.BuildToolProvisioner;
 import dtm.ide.sdk.DownloadProgressListener;
 import dtm.ide.sdk.JdkInstallation;
@@ -549,6 +550,12 @@ public final class MavenBuildService implements BuildSystem {
         command.add(maven.executable().toString());
         command.add("-B");
         command.add("-Dstyle.color=always");
+        if (descriptor.isMavenWorkspace()) {
+            Path aggregator = MavenWorkspaceAggregator.ensure(descriptor)
+                    .orElse(MavenWorkspaceAggregator.pomOf(descriptor.root()));
+            command.add("-f");
+            command.add(aggregator.toString());
+        }
         return command;
     }
 
@@ -565,6 +572,10 @@ public final class MavenBuildService implements BuildSystem {
     }
 
     private String relativeModulePath(JavaModule module) {
+        if (descriptor.isMavenWorkspace()) {
+            String groupId = module.groupId() == null ? "" : module.groupId();
+            return groupId + ":" + module.artifactId();
+        }
         try {
             String relative = descriptor.root().relativize(module.root()).toString();
             return relative.isBlank() ? "." : relative.replace('\\', '/');

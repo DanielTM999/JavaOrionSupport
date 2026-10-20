@@ -115,6 +115,66 @@ class MavenBuildServiceTest {
     }
 
     @Test
+    void aMavenWorkspaceRunsThroughItsAggregatorWithCoordinateSelectors() {
+        JavaModule engine = module(root.resolve("engine"));
+        JavaModule server = module(root.resolve("server"));
+        MavenBuildService service = service(workspace(engine, server));
+
+        List<String> command = service.buildCommand(BuildRequest.of(
+                BuildSystem.BuildAction.COMPILE, server).withModules(List.of(engine, server)));
+
+        Path aggregator = root.resolve(".orion/maven-workspace/pom.xml");
+        assertEquals(aggregator.toString(), command.get(command.indexOf("-f") + 1));
+        assertTrue(java.nio.file.Files.isRegularFile(aggregator));
+        assertEquals("com.example:engine,com.example:server", command.get(command.indexOf("-pl") + 1));
+        assertTrue(command.contains("-am"));
+    }
+
+    @Test
+    void aMavenWorkspaceResolvesTheClasspathInsideTheAggregatedReactor() {
+        JavaModule engine = module(root.resolve("engine"));
+        JavaModule server = module(root.resolve("server"));
+        MavenBuildService service = service(workspace(engine, server));
+
+        List<String> command = service.reactorClasspathCommand(server, "compile");
+
+        assertEquals(root.resolve(".orion/maven-workspace/pom.xml").toString(),
+                command.get(command.indexOf("-f") + 1));
+        assertEquals("com.example:server", command.get(command.indexOf("-pl") + 1));
+        assertTrue(command.contains("-am"));
+    }
+
+    @Test
+    void aWorkspaceSiblingIsResolvedThroughTheReactorAndSubstitutedByItsClasses() throws Exception {
+        JavaModule engine = module(root.resolve("engine"));
+        JavaModule server = module(root.resolve("server"));
+        Path engineJar = root.resolve("repo/com/example/engine/1.0/engine-1.0.jar");
+        java.nio.file.Files.createDirectories(engineJar.getParent());
+        java.nio.file.Files.writeString(engineJar, "");
+        List<List<String>> commands = new java.util.ArrayList<>();
+        MavenBuildService service = service(workspace(engine, server), (command, directory, env, out) -> {
+            commands.add(command);
+            String output = command.stream().filter(arg -> arg.startsWith("-Dmdep.outputFile="))
+                    .findFirst().orElseThrow().substring("-Dmdep.outputFile=".length());
+            try {
+                Path file = server.root().resolve(output);
+                java.nio.file.Files.createDirectories(file.getParent());
+                java.nio.file.Files.writeString(file, engineJar.toString());
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+            return 0;
+        });
+
+        String classpath = service.resolveCompileClasspath(server).orElseThrow();
+
+        assertEquals(1, commands.size());
+        assertTrue(commands.getFirst().contains("-f"));
+        assertTrue(classpath.contains(engine.outputDir().toString()));
+        assertFalse(classpath.contains(engineJar.toString()));
+    }
+
+    @Test
     void selectedDependencyRefreshUsesTargetedPurgeAndForcesResolution() {
         MavenBuildService service = service(descriptor(rootModule()));
         List<String> arguments = service.dependencyRefreshArguments(
@@ -357,6 +417,21 @@ class MavenBuildServiceTest {
     private JavaProjectDescriptor descriptor(JavaModule... modules) {
         return new JavaProjectDescriptor(root, JavaProjectKind.MAVEN, List.of(modules), true,
                 false, 21, null);
+    }
+
+    private JavaProjectDescriptor workspace(JavaModule... modules) {
+        for (JavaModule module : modules) {
+            try {
+                java.nio.file.Files.createDirectories(module.root());
+                java.nio.file.Files.writeString(module.root().resolve("pom.xml"),
+                        "<project><groupId>com.example</groupId><artifactId>" + module.artifactId()
+                                + "</artifactId><version>1.0</version></project>");
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        }
+        return new JavaProjectDescriptor(root, JavaProjectKind.MAVEN_WORKSPACE, List.of(modules), false,
+                false, 21, null, java.util.Arrays.stream(modules).map(JavaModule::root).toList());
     }
 
     private JavaModule rootModule() {

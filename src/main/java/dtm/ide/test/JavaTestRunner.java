@@ -122,7 +122,7 @@ public class JavaTestRunner {
                 || module == null || !descriptor.isMaven() || descriptor.isGradle()
                 || !JUnitPlatformLauncher.selectable(tests)
                 || JUnitPlatformLauncher.surefireCustomized(module.root().resolve("pom.xml"),
-                        descriptor.root().resolve("pom.xml"))) {
+                        descriptor.buildRootOf(module).resolve("pom.xml"))) {
             return Optional.empty();
         }
         JdkInstallation jdk = jdkSupplier.get();

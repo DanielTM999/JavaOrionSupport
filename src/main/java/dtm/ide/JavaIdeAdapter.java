@@ -134,6 +134,7 @@ import dtm.ide.run.MainClassScanner;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
 import dtm.ide.project.JavaProjectSources;
+import dtm.ide.project.MavenWorkspaceAggregator;
 import dtm.ide.refactor.JavaPathTransferRefactoring;
 import dtm.ide.sdk.BuildToolProvisioner;
 import dtm.ide.sdk.DownloadProgressListener;
@@ -750,6 +751,7 @@ public class JavaIdeAdapter extends IdeAdapter {
     }
 
     private boolean publishDescriptor(long ticket, Path root, JavaProjectDescriptor described) {
+        MavenWorkspaceAggregator.ensure(described);
         List<RunConfigurationData> configurations = buildStaticRunConfigurations(described);
         synchronized (lifecycleLock) {
             if (!current(ticket, root)) {
@@ -1381,17 +1383,27 @@ public class JavaIdeAdapter extends IdeAdapter {
         if (mainClasses.isEmpty()) {
             return List.of();
         }
-        MainClassScanner.MainClass entryPoint = mainClasses.getFirst();
+        if (!current.isMavenWorkspace()) {
+            return List.of(runConfigurationOf(mainClasses.getFirst()));
+        }
+        Map<Path, MainClassScanner.MainClass> firstByProject = new java.util.LinkedHashMap<>();
+        for (MainClassScanner.MainClass mainClass : mainClasses) {
+            firstByProject.putIfAbsent(current.buildRootOf(mainClass.module()), mainClass);
+        }
+        return firstByProject.values().stream().map(JavaIdeAdapter::runConfigurationOf).toList();
+    }
+
+    private static RunConfigurationData runConfigurationOf(MainClassScanner.MainClass entryPoint) {
         Map<String, Object> properties = new java.util.LinkedHashMap<>();
         properties.put(JavaRunSupport.PROPERTY_MAIN_CLASS, entryPoint.qualifiedName());
         properties.put(JavaRunSupport.PROPERTY_MODULE, entryPoint.module().name());
 
-        return List.of(RunConfigurationData.builder()
+        return RunConfigurationData.builder()
                 .type(entryPoint.springBoot() ? JavaRunSupport.TYPE_SPRING_BOOT
                         : JavaRunSupport.TYPE_RUN)
                 .title(entryPoint.simpleName())
                 .properties(properties)
-                .build());
+                .build();
     }
 
     @Override

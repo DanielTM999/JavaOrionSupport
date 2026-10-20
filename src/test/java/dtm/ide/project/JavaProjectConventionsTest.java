@@ -220,6 +220,81 @@ class JavaProjectConventionsTest {
     }
 
     @Test
+    void siblingMavenProjectsBecomeAMavenWorkspace() throws IOException {
+        write(root.resolve("engine/pom.xml"), """
+                <project><groupId>dtm.manager</groupId><artifactId>engine</artifactId><version>2.0.0</version>
+                <properties><maven.compiler.release>17</maven.compiler.release></properties></project>""");
+        write(root.resolve("server/pom.xml"), """
+                <project><groupId>dtm.manager</groupId><artifactId>server</artifactId><version>1.0.0</version>
+                <properties><java.version>21</java.version></properties>
+                <dependencies><dependency><groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter</artifactId></dependency></dependencies></project>""");
+
+        JavaProjectDescriptor descriptor = JavaProjectConventions.describe(root);
+
+        assertEquals(JavaProjectKind.MAVEN_WORKSPACE, descriptor.kind());
+        assertTrue(descriptor.isMaven());
+        assertEquals(root, descriptor.root());
+        assertEquals(java.util.List.of(root.resolve("engine"), root.resolve("server")), descriptor.buildRoots());
+        assertEquals(21, descriptor.jdkVersion());
+        assertTrue(descriptor.springBoot());
+        assertNull(descriptor.wrapper());
+        JavaModule server = descriptor.moduleOf(root.resolve("server/src/main/java/A.java")).orElseThrow();
+        assertEquals(root.resolve("server"), descriptor.buildRootOf(server));
+    }
+
+    @Test
+    void aWorkspaceChildWithItsOwnModulesKeepsThemUnderItsBuildRoot() throws IOException {
+        write(root.resolve("platform/pom.xml"), """
+                <project><groupId>g</groupId><artifactId>platform</artifactId><version>1</version>
+                <packaging>pom</packaging><modules><module>core</module></modules></project>""");
+        write(root.resolve("platform/core/pom.xml"), """
+                <project><parent><groupId>g</groupId><artifactId>platform</artifactId><version>1</version></parent>
+                <artifactId>core</artifactId></project>""");
+        write(root.resolve("app/pom.xml"), "<project><groupId>g</groupId><artifactId>app</artifactId><version>1</version></project>");
+
+        JavaProjectDescriptor descriptor = JavaProjectConventions.describe(root);
+
+        assertEquals(JavaProjectKind.MAVEN_WORKSPACE, descriptor.kind());
+        assertEquals(3, descriptor.modules().size());
+        JavaModule core = descriptor.moduleOf(root.resolve("platform/core/src/main/java/A.java")).orElseThrow();
+        assertEquals(root.resolve("platform"), descriptor.buildRootOf(core));
+    }
+
+    @Test
+    void aSiblingAlreadyAggregatedByAnotherIsNotABuildRootOfItsOwn() throws IOException {
+        write(root.resolve("parent/pom.xml"), """
+                <project><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>
+                <packaging>pom</packaging><modules><module>../lib</module></modules></project>""");
+        write(root.resolve("lib/pom.xml"), """
+                <project><parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>
+                <relativePath>../parent</relativePath></parent><artifactId>lib</artifactId></project>""");
+
+        JavaProjectDescriptor descriptor = JavaProjectConventions.describe(root);
+
+        assertEquals(JavaProjectKind.MAVEN_WORKSPACE, descriptor.kind());
+        assertEquals(java.util.List.of(root.resolve("parent")), descriptor.buildRoots());
+        assertEquals(2, descriptor.modules().size());
+    }
+
+    @Test
+    void aRealMultimoduleProjectIsNeverTurnedIntoAWorkspace() throws IOException {
+        write(root.resolve("pom.xml"), """
+                <project><groupId>g</groupId><artifactId>root</artifactId><version>1</version>
+                <packaging>pom</packaging><modules><module>a</module><module>b</module></modules></project>""");
+        write(root.resolve("a/pom.xml"), "<project><artifactId>a</artifactId></project>");
+        write(root.resolve("b/pom.xml"), "<project><artifactId>b</artifactId></project>");
+
+        JavaProjectDescriptor descriptor = JavaProjectConventions.describe(root);
+
+        assertEquals(JavaProjectKind.MAVEN_MULTIMODULE, descriptor.kind());
+        assertFalse(descriptor.isMavenWorkspace());
+        assertTrue(descriptor.buildRoots().isEmpty());
+        descriptor.modules().forEach(module -> assertEquals(root, descriptor.buildRootOf(module)));
+        assertEquals(java.util.List.of(root), descriptor.projectRoots());
+    }
+
+    @Test
     void unwrapsWorkspaceWithASingleNestedProject() throws IOException {
         write(root.resolve("alpha/pom.xml"), "<project><artifactId>alpha</artifactId></project>");
 

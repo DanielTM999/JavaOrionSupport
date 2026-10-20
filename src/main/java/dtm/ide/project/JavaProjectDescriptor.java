@@ -12,7 +12,8 @@ public record JavaProjectDescriptor(
         boolean springBoot,
         boolean spring,
         Integer jdkVersion,
-        Path wrapper
+        Path wrapper,
+        List<Path> buildRoots
 ) {
 
     public JavaProjectDescriptor {
@@ -20,6 +21,13 @@ public record JavaProjectDescriptor(
         Objects.requireNonNull(kind, "kind");
         root = root.toAbsolutePath().normalize();
         modules = modules == null ? List.of() : List.copyOf(modules);
+        buildRoots = buildRoots == null ? List.of()
+                : buildRoots.stream().map(path -> path.toAbsolutePath().normalize()).toList();
+    }
+
+    public JavaProjectDescriptor(Path root, JavaProjectKind kind, List<JavaModule> modules,
+                                 boolean springBoot, boolean spring, Integer jdkVersion, Path wrapper) {
+        this(root, kind, modules, springBoot, spring, jdkVersion, wrapper, List.of());
     }
 
     public JavaModule rootModule() {
@@ -57,5 +65,24 @@ public record JavaProjectDescriptor(
 
     public boolean isGradle() {
         return kind.isGradle();
+    }
+
+    public boolean isMavenWorkspace() {
+        return kind == JavaProjectKind.MAVEN_WORKSPACE;
+    }
+
+    public Path buildRootOf(JavaModule module) {
+        if (!isMavenWorkspace() || module == null) {
+            return root;
+        }
+        Path moduleRoot = module.root().toAbsolutePath().normalize();
+        return buildRoots.stream()
+                .filter(moduleRoot::startsWith)
+                .max((a, b) -> Integer.compare(a.getNameCount(), b.getNameCount()))
+                .orElse(moduleRoot);
+    }
+
+    public List<Path> projectRoots() {
+        return isMavenWorkspace() && !buildRoots.isEmpty() ? buildRoots : List.of(root);
     }
 }

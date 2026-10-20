@@ -29,10 +29,13 @@ public final class JavacCommands {
             }
         }
         Optional<Integer> requested = descriptor == null ? Optional.empty() : descriptor.jdkMajor();
-        if (requested.isEmpty() || jdk == null) {
+        return releaseArgument(requested.orElse(null), jdk);
+    }
+
+    public static Optional<String> releaseArgument(Integer major, JdkInstallation jdk) {
+        if (major == null || jdk == null) {
             return Optional.empty();
         }
-        int major = requested.get();
         if (major < MIN_RELEASE || major > jdk.major()) {
             return Optional.empty();
         }

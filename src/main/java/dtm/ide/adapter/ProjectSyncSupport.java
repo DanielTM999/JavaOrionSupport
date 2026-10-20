@@ -5,10 +5,12 @@ import dtm.ide.lsp.api.JavaLanguageServer;
 import dtm.ide.lsp.api.ProjectModelSupport;
 import dtm.ide.project.JavaProjectConventions;
 import dtm.ide.project.JavaProjectDescriptor;
+import dtm.ide.project.MavenWorkspaceAggregator;
 import dtm.ide.ui.JavaBuildToolsPanel;
 import lombok.extern.slf4j.Slf4j;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -96,6 +98,7 @@ public final class ProjectSyncSupport {
                     return;
                 }
                 if (reloaded != null) {
+                    MavenWorkspaceAggregator.ensure(reloaded);
                     host.descriptor(reloaded);
                 }
                 if (jdkRequirementChanged(previous, reloaded)) {
@@ -114,9 +117,10 @@ public final class ProjectSyncSupport {
                     return;
                 }
                 ProjectModelSupport model = lsp.extension(ProjectModelSupport.class);
+                LanguageServerManager.applyConfigurationRoots(lsp, host.descriptor());
                 SyncWork work = new SyncWork();
                 syncWork.set(work);
-                if (model == null || !model.updateProjectConfiguration(root)) {
+                if (model == null || !updateProjectConfiguration(model, host.descriptor(), root)) {
                     syncWork.compareAndSet(work, null);
                     host.clearCaches();
                     return;
@@ -140,6 +144,17 @@ public final class ProjectSyncSupport {
                 }
             }
         });
+    }
+
+    static boolean updateProjectConfiguration(ProjectModelSupport model, JavaProjectDescriptor descriptor, Path root) {
+        if (descriptor == null || !descriptor.isMavenWorkspace()) {
+            return model.updateProjectConfiguration(root);
+        }
+        boolean updated = true;
+        for (Path projectRoot : descriptor.projectRoots()) {
+            updated &= model.updateProjectConfiguration(projectRoot);
+        }
+        return updated;
     }
 
     public static boolean jdkRequirementChanged(JavaProjectDescriptor previous, JavaProjectDescriptor reloaded) {
@@ -213,10 +228,16 @@ public final class ProjectSyncSupport {
         host.background().schedule(() -> {
             Path root = host.projectRoot();
             if (root == null || session != host.lifecycleTicket() || ticket != automaticSyncTicket.get()) return;
-            if (host.descriptor() != null && host.descriptor().isMaven()) {
-                if (!validMavenReactor(root.resolve("pom.xml"), new java.util.HashSet<>())) {
-                    host.setStatusBarText("Java: corrija o POM; a sincronizacao sera retomada automaticamente");
-                    return;
+            JavaProjectDescriptor descriptor = host.descriptor();
+            if (descriptor != null && descriptor.isMaven()) {
+                List<Path> poms = descriptor.isMavenWorkspace()
+                        ? descriptor.projectRoots().stream().map(projectRoot -> projectRoot.resolve("pom.xml")).toList()
+                        : List.of(root.resolve("pom.xml"));
+                for (Path pom : poms) {
+                    if (!validMavenReactor(pom, new java.util.HashSet<>())) {
+                        host.setStatusBarText("Java: corrija o POM; a sincronizacao sera retomada automaticamente");
+                        return;
+                    }
                 }
             }
             SwingUtilities.invokeLater(this::syncProject);

@@ -45,6 +45,122 @@ class IncrementalJavaBuilderTest {
         pom("web");
         Files.writeString(rootPom(), "<project/>", StandardCharsets.UTF_8);
         Files.createDirectories(module().outputDir());
+        IncrementalJavaBuilder.forgetConfirmedFailures();
+    }
+
+    @Test
+    void javacErrorsThatMavenDoesNotReproduceAreNotPublished() throws Exception {
+        Path lojista = source("Lojista.java", "package a; public class Lojista {}");
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+        Files.writeString(lojista, "package a; public class Lojista { int x; }", StandardCharsets.UTF_8);
+
+        BuildResult result = failingJavac(lojista).build(module(), false, line -> { });
+
+        assertTrue(result.successful());
+        assertTrue(result.diagnostics().isEmpty());
+        assertEquals(1, build.requests.size());
+        assertEquals(List.of(module()), build.requests.getFirst().selection());
+        assertTrue(build.requests.getFirst().alsoMake());
+        build.requests.clear();
+        javacCalls.clear();
+
+        BuildResult unchanged = builder().build(module(), false, line -> { });
+
+        assertTrue(unchanged.successful());
+        assertTrue(build.requests.isEmpty());
+        assertTrue(javacCalls.isEmpty());
+    }
+
+    @Test
+    void javacErrorsConfirmedByMavenArePublishedAndNotRecheckedForTheSameFailure() throws Exception {
+        Path lojista = source("Lojista.java", "package a; public class Lojista {}");
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+        Files.writeString(lojista, "package a; public class Lojista { int x }", StandardCharsets.UTF_8);
+        build.exitCode = 1;
+
+        BuildResult first = failingJavac(lojista).build(module(), false, line -> { });
+        BuildResult second = failingJavac(lojista).build(module(), false, line -> { });
+
+        assertFalse(first.successful());
+        assertEquals(1, first.diagnostics().size());
+        assertEquals(lojista, first.diagnostics().getFirst().file());
+        assertFalse(second.successful());
+        assertEquals(1, second.diagnostics().size());
+        assertEquals(1, build.requests.size());
+    }
+
+    @Test
+    void aCancelledBuildDoesNotFallBackToMaven() throws Exception {
+        Path lojista = source("Lojista.java", "package a; public class Lojista {}");
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+        Files.writeString(lojista, "package a; public class Lojista { int x; }", StandardCharsets.UTF_8);
+        java.util.concurrent.atomic.AtomicReference<IncrementalJavaBuilder> self =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        IncrementalJavaBuilder cancelling = builder(descriptor()).withJavac((command, directory, environment, output) -> {
+            self.get().cancel();
+            return 1;
+        });
+        self.set(cancelling);
+
+        BuildResult result = cancelling.build(module(), false, line -> { });
+
+        assertFalse(result.successful());
+        assertTrue(build.requests.isEmpty());
+    }
+
+    @Test
+    void javacUsesTheEncodingAndLanguageLevelDeclaredByTheModule() throws Exception {
+        Files.writeString(rootPom(), "<project><properties><maven.compiler.release>17</maven.compiler.release>"
+                + "</properties></project>", StandardCharsets.UTF_8);
+        Path lojista = source("Lojista.java", "package a; public class Lojista {}");
+        builder().build(module(), false, line -> { });
+        Files.writeString(pomFile(), "<project><groupId>com.example</groupId><artifactId>web</artifactId>"
+                + "<properties><project.build.sourceEncoding>ISO-8859-1</project.build.sourceEncoding>"
+                + "<release.java>21</release.java></properties><build><plugins><plugin>"
+                + "<artifactId>maven-compiler-plugin</artifactId><configuration><release>${release.java}</release>"
+                + "<parameters>true</parameters><compilerArgs><arg>--add-exports</arg>"
+                + "<arg>java.base/sun.nio.ch=ALL-UNNAMED</arg></compilerArgs></configuration></plugin></plugins>"
+                + "</build></project>", StandardCharsets.UTF_8);
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+        javacCalls.clear();
+        Files.writeString(lojista, "package a; public class Lojista { int x; }", StandardCharsets.UTF_8);
+
+        builder().build(module(), false, line -> { });
+
+        assertTrue(build.requests.isEmpty());
+        List<String> command = javacCalls.getFirst();
+        assertEquals("ISO-8859-1", command.get(command.indexOf("-encoding") + 1));
+        assertEquals("21", command.get(command.indexOf("--release") + 1));
+        assertTrue(command.contains("-parameters"));
+        assertEquals("java.base/sun.nio.ch=ALL-UNNAMED", command.get(command.indexOf("--add-exports") + 1));
+    }
+
+    @Test
+    void aCompilerJavacCannotReproduceKeepsTheModuleOnMaven() throws Exception {
+        Files.writeString(pomFile(), "<project><groupId>com.example</groupId><artifactId>web</artifactId>"
+                + "<build><plugins><plugin><artifactId>maven-compiler-plugin</artifactId><configuration>"
+                + "<compilerId>eclipse</compilerId></configuration></plugin></plugins></build></project>",
+                StandardCharsets.UTF_8);
+        source("Lojista.java", "package a; public class Lojista {}");
+        builder().build(module(), false, line -> { });
+        build.requests.clear();
+
+        builder().build(module(), false, line -> { });
+
+        assertEquals(1, build.requests.size());
+        assertTrue(javacCalls.isEmpty());
+    }
+
+    private IncrementalJavaBuilder failingJavac(Path source) {
+        return builder(descriptor()).withJavac((command, directory, environment, output) -> {
+            javacCalls.add(List.copyOf(command));
+            output.accept(source + ":1: error: ';' expected");
+            return 1;
+        });
     }
 
     @Test
@@ -704,6 +820,7 @@ class IncrementalJavaBuilderTest {
         private final List<BuildRequest> requests = new ArrayList<>();
         private final List<List<String>> toolCommands = new ArrayList<>();
         private String classpath = "classpath-resolvido";
+        private int exitCode;
         private int classpathResolutions;
         private Runnable duringBuild = () -> {
         };
@@ -731,7 +848,7 @@ class IncrementalJavaBuilderTest {
                 } catch (Exception ignored) {
                 }
             }
-            return new BuildResult(0, List.of(), Duration.ZERO, "maven");
+            return new BuildResult(exitCode, List.of(), Duration.ZERO, "maven");
         }
 
         private void writeClassOutputs(JavaModule module) throws Exception {

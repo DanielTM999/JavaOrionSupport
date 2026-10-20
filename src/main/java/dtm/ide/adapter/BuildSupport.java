@@ -81,6 +81,7 @@ public final class BuildSupport {
             if (!host.isCurrent(ticket, root)) {
                 return;
             }
+            logStartupBuild(current, result);
             publishBuildDiagnostics(result, true);
             host.setStatusBarText(result.summary().isEmpty() ? "" : "Java: " + result.summary());
         } finally {
@@ -118,6 +119,29 @@ public final class BuildSupport {
             }
             lsp.awaitReady(STARTUP_BUILD_LSP_POLL_MS);
         }
+    }
+
+    private static void logStartupBuild(JavaProjectDescriptor current, BuildResult result) {
+        if (result == null) {
+            return;
+        }
+        if (result.successful()) {
+            log.info("Build inicial de {} concluido em {} ms via {}", current.root(), result.duration().toMillis(),
+                    commandName(result.command()));
+            return;
+        }
+        log.info("Build inicial de {} falhou em {} ms com {} diagnostico(s) via {}: {}", current.root(),
+                result.duration().toMillis(), result.diagnostics().size(), commandName(result.command()),
+                IncrementalJavaBuilder.summaryOf(result.diagnostics()));
+    }
+
+    private static String commandName(String command) {
+        if (command == null || command.isBlank()) {
+            return "";
+        }
+        String first = command.trim().split("\\s+")[0];
+        int separator = Math.max(first.lastIndexOf('/'), first.lastIndexOf('\\'));
+        return separator < 0 ? first : first.substring(separator + 1);
     }
 
     private BuildResult runStartupBuild(JavaProjectDescriptor current, BuildSystem build,
