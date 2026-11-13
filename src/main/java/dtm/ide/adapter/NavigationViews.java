@@ -3,6 +3,7 @@ package dtm.ide.adapter;
 import dtm.ide.JavaEditorRegistry;
 import dtm.ide.api.extension.editor.EmbeddedCodeEditorSettings;
 import dtm.ide.api.project.editor.IdeEditorContext;
+import dtm.ide.editor.theme.JavaEditorTheme;
 import dtm.ide.lsp.UsagesPopup;
 import dtm.ide.lsp.api.ClassFileSupport;
 import dtm.ide.lsp.api.JavaLanguageServer;
@@ -15,10 +16,12 @@ import dtm.stools.component.panels.editor.code.hover.HoverDocumentationProvider;
 import dtm.stools.component.panels.editor.code.hover.HoverInfo;
 import dtm.stools.component.panels.editor.code.prototype.folding.FoldRule;
 import dtm.stools.component.panels.editor.code.provider.TokenizerCodeEditorProvider;
+import dtm.stools.component.panels.editor.code.provider.TokenColorProvider;
 import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenClassifierProvider;
 import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenColorProvider;
 import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenRenderProvider;
 
+import java.awt.Color;
 import java.awt.Point;
 import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
@@ -242,8 +245,14 @@ public final class NavigationViews {
             if (editor.getTokenClassifierProvider() == null) {
                 editor.addProvider(new DefaultTokenClassifierProvider());
             }
-            if (editor.getTokenColorProvider() == null) {
-                editor.addProvider(new DefaultTokenColorProvider());
+            if (editor.getTokenColorProvider() == null
+                    || editor.getTokenColorProvider() instanceof DefaultTokenColorProvider) {
+                JavaEditorTheme theme = new JavaEditorTheme();
+                DefaultTokenColorProvider fallback = new DefaultTokenColorProvider();
+                editor.addProvider((TokenColorProvider) type -> {
+                    Color color = theme.getColorByToken(type);
+                    return color == null ? fallback.getColor(type) : color;
+                });
             }
             if (editor.getTokenRenderProvider() == null) {
                 editor.addProvider(new DefaultTokenRenderProvider());

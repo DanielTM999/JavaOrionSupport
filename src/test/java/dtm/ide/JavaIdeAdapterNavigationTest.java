@@ -5,9 +5,12 @@ import dtm.ide.adapter.NavigationSupport;
 import dtm.ide.adapter.NavigationViews;
 import dtm.ide.api.project.editor.IdeEditorContext;
 import dtm.ide.api.project.editor.IdeWordClickContext;
+import dtm.ide.editor.theme.JavaEditorTheme;
+import dtm.ide.editor.tokenizer.JavaTokenizerProvider;
 import dtm.stools.component.panels.editor.code.CodeEditor;
 import dtm.stools.component.panels.editor.code.hover.HoverInfo;
 import dtm.stools.component.panels.editor.code.provider.TokenRenderCodeEditorProvider;
+import dtm.stools.component.panels.editor.code.provider.TokenColorProvider;
 import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenClassifierProvider;
 import dtm.stools.component.panels.editor.code.provider.def.DefaultTokenColorProvider;
 import org.junit.jupiter.api.Test;
@@ -16,6 +19,7 @@ import javax.swing.JFrame;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.GraphicsEnvironment;
 import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
@@ -207,13 +211,33 @@ class JavaIdeAdapterNavigationTest {
     @Test
     void decompiledClassEditorKeepsTheProvidersTheIdeAlreadyInstalled() {
         CodeEditor editor = new CodeEditor();
-        DefaultTokenColorProvider colors = new DefaultTokenColorProvider();
+        TokenColorProvider colors = type -> Color.ORANGE;
         editor.addProvider(colors);
 
         NavigationViews.applyClassFileEditorProviders(editor, Path.of("Demo.java"),
                 new JavaEditorRegistry(), context -> null);
 
         assertSame(colors, editor.getTokenColorProvider());
+    }
+
+    @Test
+    void decompiledClassEditorUsesJavaColorsInsteadOfTheGenericPalette() {
+        CodeEditor editor = new CodeEditor();
+        editor.addProvider(new DefaultTokenColorProvider());
+        editor.setText("/** Documentation. */ interface Demo { Path resolve(String other); }");
+
+        NavigationViews.applyClassFileEditorProviders(editor, Path.of("Demo.java"),
+                new JavaEditorRegistry(), context -> null);
+
+        JavaEditorTheme theme = new JavaEditorTheme();
+        var tokens = editor.getTokenizerProvider().tokenize(editor.getText(),
+                editor.getTokenClassifierProvider());
+        for (String type : java.util.List.of(JavaTokenizerProvider.TOKEN_JAVADOC,
+                JavaTokenizerProvider.TOKEN_TYPE, JavaTokenizerProvider.TOKEN_METHOD)) {
+            assertTrue(tokens.stream().anyMatch(token -> type.equals(token.getType())), type);
+            assertEquals(theme.getColorByToken(type), editor.getTokenColorProvider().getColor(type), type);
+        }
+        assertNotNull(editor.getTokenColorProvider().getColor("UNKNOWN_CUSTOM_TOKEN"));
     }
 
     @Test
